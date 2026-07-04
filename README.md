@@ -1,12 +1,12 @@
-﻿# PaddleDock
+﻿# PaddleDoc
 
-PaddleDock is a document processing platform powered by PaddleOCR that converts PDFs, Office files, and images into structured Markdown for RAG pipelines.
+PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, and images into structured Markdown for RAG pipelines.
 
 It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
 
-## Why PaddleDock
+## Why PaddleDoc
 
-Managing OCR and document normalization at scale gets messy fast. PaddleDock gives you one workflow for ingestion, extraction, quality scoring, and retrieval-ready output.
+Managing OCR and document normalization at scale gets messy fast. PaddleDoc gives you one workflow for ingestion, extraction, quality scoring, and retrieval-ready output.
 
 - RAG-first Markdown output with consistent structure
 - Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
@@ -23,7 +23,7 @@ Choose your deployment mode:
 | Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
 | Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
-| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledock ./charts/paddledock -n paddledock --create-namespace` |
+| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install PaddleDoc ./charts/PaddleDoc -n PaddleDoc --create-namespace` |
 
 ### Standalone NAS (No Kubernetes)
 
@@ -36,10 +36,10 @@ docker compose -f docker-compose.nas.yml up -d
 Before first production run, set strong credentials/environment values:
 
 ```bash
-POSTGRES_USER=paddledock
+POSTGRES_USER=PaddleDoc
 POSTGRES_PASSWORD=change-this
-POSTGRES_DB=paddledock
-PADDLEDOCK_TAG=latest
+POSTGRES_DB=PaddleDoc
+PaddleDoc_TAG=latest
 NEXT_PUBLIC_API_URL=http://NAS_IP:8000
 ```
 
@@ -64,18 +64,18 @@ Endpoints:
 Quick install from local chart:
 
 ```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace
+helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+  --namespace PaddleDoc --create-namespace
 ```
 
 Install from GHCR OCI chart:
 
 ```bash
-helm install paddledock oci://ghcr.io/bl0rb/charts/paddledock --version 0.2.0 \
-  --namespace paddledock --create-namespace
+helm install PaddleDoc oci://ghcr.io/bl0rb/charts/PaddleDoc --version 0.2.0 \
+  --namespace PaddleDoc --create-namespace
 ```
 
-More chart options and examples are in [charts/paddledock/README.md](charts/paddledock/README.md).
+More chart options and examples are in [charts/PaddleDoc/README.md](charts/PaddleDoc/README.md).
 
 ## Core Features
 
@@ -164,7 +164,7 @@ Use HTTP Request nodes with a simple upload -> poll -> fetch pattern.
 flowchart LR
    A[Document Source\nPDF DOCX PPTX XLSX PNG JPG] --> B[n8n Trigger\nWebhook / Schedule / Drive Watch]
    B --> C[n8n HTTP Request\nPOST /api/v1/upload]
-   C --> D[PaddleDock Queue\nCelery + Worker]
+   C --> D[PaddleDoc Queue\nCelery + Worker]
    D --> E[PaddleOCR Processing\nStructured Markdown Output]
    E --> F[n8n Poll Loop\nGET /api/v1/jobs/job-id]
    F --> G[n8n Fetch Result\nGET preview or download]
@@ -174,7 +174,7 @@ flowchart LR
 
 n8n URL choice:
 
-- n8n inside Docker with PaddleDock: `http://backend:8000`
+- n8n inside Docker with PaddleDoc: `http://backend:8000`
 - n8n on host machine: `http://localhost:8000`
 
 ## Deployment and Runtime Notes
@@ -233,7 +233,7 @@ Memory-constrained baseline:
 
 ## OpenAI-Compatible Vision Profile
 
-PaddleDock includes `openai_vision`, which sends each page image to an OpenAI-compatible Chat Completions endpoint and assembles markdown output.
+PaddleDoc includes `openai_vision`, which sends each page image to an OpenAI-compatible Chat Completions endpoint and assembles markdown output.
 
 Environment variables:
 
@@ -266,9 +266,9 @@ docker compose up -d --no-deps backend worker
 
 Published images:
 
-- `ghcr.io/bl0rb/paddledock-backend`
-- `ghcr.io/bl0rb/paddledock-worker`
-- `ghcr.io/bl0rb/paddledock-frontend`
+- `ghcr.io/bl0rb/PaddleDoc-backend`
+- `ghcr.io/bl0rb/PaddleDoc-worker`
+- `ghcr.io/bl0rb/PaddleDoc-frontend`
 
 ### Image publishing (automated)
 
