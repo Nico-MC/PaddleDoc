@@ -88,9 +88,40 @@ export function ProcessingFlow() {
   };
 
   useEffect(() => {
-    void refreshFolderOptions();
-    void refreshPaddleSettings();
-    void refreshPaddleCapabilities();
+    let cancelled = false;
+
+    const loadInitialData = async () => {
+      const [jobsResponse, settingsResponse, capabilitiesResponse] = await Promise.all([
+        fetch(`${API}/api/v1/jobs`, { cache: 'no-store' }),
+        fetch(`${API}/api/v1/paddle/settings`, { cache: 'no-store' }),
+        fetch(`${API}/api/v1/paddle/capabilities`, { cache: 'no-store' }),
+      ]);
+
+      if (!cancelled && jobsResponse.ok) {
+        const payload = await jobsResponse.json();
+        const items = (payload.items ?? []) as Job[];
+        setFolderOptions((prev) => buildFolderOptions(prev, items));
+      }
+
+      if (!cancelled && settingsResponse.ok) {
+        const payload = await settingsResponse.json();
+        setSettings({
+          default_profile: payload.default_profile,
+          timeout_seconds: payload.timeout_seconds,
+        });
+        setSelectedProfileId(payload.default_profile ?? 'ppocrv6_tiny');
+      }
+
+      if (!cancelled && capabilitiesResponse.ok) {
+        const payload = await capabilitiesResponse.json();
+        setCapabilities({ profiles: payload.profiles ?? [] });
+      }
+    };
+
+    void loadInitialData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const uploadSingle = async (file: File) => {
