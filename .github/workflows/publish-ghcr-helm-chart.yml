@@ -50,13 +50,17 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} --username "${{ github.actor }}" --password-stdin
 
       - name: Package chart
+        id: package
         shell: bash
         run: |
-          helm package "${{ env.CHART_PATH }}" \
+          PACKAGE_OUTPUT=$(helm package "${{ env.CHART_PATH }}" \
             --version "${{ steps.version.outputs.value }}" \
-            --app-version "${{ steps.version.outputs.value }}"
+            --app-version "${{ steps.version.outputs.value }}")
+          echo "$PACKAGE_OUTPUT"
+          PACKAGE_FILE=$(echo "$PACKAGE_OUTPUT" | sed -n 's/^Successfully packaged chart and saved it to: //p' | xargs -n1 basename)
+          echo "file=${PACKAGE_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Push chart to GHCR OCI
         shell: bash
         run: |
-          helm push "PaddleDoc-${{ steps.version.outputs.value }}.tgz" "oci://${{ env.OCI_REPO }}"
+          helm push "${{ steps.package.outputs.file }}" "oci://${{ env.OCI_REPO }}"

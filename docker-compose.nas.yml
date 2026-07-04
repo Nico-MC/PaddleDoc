@@ -25,13 +25,17 @@ services:
       - PaddleDoc_netbridge
 
   backend:
-    image: ghcr.io/bl0rb/PaddleDoc-backend:${PaddleDoc_TAG:-latest}
+    image: ghcr.io/bl0rb/paddledoc-backend:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: PaddleDoc_backend
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-PaddleDoc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-PaddleDoc}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-PaddleDoc}
+      POSTGRES_USER: ${POSTGRES_USER:-PaddleDoc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
@@ -45,13 +49,17 @@ services:
       - PaddleDoc_netbridge
 
   worker:
-    image: ghcr.io/bl0rb/PaddleDoc-worker:${PaddleDoc_TAG:-latest}
+    image: ghcr.io/bl0rb/paddledoc-worker:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: PaddleDoc_worker
     mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
     cpus: ${WORKER_CPUS:-2.0}
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-PaddleDoc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-PaddleDoc}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-PaddleDoc}
+      POSTGRES_USER: ${POSTGRES_USER:-PaddleDoc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       REDIS_URL: redis://redis:6379/0
       PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
@@ -73,7 +81,7 @@ services:
       - PaddleDoc_netbridge
 
   frontend:
-    image: ghcr.io/bl0rb/PaddleDoc-frontend:${PaddleDoc_TAG:-latest}
+    image: ghcr.io/bl0rb/paddledoc-frontend:${PADDLEDOC_TAG:-latest}
     restart: always
     container_name: PaddleDoc_frontend
     ports:

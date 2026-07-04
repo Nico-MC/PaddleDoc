@@ -1,5 +1,5 @@
 apiVersion: v2
-name: PaddleDoc
+name: paddledoc
 description: Helm chart for PaddleDoc (frontend + FastAPI backend + Celery worker)
 type: application
 version: 0.1.0
