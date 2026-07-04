@@ -1,0 +1,90 @@
+name: paddledock
+
+services:
+  postgres:
+    image: postgres:16
+    restart: always
+    container_name: paddledock_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-paddledock}
+      POSTGRES_USER: ${POSTGRES_USER:-paddledock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./nas-data/postgres:/var/lib/postgresql/data:rw
+    networks:
+      - paddledock_netbridge
+
+  redis:
+    image: redis:7
+    restart: always
+    container_name: paddledock_redis
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - ./nas-data/redis:/data:rw
+    networks:
+      - paddledock_netbridge
+
+  backend:
+    image: ghcr.io/bl0rb/paddledock-backend:${PADDLEDOCK_TAG:-latest}
+    restart: always
+    container_name: paddledock_backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paddledock}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-paddledock}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
+      OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+    volumes:
+      - ./nas-data/storage:/app/backend/storage:rw
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - paddledock_netbridge
+
+  worker:
+    image: ghcr.io/bl0rb/paddledock-worker:${PADDLEDOCK_TAG:-latest}
+    restart: always
+    container_name: paddledock_worker
+    mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
+    cpus: ${WORKER_CPUS:-2.0}
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paddledock}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-paddledock}
+      REDIS_URL: redis://redis:6379/0
+      PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
+      CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
+      CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
+      CELERY_MAX_TASKS_PER_CHILD: ${CELERY_MAX_TASKS_PER_CHILD:-5}
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1}
+      ONNXRUNTIME_INTRA_OP_NUM_THREADS: ${ONNXRUNTIME_INTRA_OP_NUM_THREADS:-1}
+      ONNXRUNTIME_INTER_OP_NUM_THREADS: ${ONNXRUNTIME_INTER_OP_NUM_THREADS:-1}
+      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
+      OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+    volumes:
+      - ./nas-data/storage:/app/backend/storage:rw
+      - ./nas-data/paddlex_models:/root/.paddlex:rw
+    depends_on:
+      - backend
+      - redis
+    networks:
+      - paddledock_netbridge
+
+  frontend:
+    image: ghcr.io/bl0rb/paddledock-frontend:${PADDLEDOCK_TAG:-latest}
+    restart: always
+    container_name: paddledock_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+    networks:
+      - paddledock_netbridge
+
+networks:
+  paddledock_netbridge:
+    driver: bridge
