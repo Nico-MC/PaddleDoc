@@ -23,7 +23,7 @@ Choose your deployment mode:
 | Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
 | Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
-| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install PaddleDoc ./charts/PaddleDoc -n PaddleDoc --create-namespace` |
+| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install PaddleDoc ./charts/paddledoc -n PaddleDoc --create-namespace` |
 
 ### Standalone NAS (No Kubernetes)
 
@@ -64,18 +64,18 @@ Endpoints:
 Quick install from local chart:
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+helm upgrade --install PaddleDoc ./charts/paddledoc \
   --namespace PaddleDoc --create-namespace
 ```
 
 Install from GHCR OCI chart:
 
 ```bash
-helm install PaddleDoc oci://ghcr.io/bl0rb/charts/PaddleDoc --version 0.2.0 \
+helm install PaddleDoc oci://ghcr.io/bl0rb/charts/paddledoc --version 0.2.0 \
   --namespace PaddleDoc --create-namespace
 ```
 
-More chart options and examples are in [charts/PaddleDoc/README.md](charts/PaddleDoc/README.md).
+More chart options and examples are in [charts/paddledoc/README.md](charts/paddledoc/README.md).
 
 ## Core Features
 

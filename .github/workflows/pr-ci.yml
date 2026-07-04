@@ -83,4 +83,4 @@ jobs:
           version: v3.16.2
 
       - name: Lint Helm chart
-        run: helm lint charts/PaddleDoc
+        run: helm lint charts/paddledoc

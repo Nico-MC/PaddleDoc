@@ -21,23 +21,23 @@ This chart includes a PaddleDoc HA queue profile for production-oriented deploym
 ## Quick Start
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+helm upgrade --install PaddleDoc ./charts/paddledoc \
   --namespace PaddleDoc --create-namespace
 ```
 
 Install from GHCR OCI registry:
 
 ```bash
-helm install PaddleDoc oci://ghcr.io/bl0rb/charts/PaddleDoc --version 0.2.0 \
+helm install PaddleDoc oci://ghcr.io/bl0rb/charts/paddledoc --version 0.2.0 \
   --namespace PaddleDoc --create-namespace
 ```
 
 ## Production-like Example
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+helm upgrade --install PaddleDoc ./charts/paddledoc \
   --namespace PaddleDoc --create-namespace \
-  -f ./charts/PaddleDoc/examples/PaddleDoc-ha-queue-oss.yaml
+  -f ./charts/paddledoc/examples/paddledoc-ha-queue-oss.yaml
 ```
 
 ## Small Kubernetes Example (CPU + External PostgreSQL)
@@ -49,9 +49,9 @@ Keep one replica per component, use conservative resources, and default to a
 CPU OCR profile.
 
 ```bash
-helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+helm upgrade --install PaddleDoc ./charts/paddledoc \
   --namespace PaddleDoc --create-namespace \
-  -f ./charts/PaddleDoc/examples/nas-cpu-external-postgres.yaml
+  -f ./charts/paddledoc/examples/nas-cpu-external-postgres.yaml
 ```
 
 ## Important Notes

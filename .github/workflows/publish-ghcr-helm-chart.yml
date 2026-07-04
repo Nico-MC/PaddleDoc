@@ -13,7 +13,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  CHART_PATH: charts/PaddleDoc
+  CHART_PATH: charts/paddledoc
   OCI_REPO: ghcr.io/bl0rb/charts
 
 permissions:
