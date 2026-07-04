@@ -45,21 +45,20 @@ def _normalise_score(value: Any) -> float | None:
     return None
 
 
-def _collect_numeric_values(payload: Any) -> list[float]:
+def _collect_numeric_values(payload: Any, *, score_context: bool = False) -> list[float]:
     values: list[float] = []
     if isinstance(payload, dict):
         for key, value in payload.items():
-            if _looks_like_score_key(key):
-                values.extend(_collect_numeric_values(value))
-            else:
-                values.extend(_collect_numeric_values(value))
+            next_context = score_context or _looks_like_score_key(key)
+            values.extend(_collect_numeric_values(value, score_context=next_context))
     elif isinstance(payload, (list, tuple, set)):
         for item in payload:
-            values.extend(_collect_numeric_values(item))
+            values.extend(_collect_numeric_values(item, score_context=score_context))
     else:
-        normalised = _normalise_score(payload)
-        if normalised is not None:
-            values.append(normalised)
+        if score_context:
+            normalised = _normalise_score(payload)
+            if normalised is not None:
+                values.append(normalised)
     return values
 
 

@@ -188,8 +188,13 @@ export default function JobDetails() {
   };
 
   return (
-    <main className="min-h-screen bg-white p-8 text-slate-950">
-      <div className="mx-auto max-w-4xl space-y-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.08)]">
+    <main className="min-h-screen bg-white px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-6xl space-y-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-6 lg:p-8">
+        <div className="flex justify-start">
+          <Link href="/jobs">
+            <Button variant="outline">Back to jobs</Button>
+          </Link>
+        </div>
         <h1 className="font-serif text-2xl font-semibold">Job Details</h1>
         <p>Filename: {job.original_filename}</p>
         {job.tags && job.tags.length > 0 && <p>Tags: {job.tags.join(', ')}</p>}
@@ -266,7 +271,7 @@ export default function JobDetails() {
               {saveMessage && <p className="text-sm text-slate-600">{saveMessage}</p>}
             </div>
           ) : (
-            <pre className="overflow-x-auto rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">{markdown}</pre>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">{markdown}</pre>
           )}
         </section>
       </div>

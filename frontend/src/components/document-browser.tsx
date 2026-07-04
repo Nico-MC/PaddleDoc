@@ -100,6 +100,25 @@ function profileForJob(job: Job): string {
   return requestedProfile || '-';
 }
 
+function qualityForJob(job: Job): { grade: string; score: number | null } | null {
+  const execution = job.processing_info?.execution;
+  const qualityGate =
+    execution && typeof execution === 'object'
+      ? ((execution as Record<string, unknown>).quality_gate as Record<string, unknown> | undefined)
+      : undefined;
+
+  if (!qualityGate || typeof qualityGate !== 'object') {
+    return null;
+  }
+
+  const grade = typeof qualityGate.grade === 'string' ? qualityGate.grade : null;
+  if (!grade) {
+    return null;
+  }
+  const score = typeof qualityGate.score === 'number' ? qualityGate.score : null;
+  return { grade, score };
+}
+
 export function DocumentBrowser({
   title,
   description,
@@ -557,7 +576,7 @@ export function DocumentBrowser({
         </div>
       </section>
 
-      <section className="grid gap-4 2xl:grid-cols-[280px_minmax(0,1fr)]">
+      <section className="grid gap-4 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
         <aside className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
           <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-700">Folders</h2>
           <div className="mt-3 space-y-1">
@@ -635,7 +654,7 @@ export function DocumentBrowser({
             </p>
           </div>
           <div className="overflow-x-auto">
-          <table className="w-full min-w-[700px] lg:min-w-[900px] text-left text-xs sm:text-sm">
+          <table className="w-full table-auto text-left text-xs sm:text-sm">
             <thead className="text-slate-500">
               <tr>
                 <th className="pb-2">
@@ -648,7 +667,7 @@ export function DocumentBrowser({
                     Status{sortIndicator('status')}
                   </button>
                 </th>
-                <th className="pb-2">
+                <th className="hidden pb-2 lg:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('profile')}>
                     Used Profile{sortIndicator('profile')}
                   </button>
@@ -658,6 +677,7 @@ export function DocumentBrowser({
                     Pages{sortIndicator('pages')}
                   </button>
                 </th>
+                <th className="hidden pb-2 sm:table-cell">Quality</th>
                 <th className="hidden pb-2 md:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('created')}>
                     Created{sortIndicator('created')}
@@ -670,7 +690,7 @@ export function DocumentBrowser({
               {paginatedItems.map((job) => (
                 <tr key={job.id} className="border-t border-slate-100">
                   <td className="py-3">
-                    <Link href={`/jobs/${job.id}`} className="font-medium text-slate-950 hover:text-emerald-700">
+                    <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
                       {job.original_filename}
                     </Link>
                     {job.status === 'FAILED' && (
@@ -684,8 +704,19 @@ export function DocumentBrowser({
                   <td className="py-3">
                     <span className={`rounded px-2 py-1 text-xs ${statusBadge[job.status]}`}>{job.status}</span>
                   </td>
-                  <td className="py-3 text-slate-700">{profileForJob(job)}</td>
+                  <td className="hidden py-3 text-slate-700 lg:table-cell">{profileForJob(job)}</td>
                   <td className="py-3 text-slate-700">{pageCountForJob(job)}</td>
+                  <td className="hidden py-3 text-slate-700 sm:table-cell">
+                    {(() => {
+                      const quality = qualityForJob(job);
+                      if (!quality) {
+                        return '-';
+                      }
+                      return quality.score !== null
+                        ? `${quality.grade} (${quality.score.toFixed(3)})`
+                        : quality.grade;
+                    })()}
+                  </td>
                   <td className="hidden py-3 text-slate-700 md:table-cell">{new Date(job.created_at).toLocaleString()}</td>
                   <td className="py-3 text-right">
                     {endpoint === 'jobs' && (
