@@ -1,148 +1,139 @@
-# PaddleDock
+﻿# PaddleDock
 
-PaddleDock is a document processing web app powered by PaddleOCR. Upload PDFs, Office files, or images and get structured Markdown output — organized in folders, searchable by tag, and optionally password-protected.
+PaddleDock is a document processing platform powered by PaddleOCR that converts PDFs, Office files, and images into structured Markdown for RAG pipelines.
 
-## Built for RAG Pipelines
+It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
 
-PaddleDock is designed as an ingestion and normalization layer for Retrieval-Augmented Generation (RAG) pipelines. It converts raw PDFs, Office files, and images into structured, searchable Markdown that downstream chunking, embedding, and retrieval systems can consume reliably.
+## Why PaddleDock
 
-### Why Grade A Documents Matter for RAG
+Managing OCR and document normalization at scale gets messy fast. PaddleDock gives you one workflow for ingestion, extraction, quality scoring, and retrieval-ready output.
 
-High-quality source documents are critical for reliable RAG outcomes:
+- RAG-first Markdown output with consistent structure
+- Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
+- Folder and tag organization for search and retrieval workflows
+- Queue-based processing with backend + worker separation
+- Optional password protection and versioned markdown edits
 
-- Better retrieval precision through cleaner structure and metadata
-- Better answer accuracy by reducing OCR and layout noise
-- Lower hallucination risk through stronger grounding context
-- Better token efficiency by avoiding irrelevant or duplicated text
-- Higher trust and auditability with consistent, traceable source output
+## Get Started
 
----
+Choose your deployment mode:
 
-## User Guide
+| Mode | Best for | Command |
+|---|---|---|
+| Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
+| Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
+| Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledock ./charts/paddledock -n paddledock --create-namespace` |
 
-### Home — `/`
+### Standalone NAS (No Kubernetes)
 
-![Home page](docs/screenshots/home.png)
+Use prebuilt GHCR images and persistent local folders.
 
-The home page shows the current service status (CPU or GPU runtime, Paddle service health) and global processing statistics. Use the navigation buttons to go to **Processing** or **Jobs**.
+```bash
+docker compose -f docker-compose.nas.yml up -d
+```
 
-| Stat | What it shows |
-|---|---|
-| Processed documents | Count of all `FINISHED` jobs |
-| Processed pages | Total pages across all finished jobs |
-| Errors | Count of `FAILED` jobs |
-| Database size | Postgres database or payload size estimate |
+Before first production run, set strong credentials/environment values:
 
----
+```bash
+POSTGRES_USER=paddledock
+POSTGRES_PASSWORD=change-this
+POSTGRES_DB=paddledock
+PADDLEDOCK_TAG=latest
+NEXT_PUBLIC_API_URL=http://NAS_IP:8000
+```
 
-### Processing — `/processing`
+Endpoints:
 
-![Processing step 1 — folder & metadata](docs/screenshots/processing-step1.png)
+- Frontend: `http://NAS_IP:3000`
+- Backend: `http://NAS_IP:8000`
 
-The processing wizard has three steps:
+### Docker (Local Build)
 
-**Step 1 — Folder & metadata**
+```bash
+docker compose up --build
+```
 
-- Choose between **Single file** (upload one document, processing starts immediately) or **Multiple files** (batch upload into one folder, then trigger processing together).
-- Optionally fill in email, department, folder/subfolder path, tags, and a **password**.
-  - If a password is set, only someone who knows it can later view, download, edit, or delete the job result.
-- Click **Add Folder** to pre-create a folder in storage before uploading.
+Endpoints:
 
-![Processing step 2 — choose profile](docs/screenshots/processing-step2.png)
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
 
-**Step 2 — Choose OCR profile**
+### Kubernetes (Helm)
 
-Select the PaddleOCR profile to use. Each profile trades off speed versus accuracy:
+Quick install from local chart:
 
-| Profile | Description |
-|---|---|
-| PP-OCRv6 Tiny (det+rec) | Fastest OCR mode |
-| PP-OCRv6 Small (det+rec) | Balanced speed and quality |
-| PP-OCRv6 Medium (det+rec) | Highest OCR accuracy |
-| PP-StructureV3 variants | Adds stronger layout/table structure extraction |
-| PaddleOCR-VL 1.6 (0.9B) | Vision-language parsing profile for richer document understanding (best on GPU) |
-| OpenAI-compatible Vision API | Sends each page to any OpenAI-compatible vision endpoint (`gpt-4o`, Ollama, LiteLLM, etc.) |
+```bash
+helm upgrade --install paddledock ./charts/paddledock \
+  --namespace paddledock --create-namespace
+```
 
-![Processing step 3 — upload](docs/screenshots/processing-step3.png)
+Install from GHCR OCI chart:
 
-**Step 3 — Upload**
+```bash
+helm install paddledock oci://ghcr.io/bl0rb/charts/paddledock --version 0.2.0 \
+  --namespace paddledock --create-namespace
+```
 
-Drag and drop a file or click to open the file picker. Supported formats: **PDF, DOCX, PPTX, XLSX, PNG, JPG, JPEG**.
-
-For **Multiple files** mode, upload each file individually — they are all added to the same folder/collection. When all files are staged, click **Start processing** to kick off OCR for the entire batch.
-
----
-
-### Jobs — `/jobs`
-
-![Jobs page](docs/screenshots/jobs.png)
-
-The jobs page lists all processing jobs. Use the folder tree on the left to filter by folder path, or the search bar and filters to find specific documents.
-
-**Filter bar**
-
-| Field | Behaviour |
-|---|---|
-| Search filename | Partial match on the original filename |
-| Tag filter | Exact tag match |
-| From / To date | Filters by job creation date |
-
-**Folder tree**
-
-Folders created during upload appear as a tree in the sidebar. Click a folder to show only documents in that branch. The trash icon next to a folder name deletes the folder and all jobs inside it.
-
-**Job row**
-
-Each row shows the job ID, original filename, and status badge. Click the filename to open the **Job Detail** page.
-
----
-
-### Job Detail — `/jobs/{id}`
-
-![Job detail page](docs/screenshots/job-detail.png)
-
-The detail page shows full job metadata, OCR execution info, and the generated Markdown.
-
-- **Download Markdown** — downloads the `.md` result file.
-- **Preview / Edit** toggle — switch between a read-only preview and an inline editor. Saving creates a new versioned copy on disk.
-- **Password-protected jobs** — if the job was uploaded with a password, the page shows an unlock form before any content is displayed.
-
----
+More chart options and examples are in [charts/paddledock/README.md](charts/paddledock/README.md).
 
 ## Core Features
 
 - Upload via drag and drop or file picker
 - Supported formats: PDF, DOCX, PPTX, XLSX, PNG, JPG, JPEG
-- RAG-first output design: structured Markdown optimized for chunking, embedding, and retrieval
-- Job lifecycle: `PENDING` → `RUNNING` → `FINISHED` / `FAILED`
-- Optional password protection per job (bcrypt-hashed, enforces access on view / download / edit / delete)
-- Folder-based storage for uploads and results, browsable as a tree
-- Optional tags per upload
-- Search and filtering by filename, tag, and date range
-- Global stats (processed documents, pages, errors, database size)
-- Versioned Markdown editor on the job detail page
+- Job lifecycle: `PENDING -> RUNNING -> FINISHED / FAILED`
+- Folder tree navigation and deletion by folder
+- Search and filtering by filename, tags, date range
+- Global statistics and runtime status (CPU/GPU)
+- Versioned markdown editing on job detail page
+- Password-gated view/download/edit/delete per job
+- OpenAI-compatible page-by-page vision profile
 
-## Architecture
+## OCR Profiles
 
-```text
-frontend  (Next.js + TypeScript + Tailwind + framer-motion)
-backend   (FastAPI + SQLAlchemy + Alembic + Celery)
-postgres  (default in Docker)
-redis     (queue/broker)
-worker    (Celery worker)
-```
+| Profile | Typical Use |
+|---|---|
+| PP-OCRv6 Tiny | Fastest throughput, lowest resource usage |
+| PP-OCRv6 Small | Balanced speed and quality |
+| PP-OCRv6 Medium | Higher OCR quality |
+| PP-StructureV3 variants | Stronger table/layout extraction |
+| PaddleOCR-VL 1.6 (0.9B) | Rich document understanding, best on GPU |
+| OpenAI-compatible Vision API | Route each page to OpenAI-compatible endpoint |
 
-Local file storage:
+## Product Walkthrough
 
-```text
-backend/storage/uploads/single/<job_id>
-backend/storage/uploads/collections/<collection_id>/<job_id>
-backend/storage/results/single/<job_id>
-backend/storage/results/collections/<collection_id>/<job_id>
-backend/storage/results/.../edited
-```
+### Home (`/`)
 
-## Key API Endpoints
+![Home page](docs/screenshots/home.png)
+
+Shows system health, selected runtime (CPU/GPU), and global job statistics.
+
+### Processing (`/processing`)
+
+![Processing step 1](docs/screenshots/processing-step1.png)
+
+1. Choose single-file or collection flow
+2. Add metadata (email, department, folder/subfolder, tags, optional password)
+3. Select OCR profile
+4. Upload and start processing
+
+![Processing step 2](docs/screenshots/processing-step2.png)
+![Processing step 3](docs/screenshots/processing-step3.png)
+
+### Jobs (`/jobs`)
+
+![Jobs page](docs/screenshots/jobs.png)
+
+Browse all jobs, filter by folder/tags/date/filename, and open detailed results.
+
+### Job Detail (`/jobs/{id}`)
+
+![Job detail](docs/screenshots/job-detail.png)
+
+Review metadata and processing info, preview or edit markdown, and download output.
+
+## API Quickstart
+
+Common endpoints:
 
 - `POST /api/v1/upload`
 - `GET /api/v1/jobs`
@@ -158,24 +149,15 @@ backend/storage/results/.../edited
 - `PUT /api/v1/paddle/settings`
 - `GET /api/v1/paddle/capabilities`
 
+Upload using the OpenAI-compatible vision profile:
+
+```bash
+curl -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
+```
+
 ## n8n Integration
 
-PaddleDock can be used directly from n8n using HTTP Request nodes.
-
-Typical single-file automation flow:
-
-1. **Upload** document to PaddleDock
-  - `POST /api/v1/upload` (multipart form-data)
-  - send `file` plus optional metadata (`profile_id`, `folder`, `subfolder`, `tags`)
-2. **Poll** job status until completion
-  - `GET /api/v1/jobs/{job_id}`
-  - continue until status is `FINISHED` or `FAILED`
-3. **Fetch result** for downstream RAG steps
-  - `GET /api/v1/jobs/{job_id}/preview` (markdown text)
-  - or `GET /api/v1/jobs/{job_id}/download` (file)
-
-If n8n runs in Docker with PaddleDock, use the internal backend URL (for example `http://backend:8000`).
-If n8n runs on your host machine, use `http://localhost:8000`.
+Use HTTP Request nodes with a simple upload -> poll -> fetch pattern.
 
 ```mermaid
 flowchart LR
@@ -183,93 +165,64 @@ flowchart LR
    B --> C[n8n HTTP Request\nPOST /api/v1/upload]
    C --> D[PaddleDock Queue\nCelery + Worker]
    D --> E[PaddleOCR Processing\nStructured Markdown Output]
-  E --> F[n8n Poll Loop\nGET /api/v1/jobs/job-id]
+   E --> F[n8n Poll Loop\nGET /api/v1/jobs/job-id]
    F --> G[n8n Fetch Result\nGET preview or download]
    G --> H[RAG Ingestion\nChunk + Embed + Index]
    H --> I[Retrieval + Answering\nVector Search + LLM]
 ```
 
-## Run With Docker
+n8n URL choice:
 
-```bash
-docker compose up --build
+- n8n inside Docker with PaddleDock: `http://backend:8000`
+- n8n on host machine: `http://localhost:8000`
+
+## Deployment and Runtime Notes
+
+### Architecture
+
+```text
+frontend  (Next.js + TypeScript + Tailwind + framer-motion)
+backend   (FastAPI + SQLAlchemy + Alembic + Celery)
+postgres  (default in Docker compose)
+redis     (queue/broker)
+worker    (Celery worker)
 ```
 
-Services:
+Storage layout:
 
-- Frontend: http://localhost:3000
-- Backend: http://localhost:8000
+```text
+backend/storage/uploads/single/<job_id>
+backend/storage/uploads/collections/<collection_id>/<job_id>
+backend/storage/results/single/<job_id>
+backend/storage/results/collections/<collection_id>/<job_id>
+backend/storage/results/.../edited
+```
 
-### Build targets
+### GPU Runtime (Windows + NVIDIA)
 
-Three images are built from this repository:
-
-| Image | Build context | Notes |
-|---|---|---|
-| `frontend` | `frontend/Dockerfile` | Next.js production build (multi-stage, Node 26 Alpine) |
-| `backend` | `backend/Dockerfile` | FastAPI API server (Python 3.13-slim) |
-| `worker` | `backend/worker.Dockerfile` | Celery worker bundling PaddleOCR + GPU-capable PaddlePaddle |
-
-The same `worker` image is used for both CPU and GPU runs: it ships `paddlepaddle-gpu` and auto-detects CUDA at runtime, falling back to CPU when no GPU is reserved. The first `worker` build downloads a large (~1.9 GB) PaddlePaddle wheel plus PaddleOCR model dependencies, so the initial build can take several minutes.
-
-### Windows + NVIDIA GPU (PaddleOCR-VL profile)
-
-For Docker Desktop on Windows with NVIDIA GPU support, use the GPU override file to switch the worker default profile to `paddlevl_1_6_0_9b`.
+Use the GPU override file:
 
 ```powershell
 Copy-Item .env.example .env
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
 ```
 
-Optional quick check:
+Behavior summary:
 
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml ps
-```
+- Worker image includes `paddlepaddle-gpu`
+- Runtime auto-detects CUDA and falls back to CPU
+- GPU override switches default profile to `paddlevl_1_6_0_9b`
+- Uses safer worker settings for CUDA stability (`solo`, concurrency `1`)
 
-The override only adds the NVIDIA device reservation and switches the worker default profile to `paddlevl_1_6_0_9b` — it does not build a separate image, so no extra image rebuild is required to switch between CPU and GPU.
+### Worker Scaling and Tuning
 
-If you want to force PaddleOCR-VL per upload from API/n8n, set `profile_id=paddlevl_1_6_0_9b` in the upload request.
-
-#### How GPU auto-detection works
-
-The worker image ships `paddlepaddle-gpu` (CUDA 12.6 build). At container startup the worker checks:
-
-1. `paddle.is_compiled_with_cuda()` and `paddle.device.cuda.device_count() > 0`
-2. Falls back to `torch.cuda.is_available()` if PaddlePaddle is unavailable
-
-The result is exposed as `selected_device: "gpu" | "cpu"` in the `/api/v1/paddle/status` response and shown on the home page status panel.
-
-When no NVIDIA device is reserved (plain `docker compose up`), the worker runs on CPU and selects a lighter default profile automatically. No config change is needed to switch — just start with or without `docker-compose.gpu.yml`.
-
-#### GPU memory and Celery settings
-
-The PaddleOCR-VL 1.6 model requires ~6–10 GB of GPU VRAM. The GPU override sets:
-
-| Setting | Value | Reason |
-|---|---|---|
-| `mem_limit` | `12g` | Prevents OOM kill during model load |
-| `cpus` | `4.0` | Adequate for pre/post-processing |
-| `CELERY_WORKER_POOL` | `solo` | Avoids fork-after-CUDA-init crashes |
-| `CELERY_WORKER_CONCURRENCY` | `1` | One job at a time to share GPU memory |
-| `CELERY_MAX_TASKS_PER_CHILD` | `1` | Recycles the worker process after each job to free VRAM |
-
-### Scale Workers Safely
-
-PaddleDock supports multiple worker replicas:
+Scale workers:
 
 ```bash
 docker compose up --build -d --scale worker=2
 ```
 
-To tune for smaller hosts (especially ARM), copy `.env.example` to `.env` and adjust values before starting Compose:
-
-```bash
-cp .env.example .env
-docker compose up --build -d --scale worker=2
-```
-
-Recommended baseline on memory-constrained machines:
+Memory-constrained baseline:
 
 - `WORKER_MEMORY_LIMIT=2g` to `3g`
 - `CELERY_WORKER_CONCURRENCY=1`
@@ -277,37 +230,93 @@ Recommended baseline on memory-constrained machines:
 - `OMP_NUM_THREADS=1`
 - `ONNXRUNTIME_INTRA_OP_NUM_THREADS=1`
 
-Worker restart behavior:
+## OpenAI-Compatible Vision Profile
 
-- Compose uses `restart: unless-stopped`.
-- If a worker container dies unexpectedly, jobs that were `RUNNING` are re-queued automatically when workers start again.
-- In multi-worker mode, startup recovery is lock-protected so only one worker performs re-queue logic.
+PaddleDock includes `openai_vision`, which sends each page image to an OpenAI-compatible Chat Completions endpoint and assembles markdown output.
 
-## Run With Helm (Kubernetes)
+Environment variables:
 
-The repo now includes an open-source Helm chart in `charts/paddledock`.
-
-Quick install:
-
-```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace
+```dotenv
+OPENAI_API_BASE_URL=https://api.openai.com
+OPENAI_API_BEARER_TOKEN=sk-your-key-here
 ```
 
-PaddleDock HA queue profile example:
+Ollama example:
 
-```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace \
-  -f ./charts/paddledock/examples/paddledock-ha-queue-oss.yaml
+```dotenv
+OPENAI_API_BASE_URL=http://host.docker.internal:11434
+OPENAI_API_BEARER_TOKEN=ollama
 ```
 
-Notes:
+LiteLLM/proxy example:
 
-- Set `frontend.apiUrl` to a browser-reachable backend URL (usually your backend ingress host).
-- Default mode runs migrations in backend startup (`backend.runAlembicOnStartup=true`). For multi-replica backend setups, prefer `migrationJob.enabled=true` with `backend.runAlembicOnStartup=false`.
-- PostgreSQL is external-only in Helm. Configure `database.*` and `database.passwordSecret` in values.
-- Shared storage for backend+worker expects `ReadWriteMany` if `persistence.enabled=true`.
+```dotenv
+OPENAI_API_BASE_URL=http://litellm:4000
+OPENAI_API_BEARER_TOKEN=sk-litellm-key
+```
+
+Apply changes without rebuilding images:
+
+```bash
+docker compose up -d --no-deps backend worker
+```
+
+## Publishing to GHCR
+
+Published images:
+
+- `ghcr.io/bl0rb/paddledock-backend`
+- `ghcr.io/bl0rb/paddledock-worker`
+- `ghcr.io/bl0rb/paddledock-frontend`
+
+### Image publishing (automated)
+
+Workflow: `.github/workflows/publish-ghcr-images.yml`
+
+Trigger publish via git tag:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+This publishes multi-arch images (`linux/amd64`, `linux/arm64`) with tags:
+
+- `0.2.0`
+- `latest`
+
+### Image publishing (manual)
+
+```powershell
+echo $env:GHCR_PAT | docker login ghcr.io -u bl0rb --password-stdin
+./scripts/publish-ghcr-images.ps1 -Tag 0.2.0 -AlsoLatest
+```
+
+### Helm chart publishing (automated)
+
+Workflow: `.github/workflows/publish-ghcr-helm-chart.yml`
+
+On `v*` tags, the chart is packaged and pushed to:
+
+- `oci://ghcr.io/bl0rb/charts`
+
+## Troubleshooting
+
+### Dashboard loads but stats/profiles/jobs stay empty (Windows)
+
+Symptom: UI loads but API requests to localhost fail intermittently due to WSL2/IPv6 loopback forwarding.
+
+Fix backend port forward:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
+```
+
+IPv4 health check:
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:8000/api/v1/health
+```
 
 ## Local Development
 
@@ -329,156 +338,36 @@ npm run build
 npm run dev
 ```
 
-## Migrations
+Migrations:
 
 - `backend/alembic/versions/0001_init.py`
 - `backend/alembic/versions/0002_add_password_protection.py`
 - `backend/alembic/versions/0002_job_blob_tags.py`
 - `backend/alembic/versions/0002_job_processing_info.py`
 
-## Troubleshooting
+## Roadmap
 
-### OpenAI-compatible Vision API profile
+### RAG Quality Foundation
 
-PaddleDock includes an `openai_vision` profile that sends each document page as a base64 PNG to any OpenAI chat-completions-compatible endpoint and asks the model to return structured Markdown. This works with the hosted OpenAI API, Azure OpenAI, Ollama, LiteLLM, vLLM, and any other endpoint that implements `POST /v1/chat/completions` with vision support.
+- [ ] Define measurable quality and retrieval benchmarks
+- [x] Grade A/B/C document quality gate
+- [ ] Add a regression-focused RAG evaluation harness
 
-#### Configuration
+### Reliability and Operations
 
-Set two environment variables before starting the stack. The simplest way is a `.env` file in the repo root:
+- [ ] Add deeper observability (queue depth, latency, retries, failures)
+- [ ] Add stronger governance (audit logs, stricter validation, RBAC)
 
-```dotenv
-OPENAI_API_BASE_URL=https://api.openai.com
-OPENAI_API_BEARER_TOKEN=sk-your-key-here
-```
+### Delivery and Workflow
 
-For a local Ollama instance:
+- [ ] Harden CI/CD, image provenance, and release automation
+- [ ] Expand security scanning and SBOM coverage
 
-```dotenv
-OPENAI_API_BASE_URL=http://host.docker.internal:11434
-OPENAI_API_BEARER_TOKEN=ollama
-```
+### Product and Ecosystem
 
-For LiteLLM or a custom proxy:
+- [ ] Improve batch progress and operator feedback UX
+- [ ] Add vector DB export/webhook integrations
 
-```dotenv
-OPENAI_API_BASE_URL=http://litellm:4000
-OPENAI_API_BEARER_TOKEN=sk-litellm-key
-```
+### Milestone
 
-The variables are passed to both the `backend` and `worker` containers. No image rebuild is needed — change `.env` and restart:
-
-```bash
-docker compose up -d --no-deps backend worker
-```
-
-#### How pages are sent
-
-For each PDF page the worker:
-
-1. Renders the page to a PNG at 2× scale (~144 dpi) using `pypdfium2`
-2. Base64-encodes the image and posts it to `{OPENAI_API_BASE_URL}/v1/chat/completions`
-3. Asks the model to return the full page as GFM Markdown (headings, lists, tables)
-4. Assembles all page responses into one document with RAG frontmatter and the standard quality gate
-
-Image files (PNG/JPG/JPEG) are sent directly without page splitting.
-
-#### Model selection
-
-The default model is `gpt-4o`. To use a different model, the profile `vision_model` key can be overridden at the service level or by creating a custom profile in `backend/app/services/paddle_service.py`. Examples:
-
-| Provider | Model value |
-|---|---|
-| OpenAI | `gpt-4o`, `gpt-4o-mini` |
-| Ollama | `llava`, `llama3.2-vision` |
-| Azure OpenAI | deployment name configured on the proxy |
-
-#### Using from n8n or API
-
-Set `profile_id=openai_vision` in the upload request:
-
-```bash
-curl -F "file=@invoice.pdf" -F "profile_id=openai_vision" http://localhost:8000/api/v1/upload
-```
-
----
-
-## Troubleshooting
-
-### Windows: dashboard loads but stats, status, profiles, or jobs stay empty
-
-If the UI renders but no data loads, the browser usually cannot reach the backend on `http://localhost:8000`. On Docker Desktop + WSL2 the host can intermittently resolve `localhost` to IPv6 (`::1`), where a stale `wslrelay` listener drops connections to the published backend port while the containers still reach each other fine over the internal network.
-
-Fixes:
-
-- Recreate the backend container to rebuild a clean host port forward:
-
-  ```powershell
-  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --force-recreate --no-deps backend
-  ```
-
-- Or point the browser at IPv4 explicitly by setting `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` on the frontend service, then rebuild the frontend.
-
-Verify host reachability:
-
-```powershell
-curl.exe -s -o NUL -w "%{http_code}\n" http://127.0.0.1:8000/api/v1/health
-```
-
-## Backlog / Roadmap
-
-### 1) RAG Quality Foundation
-
-- [ ] Define measurable success metrics
-  - Targets for OCR quality, retrieval precision/recall, and processing cost per page
-  - Baseline dashboard for current performance before optimization
-  - Weekly trend tracking to catch regressions early
-
-- [x] Build a document quality gate (Grade A/B/C)
-  - Score documents from OCR confidence, structure quality, and text-noise heuristics
-  - Include page- and table-level signals where available, not just whole-page edit distance
-  - Label each processed document as Grade A, B, or C and warn or block non-Grade-A output before indexing
-
-- [ ] Add a RAG evaluation harness
-  - Curated benchmark dataset (invoices, contracts, scanned and born-digital docs)
-  - Retrieval metrics: precision@k, recall@k, hit@k
-  - Regression checks in CI for extraction and retrieval quality
-
-### 2) Reliability and Operations
-
-- [ ] Improve observability and incident response
-  - Structured logs with request/job correlation IDs across frontend, API, and worker
-  - Metrics for queue depth, processing latency, retries, and failure rate
-  - Alerts for stuck RUNNING jobs and unhealthy worker pools
-
-- [ ] Strengthen security and governance
-  - Strict file validation and content-type enforcement on upload
-  - Optional malware scanning in ingest path
-  - Audit log for view, download, edit, and delete events
-  - Role-based access control for multi-team usage
-
-### 3) Delivery and Developer Workflow
-
-- [ ] Add CI/CD automation and release hardening
-  - Run lint, tests, and container build on every PR
-  - Publish multi-arch images (linux/amd64 and linux/arm64) on tags
-  - Add vulnerability scanning and software bill of materials (SBOM)
-  - Sign release images and enforce immutable version tags
-
-### 4) Product and Ecosystem
-
-- [ ] Improve processing UX and operator feedback
-  - Batch progress and queue position visibility
-  - Per-document quality issue panel with actionable hints
-  - Retry and recovery UX for partial collection failures
-
-- [ ] Add RAG ecosystem integrations
-  - Export pipelines for Qdrant, Weaviate, Pinecone, and pgvector
-  - Webhook events for job finished, failed, and quality-gate outcomes
-  - Optional normalized JSON output alongside Markdown
-
-### 5) Release Milestone
-
-- [ ] Ship v0.2.0 focused on RAG quality and reliability
-  - Include quality gate, evaluation harness, core observability, and CI/CD publishing
-  - Publish release notes with benchmark deltas vs v0.1.0
-  - Define upgrade and migration guidance for existing users
+- [ ] Ship v0.2.0 with quality + reliability focus
