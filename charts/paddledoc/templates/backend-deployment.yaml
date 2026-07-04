@@ -5,20 +5,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "PaddleDoc.fullname" . }}-backend
+  name: {{ include "paddledoc.fullname" . }}-backend
   labels:
-    {{- include "PaddleDoc.labels" . | nindent 4 }}
+    {{- include "paddledoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: backend
 spec:
   replicas: {{ ternary .Values.autoscaling.backend.minReplicas .Values.backend.replicaCount .Values.autoscaling.backend.enabled }}
   selector:
     matchLabels:
-      {{- include "PaddleDoc.selectorLabels" . | nindent 6 }}
+      {{- include "paddledoc.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: backend
   template:
     metadata:
       labels:
-        {{- include "PaddleDoc.selectorLabels" . | nindent 8 }}
+        {{- include "paddledoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: backend
         {{- with .Values.global.podLabels }}
         {{- toYaml . | nindent 8 }}
@@ -28,7 +28,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "PaddleDoc.serviceAccountName" . }}
+      serviceAccountName: {{ include "paddledoc.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -54,7 +54,7 @@ spec:
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "PaddleDoc.fullname" . }}-env
+                  name: {{ include "paddledoc.fullname" . }}-env
                   key: REDIS_URL
             - name: CORS_ORIGINS
               value: {{ .Values.backend.corsOrigins | quote }}
@@ -83,7 +83,7 @@ spec:
       volumes:
         - name: shared-storage
           persistentVolumeClaim:
-            claimName: {{ default (printf "%s-storage" (include "PaddleDoc.fullname" .)) .Values.persistence.existingClaim }}
+            claimName: {{ default (printf "%s-storage" (include "paddledoc.fullname" .)) .Values.persistence.existingClaim }}
       {{- end }}
       {{- with .Values.backend.nodeSelector }}
       nodeSelector:

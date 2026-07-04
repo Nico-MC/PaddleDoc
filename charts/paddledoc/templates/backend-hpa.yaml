@@ -5,15 +5,15 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "PaddleDoc.fullname" . }}-backend
+  name: {{ include "paddledoc.fullname" . }}-backend
   labels:
-    {{- include "PaddleDoc.labels" . | nindent 4 }}
+    {{- include "paddledoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: backend
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "PaddleDoc.fullname" . }}-backend
+    name: {{ include "paddledoc.fullname" . }}-backend
   minReplicas: {{ .Values.autoscaling.backend.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.backend.maxReplicas }}
   metrics:

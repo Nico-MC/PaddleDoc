@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
-    app_name: str = 'PaddleDoc API'
+    app_name: str = 'paddledoc API'
     database_url: str = ''
     postgres_host: str = ''
     postgres_port: int = 5432
@@ -41,7 +41,7 @@ def _build_database_url(settings: Settings) -> str:
             auth = user
         return f'postgresql+psycopg://{auth}@{settings.postgres_host}:{settings.postgres_port}/{db}'
 
-    return 'sqlite:///./PaddleDoc.db'
+    return 'sqlite:///./paddledoc.db'
 
 
 settings = Settings()

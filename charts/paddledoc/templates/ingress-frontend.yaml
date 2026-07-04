@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "PaddleDoc.fullname" . }}-frontend
+  name: {{ include "paddledoc.fullname" . }}-frontend
   labels:
-    {{- include "PaddleDoc.labels" . | nindent 4 }}
+    {{- include "paddledoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: frontend
   {{- with .Values.ingress.frontend.annotations }}
   annotations:
@@ -24,7 +24,7 @@ spec:
             pathType: {{ .pathType }}
             backend:
               service:
-                name: {{ include "PaddleDoc.fullname" $ }}-frontend
+                name: {{ include "paddledoc.fullname" $ }}-frontend
                 port:
                   number: {{ $.Values.frontend.service.port }}
           {{- end }}

@@ -72,10 +72,10 @@ jobs:
           docker compose -f docker-compose.nas.yml config -q
 
       - name: Build backend image
-        run: docker build -f backend/Dockerfile -t PaddleDoc-backend:ci backend
+        run: docker build -f backend/Dockerfile -t paddledoc-backend:ci backend
 
       - name: Build frontend image
-        run: docker build -f frontend/Dockerfile -t PaddleDoc-frontend:ci frontend
+        run: docker build -f frontend/Dockerfile -t paddledoc-frontend:ci frontend
 
       - name: Set up Helm
         uses: azure/setup-helm@v4

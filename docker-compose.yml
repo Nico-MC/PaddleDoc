@@ -1,4 +1,4 @@
-name: PaddleDoc
+name: paddledoc
 
 services:
   frontend:
@@ -19,7 +19,7 @@ services:
     ports:
       - '8000:8000'
     environment:
-      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/PaddleDoc
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: '["http://localhost:3000"]'
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
@@ -38,7 +38,7 @@ services:
     mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
     cpus: ${WORKER_CPUS:-2.0}
     environment:
-      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/PaddleDoc
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
       # Runtime tuning for smaller ARM hosts to reduce model load spikes.
@@ -62,7 +62,7 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: PaddleDoc
+      POSTGRES_DB: paddledoc
       POSTGRES_USER: postgres
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:

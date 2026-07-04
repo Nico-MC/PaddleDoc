@@ -16,7 +16,7 @@ frontend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-frontend
+    repository: ghcr.io/bl0rb/paddledoc-frontend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -32,7 +32,7 @@ backend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-backend
+    repository: ghcr.io/bl0rb/paddledoc-backend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -49,7 +49,7 @@ worker:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/PaddleDoc-worker
+    repository: ghcr.io/bl0rb/paddledoc-worker
     tag: "latest"
     pullPolicy: IfNotPresent
   paddleDefaultProfile: ppocrv6_tiny
@@ -75,9 +75,9 @@ database:
   useExternal: true
   host: ""
   port: 5432
-  database: PaddleDoc
+  database: paddledoc
   schema: public
-  user: PaddleDoc
+  user: paddledoc
   passwordSecret:
     name: ""
     key: password
@@ -110,7 +110,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: PaddleDoc.local
+      - host: paddledoc.local
         paths:
           - path: /
             pathType: Prefix
@@ -120,7 +120,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: api.PaddleDoc.local
+      - host: api.paddledoc.local
         paths:
           - path: /
             pathType: Prefix
