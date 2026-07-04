@@ -22,6 +22,7 @@ Choose your deployment mode:
 |---|---|---|
 | Standalone Docker | Local server or NAS (UGREEN/QNAP/Synology) | `docker compose -f docker-compose.nas.yml up -d` |
 | Docker (Dev/Single Host) | Local development with local builds | `docker compose up --build` |
+| Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledock ./charts/paddledock -n paddledock --create-namespace` |
 
 ### Standalone NAS (No Kubernetes)
@@ -204,7 +205,7 @@ Use the GPU override file:
 
 ```powershell
 Copy-Item .env.example .env
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 ```
 
 Behavior summary:
@@ -360,7 +361,10 @@ Migrations:
 
 ### Delivery and Workflow
 
-- [ ] Harden CI/CD, image provenance, and release automation
+- [x] Automate multi-arch GHCR image publishing on release tags
+- [x] Automate Helm OCI chart publishing to GHCR on release tags
+- [x] Add PR CI gates (lint, tests, and build checks) via `.github/workflows/pr-ci.yml`
+- [ ] Add image signing/provenance verification and immutable release policy
 - [ ] Expand security scanning and SBOM coverage
 
 ### Product and Ecosystem
