@@ -1,0 +1,62 @@
+name: Publish GHCR Helm Chart
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart/app version to publish (for example 0.2.0)"
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  CHART_PATH: charts/paddledock
+  OCI_REPO: ghcr.io/bl0rb/charts
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-chart:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set chart version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Log in to GHCR for Helm OCI
+        shell: bash
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} --username "${{ github.actor }}" --password-stdin
+
+      - name: Package chart
+        shell: bash
+        run: |
+          helm package "${{ env.CHART_PATH }}" \
+            --version "${{ steps.version.outputs.value }}" \
+            --app-version "${{ steps.version.outputs.value }}"
+
+      - name: Push chart to GHCR OCI
+        shell: bash
+        run: |
+          helm push "paddledock-${{ steps.version.outputs.value }}.tgz" "oci://${{ env.OCI_REPO }}"
