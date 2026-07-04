@@ -24,8 +24,9 @@ if [ "${RUN_ALEMBIC_ON_STARTUP:-true}" = "true" ]; then
   python - <<'PY'
 import os, sys
 import sqlalchemy as sa
+from app.core.config import settings
 
-url = os.environ["DATABASE_URL"]
+url = settings.database_url
 engine = sa.create_engine(url)
 insp = sa.inspect(engine)
 has_version_table = insp.has_table("alembic_version")
@@ -50,8 +51,9 @@ PY
 import os
 import sqlalchemy as sa
 from sqlalchemy import text
+from app.core.config import settings
 
-url = os.environ["DATABASE_URL"]
+url = settings.database_url
 engine = sa.create_engine(url)
 insp = sa.inspect(engine)
 if insp.has_table("jobs"):

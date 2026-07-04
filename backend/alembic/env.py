@@ -3,6 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from app.core.config import settings
 from app.database.base import Base
 from app.models import models  # noqa: F401
 
@@ -12,6 +13,11 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+# Keep Alembic bound to the same resolved URL as the app runtime.
+# This avoids auth drift when compose provides POSTGRES_* vars instead of
+# a raw DATABASE_URL.
+config.set_main_option('sqlalchemy.url', settings.database_url)
 
 
 def run_migrations_offline() -> None:
