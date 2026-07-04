@@ -1,0 +1,63 @@
+# Small Kubernetes preset (for example k3s on NAS hardware): low baseline
+# resources, external PostgreSQL, bundled Redis, single replicas, and CPU OCR
+# profile.
+
+frontend:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+backend:
+  replicaCount: 1
+  runAlembicOnStartup: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+worker:
+  replicaCount: 1
+  paddleDefaultProfile: ppocrv6_tiny
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+autoscaling:
+  backend:
+    enabled: false
+  worker:
+    enabled: false
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteMany
+  size: 20Gi
+
+# External PostgreSQL is required by this chart.
+database:
+  useExternal: true
+  host: your-postgres-host.example.com
+  port: 5432
+  database: paddledock
+  schema: public
+  user: paddledock
+  passwordSecret:
+    name: paddledock-db-secret
+    key: password
+
+# Keep bundled Redis for simpler NAS installs.
+redis:
+  enabled: true

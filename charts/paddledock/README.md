@@ -25,12 +25,33 @@ helm upgrade --install paddledock ./charts/paddledock \
   --namespace paddledock --create-namespace
 ```
 
+Install from GHCR OCI registry:
+
+```bash
+helm install paddledock oci://ghcr.io/bl0rb/charts/paddledock --version 0.2.0 \
+  --namespace paddledock --create-namespace
+```
+
 ## Production-like Example
 
 ```bash
 helm upgrade --install paddledock ./charts/paddledock \
   --namespace paddledock --create-namespace \
   -f ./charts/paddledock/examples/paddledock-ha-queue-oss.yaml
+```
+
+## Small Kubernetes Example (CPU + External PostgreSQL)
+
+This example is for Kubernetes clusters (including lightweight k3s on NAS
+hardware). It is not for standalone NAS Docker deployments.
+
+Keep one replica per component, use conservative resources, and default to a
+CPU OCR profile.
+
+```bash
+helm upgrade --install paddledock ./charts/paddledock \
+  --namespace paddledock --create-namespace \
+  -f ./charts/paddledock/examples/nas-cpu-external-postgres.yaml
 ```
 
 ## Important Notes
@@ -40,6 +61,21 @@ helm upgrade --install paddledock ./charts/paddledock \
 3. PostgreSQL must be external. Configure `database.*` and provide `database.passwordSecret`.
 4. Default mode runs Alembic in backend startup (`backend.runAlembicOnStartup=true`).
 5. For multi-replica backend setups, prefer `migrationJob.enabled=true` with `backend.runAlembicOnStartup=false`.
+6. OCR profile defaults to CPU-safe `ppocrv6_tiny`; switch to a GPU-oriented profile only when your cluster nodes provide NVIDIA runtime/device plugin.
+
+## Scaling Logic
+
+This chart supports two scaling modes for backend and worker:
+
+1. Manual replicas:
+  - Set `autoscaling.backend.enabled=false` and `autoscaling.worker.enabled=false`
+  - Use `backend.replicaCount` and `worker.replicaCount`
+2. HPA-managed replicas:
+  - Set `autoscaling.backend.enabled=true` and/or `autoscaling.worker.enabled=true`
+  - Deployments start at `minReplicas`
+  - HPA scales up to `maxReplicas` based on CPU target
+
+When HPA is enabled, deployment `replicas` is automatically aligned to `minReplicas`.
 
 ## Database Configuration (External Only)
 

@@ -10,7 +10,7 @@ metadata:
     {{- include "paddledock.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
-  replicas: {{ .Values.worker.replicaCount }}
+  replicas: {{ ternary .Values.autoscaling.worker.minReplicas .Values.worker.replicaCount .Values.autoscaling.worker.enabled }}
   selector:
     matchLabels:
       {{- include "paddledock.selectorLabels" . | nindent 6 }}

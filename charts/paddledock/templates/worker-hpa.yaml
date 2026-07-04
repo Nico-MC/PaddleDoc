@@ -1,4 +1,7 @@
 {{- if and .Values.worker.enabled .Values.autoscaling.worker.enabled }}
+{{- if gt .Values.autoscaling.worker.minReplicas .Values.autoscaling.worker.maxReplicas }}
+{{- fail "autoscaling.worker.minReplicas must be less than or equal to autoscaling.worker.maxReplicas" }}
+{{- end }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
