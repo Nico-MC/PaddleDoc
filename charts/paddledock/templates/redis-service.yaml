@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "paddledock.fullname" . }}-redis
+  name: {{ include "PaddleDoc.fullname" . }}-redis
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 spec:
   ports:
@@ -13,6 +13,6 @@ spec:
       protocol: TCP
       name: redis
   selector:
-    {{- include "paddledock.selectorLabels" . | nindent 4 }}
+    {{- include "PaddleDoc.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 {{- end }}

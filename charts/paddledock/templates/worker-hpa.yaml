@@ -5,15 +5,15 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "paddledock.fullname" . }}-worker
+  name: {{ include "PaddleDoc.fullname" . }}-worker
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "paddledock.fullname" . }}-worker
+    name: {{ include "PaddleDoc.fullname" . }}-worker
   minReplicas: {{ .Values.autoscaling.worker.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.worker.maxReplicas }}
   metrics:

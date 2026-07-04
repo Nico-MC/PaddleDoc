@@ -1,6 +1,6 @@
 apiVersion: v2
-name: paddledock
-description: Helm chart for PaddleDock (frontend + FastAPI backend + Celery worker)
+name: PaddleDoc
+description: Helm chart for PaddleDoc (frontend + FastAPI backend + Celery worker)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -10,4 +10,4 @@ keywords:
   - fastapi
   - nextjs
 maintainers:
-  - name: PaddleDock
+  - name: PaddleDoc

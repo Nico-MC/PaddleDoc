@@ -463,7 +463,7 @@ def _paddleocr_to_structure(
             capability=capability,
         )
 
-        with TemporaryDirectory(prefix='paddledock_pdf_chunks_') as tmpdir:
+        with TemporaryDirectory(prefix='PaddleDoc_pdf_chunks_') as tmpdir:
             tmpdir_path = Path(tmpdir)
             for chunk_start in range(0, total_pages, chunk_page_size):
                 chunk_end = min(chunk_start + chunk_page_size, total_pages)

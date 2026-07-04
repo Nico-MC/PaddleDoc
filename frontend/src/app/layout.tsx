@@ -14,7 +14,7 @@ const lora = Lora({
 });
 
 export const metadata: Metadata = {
-  title: "PaddleDock",
+  title: "PaddleDoc",
   description: "Document processing pipeline powered by PaddleOCR",
 };
 

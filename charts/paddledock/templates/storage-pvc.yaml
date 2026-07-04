@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "paddledock.fullname" . }}-storage
+  name: {{ include "PaddleDoc.fullname" . }}-storage
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
 spec:
   accessModes:
     {{- toYaml .Values.persistence.accessModes | nindent 4 }}

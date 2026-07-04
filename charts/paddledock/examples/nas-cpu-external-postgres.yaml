@@ -51,11 +51,11 @@ database:
   useExternal: true
   host: your-postgres-host.example.com
   port: 5432
-  database: paddledock
+  database: PaddleDoc
   schema: public
-  user: paddledock
+  user: PaddleDoc
   passwordSecret:
-    name: paddledock-db-secret
+    name: PaddleDoc-db-secret
     key: password
 
 # Keep bundled Redis for simpler NAS installs.

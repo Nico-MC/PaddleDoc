@@ -5,20 +5,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "paddledock.fullname" . }}-worker
+  name: {{ include "PaddleDoc.fullname" . }}-worker
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
   replicas: {{ ternary .Values.autoscaling.worker.minReplicas .Values.worker.replicaCount .Values.autoscaling.worker.enabled }}
   selector:
     matchLabels:
-      {{- include "paddledock.selectorLabels" . | nindent 6 }}
+      {{- include "PaddleDoc.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: worker
   template:
     metadata:
       labels:
-        {{- include "paddledock.selectorLabels" . | nindent 8 }}
+        {{- include "PaddleDoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: worker
         {{- with .Values.global.podLabels }}
         {{- toYaml . | nindent 8 }}
@@ -28,7 +28,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "paddledock.serviceAccountName" . }}
+      serviceAccountName: {{ include "PaddleDoc.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -50,7 +50,7 @@ spec:
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledock.fullname" . }}-env
+                  name: {{ include "PaddleDoc.fullname" . }}-env
                   key: REDIS_URL
             - name: PADDLE_DEFAULT_PROFILE
               value: {{ .Values.worker.paddleDefaultProfile | quote }}
@@ -65,7 +65,7 @@ spec:
       volumes:
         - name: shared-storage
           persistentVolumeClaim:
-            claimName: {{ default (printf "%s-storage" (include "paddledock.fullname" .)) .Values.persistence.existingClaim }}
+            claimName: {{ default (printf "%s-storage" (include "PaddleDoc.fullname" .)) .Values.persistence.existingClaim }}
       {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:

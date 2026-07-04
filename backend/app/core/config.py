@@ -6,8 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
-    app_name: str = 'PaddleDock API'
-    database_url: str = 'sqlite:///./paddledock.db'
+    app_name: str = 'PaddleDoc API'
+    database_url: str = 'sqlite:///./PaddleDoc.db'
     redis_url: str = 'redis://redis:6379/0'
     cors_origins: list[str] = ['http://localhost:3000']
     max_upload_bytes: int = 100 * 1024 * 1024

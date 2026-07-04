@@ -13,7 +13,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  CHART_PATH: charts/paddledock
+  CHART_PATH: charts/PaddleDoc
   OCI_REPO: ghcr.io/bl0rb/charts
 
 permissions:
@@ -59,4 +59,4 @@ jobs:
       - name: Push chart to GHCR OCI
         shell: bash
         run: |
-          helm push "paddledock-${{ steps.version.outputs.value }}.tgz" "oci://${{ env.OCI_REPO }}"
+          helm push "PaddleDoc-${{ steps.version.outputs.value }}.tgz" "oci://${{ env.OCI_REPO }}"

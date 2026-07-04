@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "paddledock.fullname" . }}-backend
+  name: {{ include "PaddleDoc.fullname" . }}-backend
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: backend
 spec:
   type: {{ .Values.backend.service.type }}
@@ -14,6 +14,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "paddledock.selectorLabels" . | nindent 4 }}
+    {{- include "PaddleDoc.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: backend
 {{- end }}

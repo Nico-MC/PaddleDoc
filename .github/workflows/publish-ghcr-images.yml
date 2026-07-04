@@ -71,7 +71,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/paddledock-${{ matrix.name }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/PaddleDoc-${{ matrix.name }}
           tags: |
             type=raw,value=${{ steps.tag.outputs.value }}
             type=raw,value=latest

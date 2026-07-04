@@ -5,7 +5,7 @@ param(
     [string]$Registry = "ghcr.io",
     [string]$Owner = "bl0rb",
     [string]$Platform = "linux/amd64,linux/arm64",
-    [string]$Builder = "paddledock-builder",
+    [string]$Builder = "PaddleDoc-builder",
     [switch]$AlsoLatest
 )
 
@@ -39,7 +39,7 @@ function Publish-Image {
         [string]$Context
     )
 
-    $imageBase = "$Registry/$Owner/paddledock-$Name"
+    $imageBase = "$Registry/$Owner/PaddleDoc-$Name"
     $tags = @("$imageBase`:$Tag")
     if ($AlsoLatest) {
         $tags += "$imageBase`:latest"

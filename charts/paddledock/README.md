@@ -1,6 +1,6 @@
-# PaddleDock Helm Chart
+# PaddleDoc Helm Chart
 
-This chart deploys PaddleDock in Kubernetes with a queue-style topology:
+This chart deploys PaddleDoc in Kubernetes with a queue-style topology:
 
 - `frontend` (Next.js)
 - `backend` (FastAPI)
@@ -9,9 +9,9 @@ This chart deploys PaddleDock in Kubernetes with a queue-style topology:
 - optional bundled `redis`
 - optional pre-install/pre-upgrade migration hook job
 
-## PaddleDock HA Queue Profile
+## PaddleDoc HA Queue Profile
 
-This chart includes a PaddleDock HA queue profile for production-oriented deployments:
+This chart includes a PaddleDoc HA queue profile for production-oriented deployments:
 
 - scale API (`backend.replicaCount`) and workers (`worker.replicaCount`) independently
 - autoscale each with HPA
@@ -21,23 +21,23 @@ This chart includes a PaddleDock HA queue profile for production-oriented deploy
 ## Quick Start
 
 ```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace
+helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+  --namespace PaddleDoc --create-namespace
 ```
 
 Install from GHCR OCI registry:
 
 ```bash
-helm install paddledock oci://ghcr.io/bl0rb/charts/paddledock --version 0.2.0 \
-  --namespace paddledock --create-namespace
+helm install PaddleDoc oci://ghcr.io/bl0rb/charts/PaddleDoc --version 0.2.0 \
+  --namespace PaddleDoc --create-namespace
 ```
 
 ## Production-like Example
 
 ```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace \
-  -f ./charts/paddledock/examples/paddledock-ha-queue-oss.yaml
+helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+  --namespace PaddleDoc --create-namespace \
+  -f ./charts/PaddleDoc/examples/PaddleDoc-ha-queue-oss.yaml
 ```
 
 ## Small Kubernetes Example (CPU + External PostgreSQL)
@@ -49,9 +49,9 @@ Keep one replica per component, use conservative resources, and default to a
 CPU OCR profile.
 
 ```bash
-helm upgrade --install paddledock ./charts/paddledock \
-  --namespace paddledock --create-namespace \
-  -f ./charts/paddledock/examples/nas-cpu-external-postgres.yaml
+helm upgrade --install PaddleDoc ./charts/PaddleDoc \
+  --namespace PaddleDoc --create-namespace \
+  -f ./charts/PaddleDoc/examples/nas-cpu-external-postgres.yaml
 ```
 
 ## Important Notes
@@ -87,11 +87,11 @@ database:
   useExternal: true
   host: "your-postgres-host.com"
   port: 5432
-  database: paddledock
+  database: PaddleDoc
   schema: "public"
-  user: paddledock
+  user: PaddleDoc
   passwordSecret:
-    name: "paddledock-db-secret"
+    name: "PaddleDoc-db-secret"
     key: "password"
 ```
 
@@ -101,7 +101,7 @@ Example secret:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: paddledock-db-secret
+  name: PaddleDoc-db-secret
 type: Opaque
 stringData:
   password: "change-me"
@@ -123,7 +123,7 @@ The following list contains all configurable parameters currently supported by t
 | `global.podLabels` | map | `{}` |
 | `frontend.enabled` | bool | `true` |
 | `frontend.replicaCount` | int | `1` |
-| `frontend.image.repository` | string | `ghcr.io/bl0rb/paddledock-frontend` |
+| `frontend.image.repository` | string | `ghcr.io/bl0rb/PaddleDoc-frontend` |
 | `frontend.image.tag` | string | `latest` |
 | `frontend.image.pullPolicy` | string | `IfNotPresent` |
 | `frontend.service.type` | string | `ClusterIP` |
@@ -135,7 +135,7 @@ The following list contains all configurable parameters currently supported by t
 | `frontend.affinity` | map | `{}` |
 | `backend.enabled` | bool | `true` |
 | `backend.replicaCount` | int | `1` |
-| `backend.image.repository` | string | `ghcr.io/bl0rb/paddledock-backend` |
+| `backend.image.repository` | string | `ghcr.io/bl0rb/PaddleDoc-backend` |
 | `backend.image.tag` | string | `latest` |
 | `backend.image.pullPolicy` | string | `IfNotPresent` |
 | `backend.service.type` | string | `ClusterIP` |
@@ -148,7 +148,7 @@ The following list contains all configurable parameters currently supported by t
 | `backend.affinity` | map | `{}` |
 | `worker.enabled` | bool | `true` |
 | `worker.replicaCount` | int | `1` |
-| `worker.image.repository` | string | `ghcr.io/bl0rb/paddledock-worker` |
+| `worker.image.repository` | string | `ghcr.io/bl0rb/PaddleDoc-worker` |
 | `worker.image.tag` | string | `latest` |
 | `worker.image.pullPolicy` | string | `IfNotPresent` |
 | `worker.paddleDefaultProfile` | string | `ppocrv6_tiny` |
@@ -167,9 +167,9 @@ The following list contains all configurable parameters currently supported by t
 | `database.useExternal` | bool | `true` |
 | `database.host` | string | `""` |
 | `database.port` | int | `5432` |
-| `database.database` | string | `paddledock` |
+| `database.database` | string | `PaddleDoc` |
 | `database.schema` | string | `public` |
-| `database.user` | string | `paddledock` |
+| `database.user` | string | `PaddleDoc` |
 | `database.passwordSecret.name` | string | `""` |
 | `database.passwordSecret.key` | string | `password` |
 | `redis.enabled` | bool | `true` |
@@ -190,12 +190,12 @@ The following list contains all configurable parameters currently supported by t
 | `ingress.frontend.enabled` | bool | `false` |
 | `ingress.frontend.className` | string | `""` |
 | `ingress.frontend.annotations` | map | `{}` |
-| `ingress.frontend.hosts` | list | `[{host: paddledock.local, paths:[{path:/, pathType:Prefix}]}]` |
+| `ingress.frontend.hosts` | list | `[{host: PaddleDoc.local, paths:[{path:/, pathType:Prefix}]}]` |
 | `ingress.frontend.tls` | list | `[]` |
 | `ingress.backend.enabled` | bool | `false` |
 | `ingress.backend.className` | string | `""` |
 | `ingress.backend.annotations` | map | `{}` |
-| `ingress.backend.hosts` | list | `[{host: api.paddledock.local, paths:[{path:/, pathType:Prefix}]}]` |
+| `ingress.backend.hosts` | list | `[{host: api.PaddleDoc.local, paths:[{path:/, pathType:Prefix}]}]` |
 | `ingress.backend.tls` | list | `[]` |
 
 ## Full Values Example
@@ -221,7 +221,7 @@ frontend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/paddledock-frontend
+    repository: ghcr.io/bl0rb/PaddleDoc-frontend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -237,7 +237,7 @@ backend:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/paddledock-backend
+    repository: ghcr.io/bl0rb/PaddleDoc-backend
     tag: "latest"
     pullPolicy: IfNotPresent
   service:
@@ -254,7 +254,7 @@ worker:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/bl0rb/paddledock-worker
+    repository: ghcr.io/bl0rb/PaddleDoc-worker
     tag: "latest"
     pullPolicy: IfNotPresent
   paddleDefaultProfile: ppocrv6_tiny
@@ -280,9 +280,9 @@ database:
   useExternal: true
   host: ""
   port: 5432
-  database: paddledock
+  database: PaddleDoc
   schema: public
-  user: paddledock
+  user: PaddleDoc
   passwordSecret:
     name: ""
     key: password
@@ -315,7 +315,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: paddledock.local
+      - host: PaddleDoc.local
         paths:
           - path: /
             pathType: Prefix
@@ -325,7 +325,7 @@ ingress:
     className: ""
     annotations: {}
     hosts:
-      - host: api.paddledock.local
+      - host: api.PaddleDoc.local
         paths:
           - path: /
             pathType: Prefix

@@ -84,7 +84,7 @@ const HeroPanel = memo(function HeroPanel({
               Your documents, supercharged with PaddleOCR
             </h1>
             <p className="mt-4 max-w-xl text-base leading-7 text-slate-600 sm:text-lg">
-              Upload files, process them automated and access cool markdown outputs. PaddleDock is your dashboard for document processing, powered by the open-source PaddleOCR engine.
+              Upload files, process them automated and access cool markdown outputs. PaddleDoc is your dashboard for document processing, powered by the open-source PaddleOCR engine.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
               <Link href="/jobs">
@@ -99,7 +99,7 @@ const HeroPanel = memo(function HeroPanel({
         <div className="border-t border-slate-100 bg-gradient-to-br from-emerald-700 via-emerald-800 to-slate-900 p-6 text-white lg:border-l lg:border-t-0 lg:p-8">
           <div className="flex h-full flex-col justify-between gap-6">
             <div>
-              <p className="text-sm uppercase tracking-[0.2em] text-emerald-100/80">PaddleDock</p>
+              <p className="text-sm uppercase tracking-[0.2em] text-emerald-100/80">PaddleDoc</p>
               <h2 className="mt-3 text-2xl font-semibold">Document processing</h2>
               <p className="mt-3 text-sm leading-6 text-emerald-50/85">
                 Status: {uiState}

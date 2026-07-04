@@ -66,7 +66,7 @@ export function SidebarNav() {
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600">
             <Cpu className="h-4 w-4 text-white" />
           </div>
-          <span className="text-base font-semibold text-slate-950">PaddleDock</span>
+          <span className="text-base font-semibold text-slate-950">PaddleDoc</span>
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">

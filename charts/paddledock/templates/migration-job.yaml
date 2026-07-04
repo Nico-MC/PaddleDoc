@@ -5,9 +5,9 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "paddledock.fullname" . }}-migrate
+  name: {{ include "PaddleDoc.fullname" . }}-migrate
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: migration
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -18,11 +18,11 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "paddledock.selectorLabels" . | nindent 8 }}
+        {{- include "PaddleDoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "paddledock.serviceAccountName" . }}
+      serviceAccountName: {{ include "PaddleDoc.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -45,6 +45,6 @@ spec:
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledock.fullname" . }}-env
+                  name: {{ include "PaddleDoc.fullname" . }}-env
                   key: REDIS_URL
 {{- end }}

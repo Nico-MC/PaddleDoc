@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "paddledock.fullname" . }}-redis
+  name: {{ include "PaddleDoc.fullname" . }}-redis
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "paddledock.selectorLabels" . | nindent 6 }}
+      {{- include "PaddleDoc.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: redis
   template:
     metadata:
       labels:
-        {{- include "paddledock.selectorLabels" . | nindent 8 }}
+        {{- include "PaddleDoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: redis
     spec:
       containers:

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-06-17
 
 ### Added
-- Initial release of PaddleDock
+- Initial release of PaddleDoc
 - Document processing with PaddleOCR support
 - Web UI for uploading and managing documents
 - FastAPI backend with Celery workers for async processing

@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "paddledock.fullname" . }}-frontend
+  name: {{ include "PaddleDoc.fullname" . }}-frontend
   labels:
-    {{- include "paddledock.labels" . | nindent 4 }}
+    {{- include "PaddleDoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: frontend
 spec:
   replicas: {{ .Values.frontend.replicaCount }}
   selector:
     matchLabels:
-      {{- include "paddledock.selectorLabels" . | nindent 6 }}
+      {{- include "PaddleDoc.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: frontend
   template:
     metadata:
       labels:
-        {{- include "paddledock.selectorLabels" . | nindent 8 }}
+        {{- include "PaddleDoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: frontend
         {{- with .Values.global.podLabels }}
         {{- toYaml . | nindent 8 }}
@@ -25,7 +25,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "paddledock.serviceAccountName" . }}
+      serviceAccountName: {{ include "PaddleDoc.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

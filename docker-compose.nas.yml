@@ -1,37 +1,37 @@
-name: paddledock
+name: PaddleDoc
 
 services:
   postgres:
     image: postgres:16
     restart: always
-    container_name: paddledock_postgres
+    container_name: PaddleDoc_postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-paddledock}
-      POSTGRES_USER: ${POSTGRES_USER:-paddledock}
+      POSTGRES_DB: ${POSTGRES_DB:-PaddleDoc}
+      POSTGRES_USER: ${POSTGRES_USER:-PaddleDoc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - ./nas-data/postgres:/var/lib/postgresql/data:rw
     networks:
-      - paddledock_netbridge
+      - PaddleDoc_netbridge
 
   redis:
     image: redis:7
     restart: always
-    container_name: paddledock_redis
+    container_name: PaddleDoc_redis
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     volumes:
       - ./nas-data/redis:/data:rw
     networks:
-      - paddledock_netbridge
+      - PaddleDoc_netbridge
 
   backend:
-    image: ghcr.io/bl0rb/paddledock-backend:${PADDLEDOCK_TAG:-latest}
+    image: ghcr.io/bl0rb/PaddleDoc-backend:${PaddleDoc_TAG:-latest}
     restart: always
-    container_name: paddledock_backend
+    container_name: PaddleDoc_backend
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paddledock}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-paddledock}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-PaddleDoc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-PaddleDoc}
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
@@ -42,16 +42,16 @@ services:
       - postgres
       - redis
     networks:
-      - paddledock_netbridge
+      - PaddleDoc_netbridge
 
   worker:
-    image: ghcr.io/bl0rb/paddledock-worker:${PADDLEDOCK_TAG:-latest}
+    image: ghcr.io/bl0rb/PaddleDoc-worker:${PaddleDoc_TAG:-latest}
     restart: always
-    container_name: paddledock_worker
+    container_name: PaddleDoc_worker
     mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
     cpus: ${WORKER_CPUS:-2.0}
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paddledock}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-paddledock}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-PaddleDoc}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-PaddleDoc}
       REDIS_URL: redis://redis:6379/0
       PADDLE_DEFAULT_PROFILE: ${PADDLE_DEFAULT_PROFILE:-ppocrv6_tiny}
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
@@ -70,12 +70,12 @@ services:
       - backend
       - redis
     networks:
-      - paddledock_netbridge
+      - PaddleDoc_netbridge
 
   frontend:
-    image: ghcr.io/bl0rb/paddledock-frontend:${PADDLEDOCK_TAG:-latest}
+    image: ghcr.io/bl0rb/PaddleDoc-frontend:${PaddleDoc_TAG:-latest}
     restart: always
-    container_name: paddledock_frontend
+    container_name: PaddleDoc_frontend
     ports:
       - "3000:3000"
     environment:
@@ -83,8 +83,8 @@ services:
     depends_on:
       - backend
     networks:
-      - paddledock_netbridge
+      - PaddleDoc_netbridge
 
 networks:
-  paddledock_netbridge:
+  PaddleDoc_netbridge:
     driver: bridge
