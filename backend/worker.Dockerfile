@@ -2,6 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+ARG TARGETARCH
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
@@ -28,13 +30,15 @@ RUN pip install --no-cache-dir onnxruntime
 # Required by the OpenAI vision pipeline to render PDF pages to images.
 RUN pip install --no-cache-dir pypdfium2
 
-# PaddlePaddle GPU framework (3.2.1+, required by PaddleOCR-VL-1.6).
-# Uses --extra-index-url so PyPI remains the primary index for other packages (Pillow etc.)
-# while paddlepaddle-gpu is resolved from PaddlePaddle's CUDA 12.6 index.
-# At runtime, paddle.is_compiled_with_cuda() returns True when the container is started
-# with NVIDIA device reservation (docker-compose.gpu.yml).
-RUN pip install --no-cache-dir paddlepaddle-gpu==3.2.1 \
-    --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# PaddlePaddle install is architecture-specific:
+# - amd64: use CUDA-enabled wheel for GPU deployments.
+# - arm64: use CPU wheel (GPU wheel is not published for aarch64).
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+			pip install --no-cache-dir paddlepaddle-gpu==3.2.1 \
+				--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/; \
+		else \
+			pip install --no-cache-dir paddlepaddle==3.2.1; \
+		fi
 
 # PaddleOCR PP-StructureV3 and PaddleOCR-VL for document parsing.
 RUN pip install --no-cache-dir "paddleocr[doc-parser]"
