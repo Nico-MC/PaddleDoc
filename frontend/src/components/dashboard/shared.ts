@@ -1,3 +1,5 @@
+import { API_BASE_URL } from '@/lib/api-base';
+
 export type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
 export type UIState = 'Idle' | 'Processing' | 'Finished';
 
@@ -79,7 +81,7 @@ export type UploadProgress = {
 
 export type FolderOptions = Record<string, string[]>;
 
-export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+export const API = API_BASE_URL;
 
 export function formatBytes(bytes: number | null) {
   if (bytes === null) {

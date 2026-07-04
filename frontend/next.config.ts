@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  env: {
+    PADDLEDOC_PUBLIC_API_URL: process.env.PADDLEDOC_PUBLIC_API_URL,
+  },
 };
 
 export default nextConfig;

@@ -37,7 +37,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-paddledoc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       REDIS_URL: redis://redis:6379/0
-      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
@@ -87,7 +87,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      PADDLEDOC_PUBLIC_API_URL: ${PADDLEDOC_PUBLIC_API_URL:-}
     depends_on:
       - backend
     networks:

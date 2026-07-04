@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
+import { API_BASE_URL } from '@/lib/api-base';
 
 const LOWER_PROFILE_RETRY_MAP: Record<string, string> = {
   ppocrv6_medium_structurev3: 'ppocrv6_small_structurev3',
@@ -25,7 +26,7 @@ type Job = {
   created_at: string;
 };
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+const API = API_BASE_URL;
 
 export default function JobDetails() {
   const params = useParams<{ id: string }>();

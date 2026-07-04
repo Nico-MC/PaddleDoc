@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Download, LoaderCircle, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { API_BASE_URL } from '@/lib/api-base';
 
 type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
 
@@ -36,7 +37,7 @@ type DocumentBrowserProps = {
   hideHeader?: boolean;
 };
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+const API = API_BASE_URL;
 
 const statusBadge: Record<JobStatus, string> = {
   PENDING: 'bg-slate-100 text-slate-700',

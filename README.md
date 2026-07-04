@@ -36,11 +36,11 @@ docker compose -f docker-compose.nas.yml up -d
 Before first production run, set strong credentials/environment values:
 
 ```bash
-POSTGRES_USER=PaddleDoc
+POSTGRES_USER=paddledoc
 POSTGRES_PASSWORD=change-this
-POSTGRES_DB=PaddleDoc
-PaddleDoc_TAG=latest
-NEXT_PUBLIC_API_URL=http://NAS_IP:8000
+POSTGRES_DB=paddledoc
+PADDLEDOC_TAG=latest
+PADDLEDOC_PUBLIC_API_URL=http://NAS_IP:8000
 ```
 
 Endpoints:
