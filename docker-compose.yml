@@ -53,6 +53,7 @@ services:
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
       - ./backend/storage:/app/backend/storage
+      - paddlex_models:/root/.paddlex
     depends_on:
       - backend
       - redis
@@ -77,3 +78,4 @@ services:
 
 volumes:
   pgdata:
+  paddlex_models:

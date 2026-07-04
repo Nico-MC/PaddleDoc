@@ -20,6 +20,7 @@ from app.services.quality_gate import evaluate_document_quality
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
 _PDF_CHUNK_PAGE_SIZE = 6
+_PADDLE_VL_PIPELINES: dict[tuple[str, str], object] = {}
 _PDF_CHUNK_PAGE_SIZE_BY_PROFILE: dict[str, int] = {
     'ppocrv6_medium_structurev3': 2,
     'ppocrv6_medium': 2,
@@ -661,7 +662,12 @@ def _paddlevl_to_structure(
     from paddleocr import PaddleOCRVL  # noqa: PLC0415
 
     device = 'gpu' if capability.get('selected_device') == 'gpu' else 'cpu'
-    pipeline = PaddleOCRVL(pipeline_version='v1.6', device=device)
+    pipeline_key = ('v1.6', device)
+    cached_pipeline = _PADDLE_VL_PIPELINES.get(pipeline_key)
+    if cached_pipeline is None:
+        cached_pipeline = PaddleOCRVL(pipeline_version='v1.6', device=device)
+        _PADDLE_VL_PIPELINES[pipeline_key] = cached_pipeline
+    pipeline = cast(PaddleOCRVL, cached_pipeline)
 
     results = list(pipeline.predict(str(source)))
     if not results:
