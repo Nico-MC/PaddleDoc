@@ -2,7 +2,12 @@ name: paddledoc
 
 services:
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
     restart: unless-stopped
     ports:
       - '3000:3000'
@@ -15,6 +20,10 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
     restart: unless-stopped
     ports:
       - '8000:8000'
@@ -22,6 +31,12 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: '["http://localhost:3000"]'
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
@@ -34,6 +49,10 @@ services:
     build:
       context: ./backend
       dockerfile: worker.Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
     restart: unless-stopped
     mem_limit: ${WORKER_MEMORY_LIMIT:-3g}
     cpus: ${WORKER_CPUS:-2.0}
@@ -41,6 +60,12 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
       # Runtime tuning for smaller ARM hosts to reduce model load spikes.
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
