@@ -1,4 +1,5 @@
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -98,6 +99,34 @@ def test_convert_to_markdown_falls_back_to_pypdf_when_paddle_missing(monkeypatch
     assert 'Hello from PDF' in markdown
     assert details['engine'] == 'pypdf-fallback'
     assert details['used_fallback'] is True
+    assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
+
+
+def test_convert_to_markdown_falls_back_to_docx_when_paddle_missing(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.docx'
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:body>'
+        '<w:p><w:r><w:t>Hello from DOCX</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p>'
+        '</w:body>'
+        '</w:document>'
+    )
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('word/document.xml', document_xml)
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny',
+        'timeout_seconds': 30,
+    })
+    monkeypatch.setattr(paddle_service, '_paddleocr_available', lambda: False)
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(source), profile_id='ppocrv6_tiny')
+    assert 'Hello from DOCX' in markdown
+    assert details['engine'] == 'docx-fallback'
+    assert details['used_fallback'] is True
+    assert details['paragraph_count'] == 2
     assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 

@@ -6,6 +6,8 @@ import platform
 import re
 import urllib.error
 import urllib.request
+import zipfile
+from xml.etree import ElementTree as ET
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -228,6 +230,37 @@ def _fallback_spreadsheet_to_markdown(source: Path) -> tuple[str, int, int]:
         raise RuntimeError('Spreadsheet fallback extraction produced no rows')
 
     return '\n\n---\n\n'.join(sections), sheet_count, row_count
+
+
+def _fallback_docx_to_markdown(source: Path) -> tuple[str, int]:
+    """Extract plain-text paragraphs from DOCX XML as a resilient fallback."""
+    try:
+        with zipfile.ZipFile(source, 'r') as archive:
+            xml_bytes = archive.read('word/document.xml')
+    except KeyError as exc:
+        raise RuntimeError('DOCX fallback extraction could not find word/document.xml') from exc
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError('DOCX fallback extraction received an invalid DOCX file') from exc
+
+    root = ET.fromstring(xml_bytes)
+    namespace = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    paragraphs = root.findall('.//w:p', namespace)
+
+    lines: list[str] = []
+    paragraph_count = 0
+    for paragraph in paragraphs:
+        text_runs = [run.text or '' for run in paragraph.findall('.//w:t', namespace)]
+        text = re.sub(r'\s+', ' ', ''.join(text_runs)).strip()
+        if not text:
+            continue
+        lines.append(text)
+        paragraph_count += 1
+
+    if not lines:
+        raise RuntimeError('DOCX fallback extraction produced no text')
+
+    markdown = '\n\n'.join(lines)
+    return markdown, paragraph_count
 
 
 def _clean_block_text(value: str) -> str:
@@ -814,6 +847,20 @@ def convert_to_markdown_with_details(
                 'quality_gate': quality_gate,
                 **capability,
             }
+        if source.suffix.lower() == '.docx':
+            markdown, paragraph_count = _fallback_docx_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
+                'engine': 'docx-fallback',
+                'used_fallback': True,
+                'fallback_reason': 'PaddleOCR is not installed in this worker image',
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': 1,
+                'paragraph_count': paragraph_count,
+                'quality_gate': quality_gate,
+                **capability,
+            }
         raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
@@ -888,6 +935,20 @@ def convert_to_markdown_with_details(
                 'page_count': max(1, sheet_count),
                 'sheet_count': sheet_count,
                 'row_count': row_count,
+                'quality_gate': quality_gate,
+                **capability,
+            }
+        if source.suffix.lower() == '.docx':
+            markdown, paragraph_count = _fallback_docx_to_markdown(source)
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
+                'engine': 'docx-fallback',
+                'used_fallback': True,
+                'fallback_reason': str(exc),
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': 1,
+                'paragraph_count': paragraph_count,
                 'quality_gate': quality_gate,
                 **capability,
             }
