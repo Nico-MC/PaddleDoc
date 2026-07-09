@@ -173,7 +173,14 @@ def _recover_jobs_on_worker_ready(sender=None, **kwargs) -> None:  # pragma: no 
         _release_recovery_lock(lock_client, lock_token)
 
 
-@celery_app.task(name='process_job', bind=True, acks_late=True, reject_on_worker_lost=True)
+@celery_app.task(
+    name='process_job',
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=settings.paddle_timeout_seconds,
+    time_limit=settings.paddle_timeout_seconds + 30,
+)
 def process_job(
     self,
     job_id: str,

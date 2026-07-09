@@ -2,7 +2,12 @@ name: paddledoc
 
 services:
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
     restart: unless-stopped
     ports:
       - '3000:3000'
@@ -22,6 +27,12 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: '["http://localhost:3000"]'
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
     volumes:
@@ -41,6 +52,15 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
       REDIS_URL: redis://redis:6379/0
       PADDLE_DEFAULT_PROFILE: ppocrv6_tiny
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: ${PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:-true}
+      HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
+      HF_HUB_ENABLE_HF_TRANSFER: ${HF_HUB_ENABLE_HF_TRANSFER:-0}
       # Runtime tuning for smaller ARM hosts to reduce model load spikes.
       CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-1}
       CELERY_PREFETCH_MULTIPLIER: ${CELERY_PREFETCH_MULTIPLIER:-1}
@@ -54,6 +74,7 @@ services:
     volumes:
       - ./backend/storage:/app/backend/storage
       - paddlex_models:/root/.paddlex
+      - hf_cache:/root/.cache/huggingface
     depends_on:
       - backend
       - redis
@@ -79,3 +100,4 @@ services:
 volumes:
   pgdata:
   paddlex_models:
+  hf_cache:
