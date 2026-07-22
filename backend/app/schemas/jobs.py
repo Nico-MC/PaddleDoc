@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -137,6 +137,41 @@ class MarkdownFileEntry(BaseModel):
 
 class MarkdownBrowserResponse(BaseModel):
     items: list[MarkdownFileEntry]
+
+
+class EncourageIngestRequest(BaseModel):
+    path: str = Field(min_length=1)
+
+
+class EncourageDocumentResponse(BaseModel):
+    id: str
+    content: str
+    score: float
+    distance: float | None = None
+    meta_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class EncouragePipelineResponse(BaseModel):
+    pipeline_id: str
+    collection_name: str
+    document_count: int
+    top_k: int
+    rag_method: str
+    ready: bool
+
+
+class EncourageDebugPayloadResponse(BaseModel):
+    config: dict[str, Any] = Field(default_factory=dict)
+    collection: dict[str, Any] = Field(default_factory=dict)
+    document_dump: dict[str, Any] = Field(default_factory=dict)
+
+
+class EncourageIngestResponse(BaseModel):
+    path: str
+    filename: str
+    document: EncourageDocumentResponse
+    pipeline: EncouragePipelineResponse
+    debug: EncourageDebugPayloadResponse
 
 
 class FolderActionRequest(BaseModel):

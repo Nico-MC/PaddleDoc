@@ -18,6 +18,11 @@ from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
     CollectionResponse,
+    EncourageDebugPayloadResponse,
+    EncourageDocumentResponse,
+    EncourageIngestRequest,
+    EncourageIngestResponse,
+    EncouragePipelineResponse,
     CollectionStartRequest,
     CollectionStartResponse,
     DashboardStatsResponse,
@@ -39,6 +44,7 @@ from app.schemas.jobs import (
     RuntimeCapabilityInfo,
     UploadResponse,
 )
+from app.services.encourage_bridge import ingest_markdown_file
 from app.services.paddle_service import (
     get_paddle_capabilities,
     get_paddle_settings,
@@ -1073,6 +1079,46 @@ def get_markdown_file(relative_path: str) -> PlainTextResponse:
     if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() != '.md':
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
     return PlainTextResponse(candidate.read_text(encoding='utf-8'))
+
+
+@router.post('/encourage/ingest', response_model=EncourageIngestResponse)
+def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> EncourageIngestResponse:
+    root = settings.results_dir.resolve()
+    candidate = (root / payload.path).resolve()
+    if root not in candidate.parents and candidate != root:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid markdown path')
+    if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() != '.md':
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+
+    try:
+        document = ingest_markdown_file(candidate)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return EncourageIngestResponse(
+        path=payload.path,
+        filename=candidate.name,
+        document=EncourageDocumentResponse(
+            id=document['id'],
+            content=document['content'],
+            score=document['score'],
+            distance=document['distance'],
+            meta_data=document['meta_data'],
+        ),
+        pipeline=EncouragePipelineResponse(
+            pipeline_id=document['pipeline_id'],
+            collection_name=document['collection_name'],
+            document_count=document['document_count'],
+            top_k=document['top_k'],
+            rag_method=document['rag_method'],
+            ready=document['ready'],
+        ),
+        debug=EncourageDebugPayloadResponse(
+            config=document['config'],
+            collection=document['collection'],
+            document_dump=document['document_dump'],
+        ),
+    )
 
 
 @router.post('/folders', response_model=FolderActionResponse)
