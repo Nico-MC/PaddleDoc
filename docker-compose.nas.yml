@@ -86,6 +86,7 @@ services:
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
       - ./nas-data/paddlex_models:/root/.paddlex:rw
+      - ./nas-data/hf_cache:/root/.cache/huggingface:rw
     depends_on:
       - backend
       - redis

@@ -79,6 +79,7 @@ services:
     volumes:
       - ./backend/storage:/app/backend/storage
       - paddlex_models:/root/.paddlex
+      - hf_cache:/root/.cache/huggingface
     depends_on:
       - backend
       - redis
@@ -104,3 +105,4 @@ services:
 volumes:
   pgdata:
   paddlex_models:
+  hf_cache:

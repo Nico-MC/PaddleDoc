@@ -3,13 +3,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, LibraryBig } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Sparkles } from 'lucide-react';
 
 const links = [
   { href: '/', label: 'Home', icon: Home },
   { href: '/processing', label: 'Processing', icon: Cpu },
   { href: '/jobs', label: 'Jobs', icon: FolderOpen },
-  { href: '/encourage', label: 'encouRAGe', icon: LibraryBig },
+  { href: '/encourage', label: 'Encourage', icon: Sparkles },
 ];
 
 export function SidebarNav() {
