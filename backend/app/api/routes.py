@@ -23,6 +23,9 @@ from app.schemas.jobs import (
     EncourageIngestRequest,
     EncourageIngestResponse,
     EncouragePipelineResponse,
+    EncourageRagRunResponse,
+    EncourageRetrieveRequest,
+    EncourageRetrieveResponse,
     CollectionStartRequest,
     CollectionStartResponse,
     DashboardStatsResponse,
@@ -44,7 +47,7 @@ from app.schemas.jobs import (
     RuntimeCapabilityInfo,
     UploadResponse,
 )
-from app.services.encourage_bridge import ingest_markdown_file
+from app.services.encourage_bridge import ingest_markdown_file, retrieve_from_pipeline, run_pipeline_once
 from app.services.paddle_service import (
     get_paddle_capabilities,
     get_paddle_settings,
@@ -1095,6 +1098,19 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
+    try:
+        rag_run = run_pipeline_once(
+            pipeline_id=document['pipeline_id'],
+            query=payload.query,
+            model_name=payload.model_name,
+            api_base_url=settings.openai_api_base_url,
+            api_key=settings.openai_api_bearer_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
     return EncourageIngestResponse(
         path=payload.path,
         filename=candidate.name,
@@ -1118,6 +1134,40 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
             collection=document['collection'],
             document_dump=document['document_dump'],
         ),
+        rag_run=EncourageRagRunResponse(
+            query=rag_run['query'],
+            model_name=rag_run['model_name'],
+            answer=rag_run['answer'],
+        ),
+    )
+
+
+@router.post('/encourage/retrieve', response_model=EncourageRetrieveResponse)
+def retrieve_from_encourage_pipeline(payload: EncourageRetrieveRequest) -> EncourageRetrieveResponse:
+    try:
+        result = retrieve_from_pipeline(payload.pipeline_id, payload.query)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return EncourageRetrieveResponse(
+        pipeline_id=result['pipeline_id'],
+        collection_name=result['collection_name'],
+        query=result['query'],
+        top_k=result['top_k'],
+        results=[
+            EncourageDocumentResponse(
+                id=document['id'],
+                content=document['content'],
+                score=document['score'],
+                distance=document['distance'],
+                meta_data=document['meta_data'],
+            )
+            for document in result['results']
+        ],
     )
 
 

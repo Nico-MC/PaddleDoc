@@ -38,6 +38,19 @@ type EncourageIngestResponse = {
     collection: Record<string, unknown>;
     document_dump: Record<string, unknown>;
   };
+  rag_run: {
+    query: string;
+    model_name: string;
+    answer: string;
+  } | null;
+};
+
+type EncourageRetrieveResponse = {
+  pipeline_id: string;
+  collection_name: string;
+  query: string;
+  top_k: number;
+  results: EncourageDocument[];
 };
 
 const API = API_BASE_URL;
@@ -49,25 +62,33 @@ export default function EncouragePage() {
   const [ingested, setIngested] = useState<EncourageIngestResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
+  const [query, setQuery] = useState('Worum geht es in diesem Dokument?');
+  const [isRetrieving, setIsRetrieving] = useState(false);
+  const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const loadFiles = async () => {
       setIsLoading(true);
       setError(null);
-      const response = await fetch(`${API}/api/v1/markdown-files`, { cache: 'no-store' });
-      if (!response.ok) {
-        setError('Failed to load markdown files.');
+      try {
+        const response = await fetch(`${API}/api/v1/markdown-files`, { cache: 'no-store' });
+        if (!response.ok) {
+          setError('Failed to load markdown files.');
+          setIsLoading(false);
+          return;
+        }
+        const payload = await response.json();
+        const nextItems = (payload.items ?? []) as MarkdownFileEntry[];
+        setItems(nextItems);
+        if (nextItems.length > 0) {
+          setSelectedPath(nextItems[0].path);
+        }
+      } catch {
+        setError('Failed to reach the backend while loading markdown files.');
+      } finally {
         setIsLoading(false);
-        return;
       }
-      const payload = await response.json();
-      const nextItems = (payload.items ?? []) as MarkdownFileEntry[];
-      setItems(nextItems);
-      if (nextItems.length > 0) {
-        setSelectedPath(nextItems[0].path);
-      }
-      setIsLoading(false);
     };
 
     void loadFiles();
@@ -80,17 +101,24 @@ export default function EncouragePage() {
         return;
       }
       setError(null);
-      const response = await fetch(`${API}/api/v1/markdown-files/${selectedPath}`, {
-        cache: 'no-store',
-      });
-      if (!response.ok) {
-        setError('Failed to load markdown preview.');
+      try {
+        const response = await fetch(`${API}/api/v1/markdown-files/${selectedPath}`, {
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          setError('Failed to load markdown preview.');
+          setMarkdownPreview('');
+          return;
+        }
+        const text = await response.text();
+        setMarkdownPreview(text);
+        setIngested(null);
+        setRetrieval(null);
+      } catch {
+        setError('Failed to reach the backend while loading the markdown preview.');
         setMarkdownPreview('');
-        return;
+        setRetrieval(null);
       }
-      const text = await response.text();
-      setMarkdownPreview(text);
-      setIngested(null);
     };
 
     void loadPreview();
@@ -102,21 +130,56 @@ export default function EncouragePage() {
     }
     setIsIngesting(true);
     setError(null);
-    const response = await fetch(`${API}/api/v1/encourage/ingest`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: selectedPath }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to ingest markdown file.';
-      setError(detail);
+    try {
+      const response = await fetch(`${API}/api/v1/encourage/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: selectedPath, query }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to ingest markdown file.';
+        setError(detail);
+        return;
+      }
+      const payload = (await response.json()) as EncourageIngestResponse;
+      setIngested(payload);
+      setRetrieval(null);
+    } catch {
+      setError('Failed to reach the backend while ingesting the markdown file.');
+    } finally {
       setIsIngesting(false);
+    }
+  };
+
+  const retrieveFromPipeline = async () => {
+    if (!ingested?.pipeline.pipeline_id || !query.trim()) {
       return;
     }
-    const payload = (await response.json()) as EncourageIngestResponse;
-    setIngested(payload);
-    setIsIngesting(false);
+    setIsRetrieving(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/api/v1/encourage/retrieve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pipeline_id: ingested.pipeline.pipeline_id,
+          query,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to retrieve from pipeline.';
+        setError(detail);
+        return;
+      }
+      const payload = (await response.json()) as EncourageRetrieveResponse;
+      setRetrieval(payload);
+    } catch {
+      setError('Failed to reach the backend while retrieving from the pipeline.');
+    } finally {
+      setIsRetrieving(false);
+    }
   };
 
   return (
@@ -210,11 +273,63 @@ export default function EncouragePage() {
                           config: ingested.debug.config,
                           collection: ingested.debug.collection,
                           document_dump: ingested.debug.document_dump,
+                          rag_run: ingested.rag_run,
                         },
                         null,
                         2,
                       )}
                     </pre>
+                  </div>
+                  {ingested.rag_run ? (
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                      <p className="font-semibold text-emerald-900">RAG answer (run on ingest)</p>
+                      <p className="mt-1 text-xs text-emerald-700">
+                        Model <span className="font-medium">{ingested.rag_run.model_name}</span> answered query:{' '}
+                        <span className="font-medium">{ingested.rag_run.query}</span>
+                      </p>
+                      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-emerald-200 bg-white p-4 text-sm text-emerald-900">
+                        {ingested.rag_run.answer || 'No answer returned by the model.'}
+                      </pre>
+                    </div>
+                  ) : null}
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="font-semibold text-slate-950">Retrieval probe</p>
+                        <p className="text-xs text-slate-500">Inspect what the vector store returned for your query.</p>
+                      </div>
+                      <Button onClick={retrieveFromPipeline} disabled={isRetrieving || !query.trim()}>
+                        {isRetrieving ? 'Retrieving...' : 'Retrieve'}
+                      </Button>
+                    </div>
+                    <textarea
+                      value={query}
+                      onChange={(event: { target: { value: string } }) => setQuery(event.target.value)}
+                      rows={3}
+                      className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-emerald-300"
+                      placeholder="Ask a question about the selected markdown file"
+                    />
+                    {retrieval ? (
+                      <div className="mt-4 space-y-3">
+                        <p className="text-xs text-slate-500">
+                          Collection <span className="font-medium text-slate-700">{retrieval.collection_name}</span> returned {retrieval.results.length} result(s).
+                        </p>
+                        {retrieval.results.map((result) => (
+                          <div key={result.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                              <span>ID: {result.id}</span>
+                              <span>Score: {result.score.toFixed(4)}</span>
+                              <span>Distance: {result.distance ?? 'n/a'}</span>
+                            </div>
+                            <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-words text-sm text-emerald-800">
+                              {result.content}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-500">Run a query to inspect what the vector store would return for this document.</p>
+                    )}
                   </div>
                 </div>
               ) : (

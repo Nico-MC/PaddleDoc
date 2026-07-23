@@ -141,6 +141,13 @@ class MarkdownBrowserResponse(BaseModel):
 
 class EncourageIngestRequest(BaseModel):
     path: str = Field(min_length=1)
+    query: str = Field(default='Worum geht es in diesem Dokument?', min_length=1)
+    model_name: str | None = None
+
+
+class EncourageRetrieveRequest(BaseModel):
+    pipeline_id: str = Field(min_length=1)
+    query: str = Field(min_length=1)
 
 
 class EncourageDocumentResponse(BaseModel):
@@ -166,12 +173,27 @@ class EncourageDebugPayloadResponse(BaseModel):
     document_dump: dict[str, Any] = Field(default_factory=dict)
 
 
+class EncourageRagRunResponse(BaseModel):
+    query: str
+    model_name: str
+    answer: str
+
+
 class EncourageIngestResponse(BaseModel):
     path: str
     filename: str
     document: EncourageDocumentResponse
     pipeline: EncouragePipelineResponse
     debug: EncourageDebugPayloadResponse
+    rag_run: EncourageRagRunResponse | None = None
+
+
+class EncourageRetrieveResponse(BaseModel):
+    pipeline_id: str
+    collection_name: str
+    query: str
+    top_k: int
+    results: list[EncourageDocumentResponse] = Field(default_factory=list)
 
 
 class FolderActionRequest(BaseModel):

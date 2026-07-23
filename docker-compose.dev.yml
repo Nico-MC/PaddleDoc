@@ -23,11 +23,13 @@ services:
       - -c
       - |
         alembic upgrade head
-        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app --reload-dir /encourage/src
     environment:
+      PADDLEDOC_ENCOURAGE_SRC_PATH: /encourage/src
       RUN_ALEMBIC_ON_STARTUP: "false"
     volumes:
       - ./backend:/app
+      - ../encourage:/encourage
 
   worker:
     command:
@@ -39,6 +41,7 @@ services:
           /app/app
     volumes:
       - ./backend:/app
+      - ../encourage:/encourage
       - paddlex_models:/root/.paddlex
 
 volumes:

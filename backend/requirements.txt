@@ -18,3 +18,5 @@ chromadb==1.4.1
 Jinja2==3.1.6
 openai==1.98.0
 tqdm==4.67.3
+msgspec==0.20.0
+mlflow==2.18.0
