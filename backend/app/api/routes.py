@@ -20,6 +20,8 @@ from app.schemas.jobs import (
     CollectionResponse,
     EncourageDebugPayloadResponse,
     EncourageDocumentResponse,
+    EncourageEvaluateRequest,
+    EncourageEvaluationResponse,
     EncourageIngestRequest,
     EncourageIngestResponse,
     EncouragePipelineResponse,
@@ -32,6 +34,7 @@ from app.schemas.jobs import (
     FolderActionRequest,
     FolderActionResponse,
     HealthResponse,
+    EvaluationDatasetBrowserResponse,
     MarkdownBrowserResponse,
     MarkdownFileEntry,
     JobListResponse,
@@ -47,7 +50,14 @@ from app.schemas.jobs import (
     RuntimeCapabilityInfo,
     UploadResponse,
 )
-from app.services.encourage_bridge import ingest_markdown_file, retrieve_from_pipeline, run_pipeline_once
+from app.services.encourage_bridge import (
+    get_pipeline_metadata,
+    ingest_markdown_file,
+    retrieve_from_pipeline,
+    run_pipeline_once,
+)
+from app.services.encourage_evaluation import list_evaluation_datasets, run_encourage_evaluation
+from app.services.encourage_mlflow import log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     get_paddle_capabilities,
     get_paddle_settings,
@@ -1084,6 +1094,11 @@ def get_markdown_file(relative_path: str) -> PlainTextResponse:
     return PlainTextResponse(candidate.read_text(encoding='utf-8'))
 
 
+@router.get('/evaluation-datasets', response_model=EvaluationDatasetBrowserResponse)
+def list_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse:
+    return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets())
+
+
 @router.post('/encourage/ingest', response_model=EncourageIngestResponse)
 def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> EncourageIngestResponse:
     root = settings.results_dir.resolve()
@@ -1098,22 +1113,53 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
-    try:
-        rag_run = run_pipeline_once(
-            pipeline_id=document['pipeline_id'],
-            query=payload.query,
-            model_name=payload.model_name,
-            api_base_url=settings.openai_api_base_url,
-            api_key=settings.openai_api_bearer_token,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    rag_run: dict[str, str] | None = None
+    openai_base_url = settings.openai_api_base_url.strip()
+    openai_token = settings.openai_api_bearer_token.strip()
+    if payload.run_generation and openai_base_url and openai_token:
+        try:
+            rag_run = run_pipeline_once(
+                pipeline_id=document['pipeline_id'],
+                query=payload.query,
+                model_name=payload.model_name,
+                api_base_url=openai_base_url,
+                api_key=openai_token,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    pipeline_metadata = get_pipeline_metadata(document['pipeline_id']) or {
+        'pipeline_id': document['pipeline_id'],
+        'collection_name': document['collection_name'],
+        'rag_method': document['rag_method'],
+        'top_k': document['top_k'],
+        'document_count': document['document_count'],
+        'chunk_max_chars': document.get('config', {}).get('chunk_max_chars', 0),
+        'chunk_overlap_chars': document.get('config', {}).get('chunk_overlap_chars', 0),
+        'source_md_path': str(candidate),
+        'source_md_filename': candidate.name,
+    }
+    log_ingest_run(
+        metadata=pipeline_metadata,
+        config=document['config'],
+        collection=document['collection'],
+        document_dump=document['document_dump'],
+        query=payload.query,
+        run_generation=bool(payload.run_generation),
+        rag_run=rag_run,
+    )
 
     return EncourageIngestResponse(
         path=payload.path,
         filename=candidate.name,
+        source_markdown={
+            'path': str(candidate),
+            'filename': candidate.name,
+            'document_count': document['document_count'],
+            'chunk_preview': document.get('config', {}).get('chunk_preview', []),
+        },
         document=EncourageDocumentResponse(
             id=document['id'],
             content=document['content'],
@@ -1134,10 +1180,14 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
             collection=document['collection'],
             document_dump=document['document_dump'],
         ),
-        rag_run=EncourageRagRunResponse(
-            query=rag_run['query'],
-            model_name=rag_run['model_name'],
-            answer=rag_run['answer'],
+        rag_run=(
+            EncourageRagRunResponse(
+                query=rag_run['query'],
+                model_name=rag_run['model_name'],
+                answer=rag_run['answer'],
+            )
+            if rag_run
+            else None
         ),
     )
 
@@ -1152,6 +1202,23 @@ def retrieve_from_encourage_pipeline(payload: EncourageRetrieveRequest) -> Encou
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    pipeline_metadata = get_pipeline_metadata(payload.pipeline_id) or {
+        'pipeline_id': result['pipeline_id'],
+        'collection_name': result['collection_name'],
+        'rag_method': 'BaseRAG',
+        'top_k': result['top_k'],
+        'document_count': len(result['results']),
+        'chunk_max_chars': 0,
+        'chunk_overlap_chars': 0,
+        'source_md_path': '',
+        'source_md_filename': '',
+    }
+    log_retrieve_run(
+        metadata=pipeline_metadata,
+        query=result['query'],
+        results=result['results'],
+    )
 
     return EncourageRetrieveResponse(
         pipeline_id=result['pipeline_id'],
@@ -1168,6 +1235,40 @@ def retrieve_from_encourage_pipeline(payload: EncourageRetrieveRequest) -> Encou
             )
             for document in result['results']
         ],
+    )
+
+
+@router.post('/encourage/evaluate', response_model=EncourageEvaluationResponse)
+def evaluate_encourage_pipeline(payload: EncourageEvaluateRequest) -> EncourageEvaluationResponse:
+    try:
+        result = run_encourage_evaluation(
+            pipeline_id=payload.pipeline_id,
+            dataset_path=payload.dataset_path,
+            recall_k=payload.recall_k,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return EncourageEvaluationResponse(
+        pipeline_id=result['pipeline_id'],
+        collection_name=result['collection_name'],
+        markdown_path=result['markdown_path'],
+        dataset_path=result['dataset_path'],
+        dataset_filename=result['dataset_filename'],
+        question_count=result['question_count'],
+        evaluated_question_count=result['evaluated_question_count'],
+        top_k=result['top_k'],
+        recall_k=result['recall_k'],
+        mrr=result['mrr'],
+        recall_at_k=result['recall_at_k'],
+        hit_rate_at_k=result['hit_rate_at_k'],
+        mlflow_run_id=result['mlflow_run_id'],
     )
 
 

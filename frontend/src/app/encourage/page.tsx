@@ -13,6 +13,15 @@ type MarkdownFileEntry = {
   updated_at: string;
 };
 
+type EvaluationDatasetEntry = {
+  path: string;
+  filename: string;
+  row_count: number;
+  source_documents: string[];
+  size_bytes: number;
+  updated_at: string;
+};
+
 type EncourageDocument = {
   id: string;
   content: string;
@@ -24,6 +33,12 @@ type EncourageDocument = {
 type EncourageIngestResponse = {
   path: string;
   filename: string;
+  source_markdown: {
+    path: string;
+    filename: string;
+    document_count: number;
+    chunk_preview: string[];
+  };
   document: EncourageDocument;
   pipeline: {
     pipeline_id: string;
@@ -53,18 +68,40 @@ type EncourageRetrieveResponse = {
   results: EncourageDocument[];
 };
 
+type EncourageEvaluationResponse = {
+  pipeline_id: string;
+  collection_name: string;
+  markdown_path: string;
+  dataset_path: string;
+  dataset_filename: string;
+  question_count: number;
+  evaluated_question_count: number;
+  top_k: number;
+  recall_k: number;
+  mrr: number;
+  recall_at_k: number;
+  hit_rate_at_k: number;
+  mlflow_run_id: string | null;
+};
+
 const API = API_BASE_URL;
 
 export default function EncouragePage() {
   const [items, setItems] = useState<MarkdownFileEntry[]>([]);
+  const [datasets, setDatasets] = useState<EvaluationDatasetEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>('');
+  const [selectedDatasetPath, setSelectedDatasetPath] = useState<string>('');
   const [markdownPreview, setMarkdownPreview] = useState<string>('');
   const [ingested, setIngested] = useState<EncourageIngestResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
   const [query, setQuery] = useState('Worum geht es in diesem Dokument?');
+  const [runGeneration, setRunGeneration] = useState(true);
   const [isRetrieving, setIsRetrieving] = useState(false);
   const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evaluation, setEvaluation] = useState<EncourageEvaluationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -95,6 +132,32 @@ export default function EncouragePage() {
   }, []);
 
   useEffect(() => {
+    const loadDatasets = async () => {
+      setIsLoadingDatasets(true);
+      try {
+        const response = await fetch(`${API}/api/v1/evaluation-datasets`, { cache: 'no-store' });
+        if (!response.ok) {
+          setError('Failed to load evaluation datasets.');
+          setIsLoadingDatasets(false);
+          return;
+        }
+        const payload = await response.json();
+        const nextDatasets = (payload.items ?? []) as EvaluationDatasetEntry[];
+        setDatasets(nextDatasets);
+        if (nextDatasets.length > 0) {
+          setSelectedDatasetPath(nextDatasets[0].path);
+        }
+      } catch {
+        setError('Failed to reach the backend while loading evaluation datasets.');
+      } finally {
+        setIsLoadingDatasets(false);
+      }
+    };
+
+    void loadDatasets();
+  }, []);
+
+  useEffect(() => {
     const loadPreview = async () => {
       if (!selectedPath) {
         setMarkdownPreview('');
@@ -114,10 +177,12 @@ export default function EncouragePage() {
         setMarkdownPreview(text);
         setIngested(null);
         setRetrieval(null);
+        setEvaluation(null);
       } catch {
         setError('Failed to reach the backend while loading the markdown preview.');
         setMarkdownPreview('');
         setRetrieval(null);
+        setEvaluation(null);
       }
     };
 
@@ -134,7 +199,7 @@ export default function EncouragePage() {
       const response = await fetch(`${API}/api/v1/encourage/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: selectedPath, query }),
+        body: JSON.stringify({ path: selectedPath, query, run_generation: runGeneration }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
@@ -145,6 +210,7 @@ export default function EncouragePage() {
       const payload = (await response.json()) as EncourageIngestResponse;
       setIngested(payload);
       setRetrieval(null);
+      setEvaluation(null);
     } catch {
       setError('Failed to reach the backend while ingesting the markdown file.');
     } finally {
@@ -182,13 +248,45 @@ export default function EncouragePage() {
     }
   };
 
+  const runEvaluation = async () => {
+    if (!ingested?.pipeline.pipeline_id || !selectedDatasetPath) {
+      return;
+    }
+    setIsEvaluating(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/api/v1/encourage/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pipeline_id: ingested.pipeline.pipeline_id,
+          dataset_path: selectedDatasetPath,
+          recall_k: 3,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to run evaluation.';
+        setError(detail);
+        return;
+      }
+      const payload = (await response.json()) as EncourageEvaluationResponse;
+      setEvaluation(payload);
+    } catch {
+      setError('Failed to reach the backend while running evaluation.');
+    } finally {
+      setIsEvaluating(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-white px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-7xl space-y-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-6 lg:p-8">
         <div className="max-w-3xl">
           <h1 className="font-serif text-3xl font-semibold">Encourage</h1>
           <p className="mt-2 text-slate-600">
-            Select a PaddleDoc markdown result, then hand it over directly to Encourage for ingestion.
+            Select a PaddleDoc markdown result, then run the full Encourage flow in one step
+            (indexing, retrieval, generation).
           </p>
         </div>
 
@@ -198,10 +296,66 @@ export default function EncouragePage() {
           <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold">Markdown files</h2>
-              <Button onClick={ingestSelectedFile} disabled={!selectedPath || isIngesting || isLoading}>
-                {isIngesting ? 'Ingesting...' : 'Ingest MD file'}
-              </Button>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`rounded-full border px-2 py-1 text-xs font-semibold ${
+                    runGeneration
+                      ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
+                      : 'border-slate-300 bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  Generation: {runGeneration ? 'ON' : 'OFF'}
+                </span>
+                <Button onClick={ingestSelectedFile} disabled={!selectedPath || isIngesting || isLoading}>
+                  {isIngesting ? 'Ingesting...' : 'Ingest MD file'}
+                </Button>
+              </div>
             </div>
+            <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-slate-950">Evaluation datasets</h3>
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-500">
+                  {datasets.length} available
+                </span>
+              </div>
+              {isLoadingDatasets ? (
+                <p className="text-sm text-slate-500">Loading evaluation datasets...</p>
+              ) : datasets.length === 0 ? (
+                <p className="text-sm text-slate-500">No evaluation datasets found.</p>
+              ) : (
+                <div className="space-y-2">
+                  {datasets.map((item) => {
+                    const isActive = item.path === selectedDatasetPath;
+                    return (
+                      <button
+                        key={item.path}
+                        type="button"
+                        onClick={() => setSelectedDatasetPath(item.path)}
+                        className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                          isActive
+                            ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                        }`}
+                      >
+                        <p className="font-medium">{item.filename}</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {item.path} · {item.row_count} row(s)
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <label className="mb-3 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={runGeneration}
+                onChange={(event: { target: { checked: boolean } }) => setRunGeneration(event.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-300"
+              />
+              Run generation on ingest (uses configured OpenAI endpoint)
+            </label>
             {isLoading ? (
               <p className="text-sm text-slate-500">Loading markdown files...</p>
             ) : items.length === 0 ? (
@@ -241,7 +395,20 @@ export default function EncouragePage() {
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
               <h2 className="mb-2 text-lg font-semibold">Encourage pipeline</h2>
               {ingested ? (
-                <div className="space-y-3 text-sm text-slate-700">
+                <div className="space-y-4 text-sm text-slate-700">
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <p className="font-semibold text-emerald-900">Ingested Markdown</p>
+                    <p className="mt-2 text-xs text-emerald-700">
+                      <span className="font-medium">{ingested.source_markdown.filename}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-emerald-700">
+                      Path: <span className="font-medium text-emerald-900">{ingested.source_markdown.path}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-emerald-700">
+                      Chunks created: <span className="font-medium text-emerald-900">{ingested.source_markdown.document_count}</span>
+                    </p>
+                  </div>
+
                   <p><span className="font-semibold text-slate-950">File:</span> {ingested.filename}</p>
                   <p><span className="font-semibold text-slate-950">Document ID:</span> {ingested.document.id}</p>
                   <p><span className="font-semibold text-slate-950">Pipeline ID:</span> {ingested.pipeline.pipeline_id}</p>
@@ -268,6 +435,7 @@ export default function EncouragePage() {
                       {JSON.stringify(
                         {
                           selected_path: ingested.path,
+                          source_markdown: ingested.source_markdown,
                           document: ingested.document,
                           pipeline: ingested.pipeline,
                           config: ingested.debug.config,
@@ -291,14 +459,23 @@ export default function EncouragePage() {
                         {ingested.rag_run.answer || 'No answer returned by the model.'}
                       </pre>
                     </div>
-                  ) : null}
+                  ) : (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                      Generation was skipped. Either the toggle was disabled at ingest time or OpenAI settings are missing.
+                    </div>
+                  )}
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="font-semibold text-slate-950">Retrieval probe</p>
-                        <p className="text-xs text-slate-500">Inspect what the vector store returned for your query.</p>
+                        <p className="text-xs text-slate-500">
+                          Inspect only what the vector store returned for your query (no LLM/OpenAI call).
+                        </p>
                       </div>
-                      <Button onClick={retrieveFromPipeline} disabled={isRetrieving || !query.trim()}>
+                      <Button
+                        onClick={retrieveFromPipeline}
+                        disabled={isRetrieving || !query.trim() || !ingested?.pipeline.pipeline_id}
+                      >
                         {isRetrieving ? 'Retrieving...' : 'Retrieve'}
                       </Button>
                     </div>
@@ -329,6 +506,53 @@ export default function EncouragePage() {
                       </div>
                     ) : (
                       <p className="mt-3 text-sm text-slate-500">Run a query to inspect what the vector store would return for this document.</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="font-semibold text-slate-950">Retrieval evaluation</p>
+                        <p className="text-xs text-slate-500">
+                          Run the selected markdown file against the selected dataset and log the metrics to MLflow.
+                        </p>
+                      </div>
+                      <Button
+                        onClick={runEvaluation}
+                        disabled={isEvaluating || !selectedDatasetPath || !ingested?.pipeline.pipeline_id}
+                      >
+                        {isEvaluating ? 'Evaluating...' : 'Run evaluation'}
+                      </Button>
+                    </div>
+                    <p className="mt-3 text-sm text-slate-600">
+                      Dataset: <span className="font-medium text-slate-900">{selectedDatasetPath || 'none selected'}</span>
+                    </p>
+                    {evaluation ? (
+                      <div className="mt-4 space-y-3 text-sm text-slate-700">
+                        <p>
+                          <span className="font-semibold text-slate-950">MLflow run ID:</span>{' '}
+                          {evaluation.mlflow_run_id || 'not available'}
+                        </p>
+                        <p>
+                          <span className="font-semibold text-slate-950">Evaluated questions:</span>{' '}
+                          {evaluation.evaluated_question_count} / {evaluation.question_count}
+                        </p>
+                        <p>
+                          <span className="font-semibold text-slate-950">MRR:</span> {evaluation.mrr.toFixed(4)}
+                        </p>
+                        <p>
+                          <span className="font-semibold text-slate-950">Recall@{evaluation.recall_k}:</span>{' '}
+                          {evaluation.recall_at_k.toFixed(4)}
+                        </p>
+                        <p>
+                          <span className="font-semibold text-slate-950">HitRate@{evaluation.recall_k}:</span>{' '}
+                          {evaluation.hit_rate_at_k.toFixed(4)}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-500">
+                        Ingest a markdown file, select a dataset, then run evaluation to send metrics to MLflow.
+                      </p>
                     )}
                   </div>
                 </div>

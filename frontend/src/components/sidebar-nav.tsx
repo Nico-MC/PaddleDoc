@@ -3,19 +3,37 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, Sparkles } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Sparkles, FlaskConical } from 'lucide-react';
 
-const links = [
+type NavLink = {
+  href: string;
+  label: string;
+  icon: any;
+  external?: boolean;
+};
+
+const links: NavLink[] = [
   { href: '/', label: 'Home', icon: Home },
   { href: '/processing', label: 'Processing', icon: Cpu },
   { href: '/jobs', label: 'Jobs', icon: FolderOpen },
   { href: '/encourage', label: 'Encourage', icon: Sparkles },
 ];
 
+function resolveMlflowUrl(): string {
+  if (typeof window === 'undefined') {
+    return 'http://localhost:5000';
+  }
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  return `${protocol}//${window.location.hostname}:5000`;
+}
+
 export function SidebarNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const drawerRef = useRef<HTMLDivElement>(null);
+  const externalLinks: NavLink[] = [
+    { href: resolveMlflowUrl(), label: 'MLflow', icon: FlaskConical, external: true },
+  ];
 
   // Close on outside click
   useEffect(() => {
@@ -71,18 +89,36 @@ export function SidebarNav() {
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">
-          {links.map(({ href, label, icon: Icon }) => {
+          {[...links, ...externalLinks].map(({ href, label, icon: Icon, external }) => {
             const active = pathname === href || (href !== '/' && pathname.startsWith(href));
+            const baseClass = `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+              active
+                ? 'bg-emerald-50 text-emerald-800'
+                : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+            }`;
+
+            if (external) {
+              return (
+                <a
+                  key={label}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setOpen(false)}
+                  className={baseClass}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0 text-slate-400" />
+                  {label}
+                </a>
+              );
+            }
+
             return (
               <Link
                 key={href}
                 href={href}
                 onClick={() => setOpen(false)}
-                className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
-                  active
-                    ? 'bg-emerald-50 text-emerald-800'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
-                }`}
+                className={baseClass}
               >
                 <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-emerald-700' : 'text-slate-400'}`} />
                 {label}

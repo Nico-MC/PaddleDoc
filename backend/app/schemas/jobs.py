@@ -139,15 +139,35 @@ class MarkdownBrowserResponse(BaseModel):
     items: list[MarkdownFileEntry]
 
 
+class EvaluationDatasetEntry(BaseModel):
+    path: str
+    filename: str
+    row_count: int
+    source_documents: list[str] = Field(default_factory=list)
+    size_bytes: int
+    updated_at: datetime
+
+
+class EvaluationDatasetBrowserResponse(BaseModel):
+    items: list[EvaluationDatasetEntry]
+
+
 class EncourageIngestRequest(BaseModel):
     path: str = Field(min_length=1)
     query: str = Field(default='Worum geht es in diesem Dokument?', min_length=1)
     model_name: str | None = None
+    run_generation: bool = True
 
 
 class EncourageRetrieveRequest(BaseModel):
     pipeline_id: str = Field(min_length=1)
     query: str = Field(min_length=1)
+
+
+class EncourageEvaluateRequest(BaseModel):
+    pipeline_id: str = Field(min_length=1)
+    dataset_path: str = Field(min_length=1)
+    recall_k: int = 3
 
 
 class EncourageDocumentResponse(BaseModel):
@@ -182,6 +202,7 @@ class EncourageRagRunResponse(BaseModel):
 class EncourageIngestResponse(BaseModel):
     path: str
     filename: str
+    source_markdown: dict[str, Any]
     document: EncourageDocumentResponse
     pipeline: EncouragePipelineResponse
     debug: EncourageDebugPayloadResponse
@@ -194,6 +215,22 @@ class EncourageRetrieveResponse(BaseModel):
     query: str
     top_k: int
     results: list[EncourageDocumentResponse] = Field(default_factory=list)
+
+
+class EncourageEvaluationResponse(BaseModel):
+    pipeline_id: str
+    collection_name: str
+    markdown_path: str
+    dataset_path: str
+    dataset_filename: str
+    question_count: int
+    evaluated_question_count: int
+    top_k: int
+    recall_k: int
+    mrr: float
+    recall_at_k: float
+    hit_rate_at_k: float
+    mlflow_run_id: str | None = None
 
 
 class FolderActionRequest(BaseModel):

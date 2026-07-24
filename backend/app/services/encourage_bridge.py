@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,14 @@ import uuid
 
 
 _RAG_PIPELINES: dict[str, Any] = {}
+_RAG_PIPELINE_METADATA: dict[str, dict[str, Any]] = {}
 _DEFAULT_SYSTEM_PROMPT = (
     'Du bist ein hilfreicher Assistent. Beantworte die Frage nur auf Basis des bereitgestellten Kontexts. '
     'Wenn die Information im Kontext fehlt, sage das klar.'
 )
+_DEFAULT_TOP_K = 5
+_DEFAULT_CHUNK_MAX_CHARS = 1100
+_DEFAULT_CHUNK_OVERLAP_CHARS = 140
 
 
 class _PaddleDocSamplingParams:
@@ -51,7 +56,7 @@ def _markdown_ingestion_class() -> type:
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
 
-    from encourage.utils.markdown_ingestion import MarkdownIngestion
+    from encourage.utils.markdown_ingestion import MarkdownIngestion  # type: ignore[reportMissingImports]
 
     return MarkdownIngestion
 
@@ -64,7 +69,7 @@ def _base_rag_class() -> type:
         sys.path.insert(0, encourage_src_str)
 
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-    from encourage.rag.base_impl import BaseRAG
+    from encourage.rag.base_impl import BaseRAG  # type: ignore[reportMissingImports]
 
     class PaddleDocMarkdownRAG(BaseRAG):
         def get_embedding_model(self, name: str, device: str = 'cpu') -> Any:
@@ -80,7 +85,7 @@ def _base_rag_config_class() -> type:
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
 
-    from encourage.rag.base.config import BaseRAGConfig
+    from encourage.rag.base.config import BaseRAGConfig  # type: ignore[reportMissingImports]
 
     return BaseRAGConfig
 
@@ -92,7 +97,7 @@ def _batch_inference_runner_class() -> type:
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
 
-    from encourage.llm import BatchInferenceRunner
+    from encourage.llm import BatchInferenceRunner  # type: ignore[reportMissingImports]
 
     return BatchInferenceRunner
 
@@ -108,29 +113,100 @@ def _normalize_openai_base_url(base_url: str) -> str:
     return f'{cleaned}/v1'
 
 
+@lru_cache(maxsize=1)
+def _configure_encourage_mlflow_tracing() -> None:
+    enabled = os.getenv('PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING', 'true').strip().lower()
+    if enabled not in {'1', 'true', 'yes', 'on'}:
+        return
+
+    try:
+        import mlflow
+        from encourage import enable_mlflow_tracing  # type: ignore[reportMissingImports]
+
+        for key in ('NO_PROXY', 'no_proxy'):
+            current = os.getenv(key, '').strip()
+            values = [part.strip() for part in current.split(',') if part.strip()]
+            for host in ('mlflow', 'mlflow:5000'):
+                if host not in values:
+                    values.append(host)
+            os.environ[key] = ','.join(values)
+
+        tracking_uri = os.getenv('MLFLOW_TRACKING_URI', '').strip()
+        experiment_name = os.getenv('MLFLOW_EXPERIMENT_NAME', '').strip()
+
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+        if experiment_name:
+            mlflow.set_experiment(experiment_name)
+
+        enable_mlflow_tracing()
+    except Exception:
+        # Tracing must never break request handling.
+        return
+
+
 def ingest_markdown_file(path: Path) -> dict[str, Any]:
     loader_cls = _markdown_ingestion_class()
     rag_cls = _base_rag_class()
     rag_config_cls = _base_rag_config_class()
-    loader = loader_cls()
-    documents = loader.load(path)
-    if not documents:
+    source_loader = loader_cls()
+    source_documents = source_loader.load(path)
+    if not source_documents:
         raise RuntimeError(f'No encourage documents created from markdown file: {path}')
 
-    document = documents[0]
+    chunk_max_chars_env = os.getenv(
+        'PADDLEDOC_ENCOURAGE_CHUNK_MAX_CHARS',
+        str(_DEFAULT_CHUNK_MAX_CHARS),
+    ).strip()
+    try:
+        chunk_max_chars = max(200, int(chunk_max_chars_env))
+    except ValueError:
+        chunk_max_chars = _DEFAULT_CHUNK_MAX_CHARS
+
+    chunk_overlap_chars_env = os.getenv(
+        'PADDLEDOC_ENCOURAGE_CHUNK_OVERLAP_CHARS',
+        str(_DEFAULT_CHUNK_OVERLAP_CHARS),
+    ).strip()
+    try:
+        chunk_overlap_chars = max(0, int(chunk_overlap_chars_env))
+    except ValueError:
+        chunk_overlap_chars = _DEFAULT_CHUNK_OVERLAP_CHARS
+
+    loader = loader_cls(
+        chunk_documents=True,
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap_chars=chunk_overlap_chars,
+    )
+    documents = loader.load(path)
+
+    if not documents:
+        raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
+
+    source_document = source_documents[0]
     pipeline_id = str(uuid.uuid4())
     collection_name = f'encourage-{path.stem}-{pipeline_id[:8]}'
     rag_config = rag_config_cls(
         context_collection=documents,
         collection_name=collection_name,
         embedding_function='default',
-        top_k=min(3, len(documents)),
+        top_k=min(_DEFAULT_TOP_K, len(documents)),
         retrieval_only=False,
         device='cpu',
-        template_name='default.j2',
+        template_name='paddledoc_rag.j2',
     )
     rag_pipeline = rag_cls(rag_config)
     _RAG_PIPELINES[pipeline_id] = rag_pipeline
+    _RAG_PIPELINE_METADATA[pipeline_id] = {
+        'pipeline_id': pipeline_id,
+        'collection_name': collection_name,
+        'rag_method': 'BaseRAG',
+        'top_k': rag_pipeline.top_k,
+        'document_count': len(documents),
+        'chunk_max_chars': chunk_max_chars,
+        'chunk_overlap_chars': chunk_overlap_chars,
+        'source_md_path': str(path),
+        'source_md_filename': path.name,
+    }
     collection = rag_pipeline.client.get_collection(collection_name)
 
     config_dump = {
@@ -142,6 +218,10 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'template_name': rag_config.template_name,
         'batch_size_insert': rag_config.batch_size_insert,
         'batch_size_query': rag_config.batch_size_query,
+        'chunk_max_chars': chunk_max_chars,
+        'chunk_overlap_chars': chunk_overlap_chars,
+        'source_md_path': str(path),
+        'source_md_filename': path.name,
         'document_ids': [str(doc.id) for doc in documents],
         'document_filenames': [str(doc.meta_data['filename'] or '') for doc in documents],
     }
@@ -151,18 +231,20 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'document_count': rag_pipeline.client.count_documents(collection_name),
     }
     document_dump = {
-        'id': str(document.id),
-        'content_preview': document.content[:500],
-        'content_length': len(document.content),
-        'meta_data': document.meta_data.to_dict(truncated=False),
+        'id': str(source_document.id),
+        'content_preview': source_document.content[:500],
+        'content_length': len(source_document.content),
+        'meta_data': source_document.meta_data.to_dict(truncated=False),
+        'chunk_count': len(documents),
+        'chunk_preview': [chunk.content[:250] for chunk in documents[:3]],
     }
 
     return {
-        'id': str(document.id),
-        'content': document.content,
-        'score': document.score,
-        'distance': document.distance,
-        'meta_data': document.meta_data.to_dict(truncated=False),
+        'id': str(source_document.id),
+        'content': source_document.content,
+        'score': source_document.score,
+        'distance': source_document.distance,
+        'meta_data': source_document.meta_data.to_dict(truncated=False),
         'pipeline_id': pipeline_id,
         'collection_name': collection_name,
         'document_count': len(documents),
@@ -173,6 +255,15 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'collection': collection_dump,
         'document_dump': document_dump,
     }
+
+
+def get_pipeline_metadata(pipeline_id: str) -> dict[str, Any] | None:
+    metadata = _RAG_PIPELINE_METADATA.get(pipeline_id)
+    return dict(metadata) if metadata else None
+
+
+def get_pipeline_rag(pipeline_id: str) -> Any | None:
+    return _RAG_PIPELINES.get(pipeline_id)
 
 
 def run_pipeline_once(
@@ -187,6 +278,8 @@ def run_pipeline_once(
     temperature: float = 0.1,
     top_p: float = 1.0,
 ) -> dict[str, Any]:
+    _configure_encourage_mlflow_tracing()
+
     rag_pipeline = _RAG_PIPELINES.get(pipeline_id)
     if rag_pipeline is None:
         raise KeyError(f'Encourage pipeline not found: {pipeline_id}')

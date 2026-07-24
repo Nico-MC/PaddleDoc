@@ -27,6 +27,8 @@ services:
     environment:
       PADDLEDOC_ENCOURAGE_SRC_PATH: /encourage/src
       RUN_ALEMBIC_ON_STARTUP: "false"
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
     volumes:
       - ./backend:/app
       - ../encourage:/encourage
@@ -43,6 +45,9 @@ services:
       - ./backend:/app
       - ../encourage:/encourage
       - paddlex_models:/root/.paddlex
+    environment:
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
 
 volumes:
   frontend_node_modules:

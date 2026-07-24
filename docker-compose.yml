@@ -39,6 +39,9 @@ services:
       no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-paddledoc-encourage}
+      PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING: ${PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING:-true}
     volumes:
       - ./backend/storage:/app/backend/storage
     depends_on:
@@ -76,6 +79,9 @@ services:
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-paddledoc-encourage}
+      PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING: ${PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING:-true}
     volumes:
       - ./backend/storage:/app/backend/storage
       - paddlex_models:/root/.paddlex
@@ -101,6 +107,37 @@ services:
     restart: unless-stopped
     ports:
       - '6379:6379'
+
+  mlflow:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /app/backend/storage/mlflow/artifacts
+        mlflow ui --host 0.0.0.0 --port 5000 \
+          --backend-store-uri sqlite:////app/backend/storage/mlflow/mlflow.db \
+          --default-artifact-root /app/backend/storage/mlflow/artifacts
+    ports:
+      - '5000:5000'
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis,mlflow
+    volumes:
+      - ./backend/storage:/app/backend/storage
+    depends_on:
+      - backend
 
 volumes:
   pgdata:
