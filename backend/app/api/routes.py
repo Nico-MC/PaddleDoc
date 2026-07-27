@@ -1293,6 +1293,7 @@ def evaluate_encourage_pipeline(payload: EncourageEvaluateRequest) -> EncourageE
         mrr=result['mrr'],
         recall_at_k=result['recall_at_k'],
         hit_rate_at_k=result['hit_rate_at_k'],
+        mlflow_experiment_id=result['mlflow_experiment_id'],
         mlflow_run_id=result['mlflow_run_id'],
         per_question_results=result['per_question_results'],
     )

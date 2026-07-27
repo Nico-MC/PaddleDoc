@@ -247,6 +247,7 @@ class EncourageEvaluationResponse(BaseModel):
     mrr: float
     recall_at_k: float
     hit_rate_at_k: float
+    mlflow_experiment_id: str | None = None
     mlflow_run_id: str | None = None
     per_question_results: list[dict[str, Any]] = Field(default_factory=list)
 

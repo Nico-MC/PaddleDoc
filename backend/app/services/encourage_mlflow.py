@@ -212,7 +212,7 @@ def log_evaluation_run(
     hit_rate_at_k: float,
     dataset_rows: list[dict[str, Any]],
     per_question_results: list[dict[str, Any]],
-) -> str | None:
+) -> dict[str, str | None]:
     """Best-effort MLflow logging for Encourage retrieval evaluation runs."""
     try:
         import mlflow
@@ -287,6 +287,11 @@ def log_evaluation_run(
                 'evaluation_summary.json',
             )
             active_run = mlflow.active_run()
-            return active_run.info.run_id if active_run is not None else None
+            if active_run is None:
+                return {'run_id': None, 'experiment_id': None}
+            return {
+                'run_id': active_run.info.run_id,
+                'experiment_id': active_run.info.experiment_id,
+            }
     except Exception:
-        return None
+        return {'run_id': None, 'experiment_id': None}

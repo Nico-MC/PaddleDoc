@@ -84,6 +84,7 @@ type EncourageEvaluationResponse = {
   mrr: number;
   recall_at_k: number;
   hit_rate_at_k: number;
+  mlflow_experiment_id: string | null;
   mlflow_run_id: string | null;
   per_question_results: Array<{
     id: string;
@@ -136,6 +137,18 @@ export default function EncouragePage() {
       return String(value);
     }
     return JSON.stringify(value);
+  };
+
+  const resolveMlflowUrl = () => {
+    if (typeof window === 'undefined') {
+      return 'http://localhost:5000';
+    }
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    return `${protocol}//${window.location.hostname}:5000`;
+  };
+
+  const resolveMlflowRunUrl = (experimentId: string, runId: string) => {
+    return `${resolveMlflowUrl()}/#/experiments/${experimentId}/runs/${runId}/model-metrics`;
   };
 
   useEffect(() => {
@@ -724,9 +737,21 @@ export default function EncouragePage() {
                       </div>
                       <div>
                         <p className="text-xs text-purple-700">MLflow Run</p>
-                        <p className="truncate font-mono text-xs font-semibold text-purple-900">
-                          {evaluation.mlflow_run_id || 'N/A'}
-                        </p>
+                        {evaluation.mlflow_run_id && evaluation.mlflow_experiment_id ? (
+                          <a
+                            href={resolveMlflowRunUrl(
+                              evaluation.mlflow_experiment_id,
+                              evaluation.mlflow_run_id,
+                            )}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block truncate font-mono text-xs font-semibold text-purple-900 underline decoration-purple-300 underline-offset-2 hover:text-purple-700"
+                          >
+                            {evaluation.mlflow_run_id}
+                          </a>
+                        ) : (
+                          <p className="truncate font-mono text-xs font-semibold text-purple-900">N/A</p>
+                        )}
                       </div>
                     </div>
 

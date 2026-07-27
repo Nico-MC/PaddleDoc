@@ -297,7 +297,7 @@ def run_encourage_evaluation(
     recall = RecallAtK(recall_k)(response_wrapper)
     hit_rate = HitRateAtK(recall_k)(response_wrapper)
 
-    mlflow_run_id = log_evaluation_run(
+    mlflow_run = log_evaluation_run(
         metadata=pipeline_metadata,
         dataset_path=str(dataset_file.relative_to(_repo_root().resolve())),
         dataset_filename=dataset_file.name,
@@ -324,6 +324,7 @@ def run_encourage_evaluation(
         'mrr': float(mrr.score),
         'recall_at_k': float(recall.score),
         'hit_rate_at_k': float(hit_rate.score),
-        'mlflow_run_id': mlflow_run_id,
+        'mlflow_experiment_id': mlflow_run.get('experiment_id'),
+        'mlflow_run_id': mlflow_run.get('run_id'),
         'per_question_results': per_question_results,
     }
