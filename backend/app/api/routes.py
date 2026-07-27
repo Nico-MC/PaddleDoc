@@ -1124,9 +1124,11 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
 
     try:
-        document = ingest_markdown_file(candidate)
+        document = ingest_markdown_file(candidate, rag_method=payload.rag_method)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     rag_run: dict[str, str] | None = None
     openai_base_url = settings.openai_api_base_url.strip()
@@ -1291,10 +1293,16 @@ def evaluate_encourage_pipeline(payload: EncourageEvaluateRequest) -> EncourageE
         top_k=result['top_k'],
         recall_k=result['recall_k'],
         mrr=result['mrr'],
+        mean_average_precision=result['mean_average_precision'],
+        ndcg=result['ndcg'],
+        context_length=result['context_length'],
+        context_length_metric_source=result['context_length_metric_source'],
         recall_at_k=result['recall_at_k'],
         hit_rate_at_k=result['hit_rate_at_k'],
+        retrieval_metrics=result['retrieval_metrics'],
         mlflow_experiment_id=result['mlflow_experiment_id'],
         mlflow_run_id=result['mlflow_run_id'],
+        evaluation_summary=result['evaluation_summary'],
         per_question_results=result['per_question_results'],
     )
 

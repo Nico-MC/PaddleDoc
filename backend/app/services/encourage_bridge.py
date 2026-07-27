@@ -18,6 +18,7 @@ _DEFAULT_SYSTEM_PROMPT = (
 _DEFAULT_TOP_K = 5
 _DEFAULT_CHUNK_MAX_CHARS = 1100
 _DEFAULT_CHUNK_OVERLAP_CHARS = 140
+_SUPPORTED_RAG_METHODS: tuple[str, ...] = ('Base', 'BM25', 'HybridBM25')
 
 
 class _PaddleDocSamplingParams:
@@ -61,33 +62,73 @@ def _markdown_ingestion_class() -> type:
     return MarkdownIngestion
 
 
-@lru_cache(maxsize=1)
-def _base_rag_class() -> type:
+def _normalize_rag_method_name(rag_method: str | None) -> str:
+    candidate = (rag_method or '').strip().lower().replace('_', '')
+    method_aliases = {
+        '': 'Base',
+        'base': 'Base',
+        'baserag': 'Base',
+        'bm25': 'BM25',
+        'bm25rag': 'BM25',
+        'hybridbm25': 'HybridBM25',
+        'hybridbm25rag': 'HybridBM25',
+    }
+    resolved = method_aliases.get(candidate)
+    if resolved is None:
+        supported = ', '.join(_SUPPORTED_RAG_METHODS)
+        raise ValueError(f'Unsupported rag_method: {rag_method!r}. Supported methods: {supported}')
+    return resolved
+
+
+@lru_cache(maxsize=None)
+def _rag_pipeline_components(rag_method: str) -> tuple[type, type, str]:
     encourage_src = _encourage_src_path()
     encourage_src_str = str(encourage_src)
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
 
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-    from encourage.rag.base_impl import BaseRAG  # type: ignore[reportMissingImports]
 
-    class PaddleDocMarkdownRAG(BaseRAG):
+    method = _normalize_rag_method_name(rag_method)
+    if method == 'Base':
+        from encourage.rag.base.config import BaseRAGConfig  # type: ignore[reportMissingImports]
+        from encourage.rag.base_impl import BaseRAG  # type: ignore[reportMissingImports]
+
+        base_cls = BaseRAG
+        config_cls = BaseRAGConfig
+        method_label = 'BaseRAG'
+    elif method == 'BM25':
+        try:
+            from encourage.rag.base.config import BM25RAGConfig  # type: ignore[reportMissingImports]
+            from encourage.rag.bm25 import BM25RAG  # type: ignore[reportMissingImports]
+        except ModuleNotFoundError as exc:
+            raise ValueError(
+                'RAG method BM25 is unavailable because an optional dependency is missing: '
+                f'{exc.name}. Install the missing package in the backend runtime.'
+            ) from exc
+
+        base_cls = BM25RAG
+        config_cls = BM25RAGConfig
+        method_label = 'BM25RAG'
+    else:
+        try:
+            from encourage.rag.base.config import HybridBM25RAGConfig  # type: ignore[reportMissingImports]
+            from encourage.rag.hybrid_bm25 import HybridBM25RAG  # type: ignore[reportMissingImports]
+        except ModuleNotFoundError as exc:
+            raise ValueError(
+                'RAG method HybridBM25 is unavailable because an optional dependency is missing: '
+                f'{exc.name}. Install the missing package in the backend runtime.'
+            ) from exc
+
+        base_cls = HybridBM25RAG
+        config_cls = HybridBM25RAGConfig
+        method_label = 'HybridBM25RAG'
+
+    class PaddleDocMarkdownRAG(base_cls):  # type: ignore[misc, valid-type]
         def get_embedding_model(self, name: str, device: str = 'cpu') -> Any:
             return DefaultEmbeddingFunction()
 
-    return PaddleDocMarkdownRAG
-
-
-@lru_cache(maxsize=1)
-def _base_rag_config_class() -> type:
-    encourage_src = _encourage_src_path()
-    encourage_src_str = str(encourage_src)
-    if encourage_src_str not in sys.path:
-        sys.path.insert(0, encourage_src_str)
-
-    from encourage.rag.base.config import BaseRAGConfig  # type: ignore[reportMissingImports]
-
-    return BaseRAGConfig
+    return PaddleDocMarkdownRAG, config_cls, method_label
 
 
 @lru_cache(maxsize=1)
@@ -145,10 +186,10 @@ def _configure_encourage_mlflow_tracing() -> None:
         return
 
 
-def ingest_markdown_file(path: Path) -> dict[str, Any]:
+def ingest_markdown_file(path: Path, *, rag_method: str = 'Base') -> dict[str, Any]:
     loader_cls = _markdown_ingestion_class()
-    rag_cls = _base_rag_class()
-    rag_config_cls = _base_rag_config_class()
+    method_key = _normalize_rag_method_name(rag_method)
+    rag_cls, rag_config_cls, method_label = _rag_pipeline_components(method_key)
     source_loader = loader_cls()
     source_documents = source_loader.load(path)
     if not source_documents:
@@ -181,7 +222,8 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
     _RAG_PIPELINE_METADATA[pipeline_id] = {
         'pipeline_id': pipeline_id,
         'collection_name': collection_name,
-        'rag_method': 'BaseRAG',
+        'rag_method': method_label,
+        'rag_method_key': method_key,
         'top_k': rag_pipeline.top_k,
         'document_count': len(documents),
         'chunk_max_chars': chunk_max_chars,
@@ -202,6 +244,8 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'batch_size_query': rag_config.batch_size_query,
         'chunk_max_chars': chunk_max_chars,
         'chunk_overlap_chars': chunk_overlap_chars,
+        'rag_method': method_label,
+        'rag_method_key': method_key,
         'source_md_path': str(path),
         'source_md_filename': path.name,
         'document_ids': [str(doc.id) for doc in documents],
@@ -231,7 +275,7 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'collection_name': collection_name,
         'document_count': len(documents),
         'top_k': rag_pipeline.top_k,
-        'rag_method': 'BaseRAG',
+        'rag_method': method_label,
         'ready': True,
         'config': config_dump,
         'collection': collection_dump,

@@ -210,8 +210,10 @@ def log_evaluation_run(
     mrr: float,
     recall_at_k: float,
     hit_rate_at_k: float,
+    retrieval_metrics: dict[str, float],
     dataset_rows: list[dict[str, Any]],
     per_question_results: list[dict[str, Any]],
+    evaluation_summary: dict[str, Any],
 ) -> dict[str, str | None]:
     """Best-effort MLflow logging for Encourage retrieval evaluation runs."""
     try:
@@ -248,8 +250,12 @@ def log_evaluation_run(
             mlflow.log_metric('mrr', float(mrr))
             mlflow.log_metric(f'recall_at_{recall_k}', float(recall_at_k))
             mlflow.log_metric(f'hit_rate_at_{recall_k}', float(hit_rate_at_k))
+            for metric_name, metric_value in retrieval_metrics.items():
+                mlflow.log_metric(metric_name, float(metric_value))
             mlflow.log_dict({'rows': dataset_rows}, 'evaluation_dataset_rows.json')
             mlflow.log_dict({'results': per_question_results}, 'evaluation_question_results.json')
+            mlflow.log_dict(evaluation_summary, 'evaluation_summary.json')
+            mlflow.log_dict(retrieval_metrics, 'evaluation_retrieval_metrics.json')
             mlflow.log_dict(
                 {
                     'metadata': {
@@ -265,6 +271,8 @@ def log_evaluation_run(
                         'mrr': float(mrr),
                         'recall_at_k': float(recall_at_k),
                         'hit_rate_at_k': float(hit_rate_at_k),
+                        'retrieval_metrics': retrieval_metrics,
+                        'evaluation_summary': evaluation_summary,
                     },
                     'dataset_rows': dataset_rows,
                     'per_question_results': per_question_results,
@@ -283,8 +291,9 @@ def log_evaluation_run(
                     'mrr': float(mrr),
                     'recall_at_k': float(recall_at_k),
                     'hit_rate_at_k': float(hit_rate_at_k),
+                    'retrieval_metrics': retrieval_metrics,
                 },
-                'evaluation_summary.json',
+                'evaluation_overview.json',
             )
             active_run = mlflow.active_run()
             if active_run is None:

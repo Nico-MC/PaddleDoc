@@ -82,19 +82,75 @@ type EncourageEvaluationResponse = {
   top_k: number;
   recall_k: number;
   mrr: number;
+  mean_average_precision: number;
+  ndcg: number;
+  context_length: number;
+  context_length_metric_source: string;
   recall_at_k: number;
   hit_rate_at_k: number;
+  retrieval_metrics: Record<string, number>;
   mlflow_experiment_id: string | null;
   mlflow_run_id: string | null;
+  evaluation_summary: {
+    question_hit_count: number;
+    question_miss_count: number;
+    first_hit_rank_breakdown: Record<string, number>;
+    questions_without_hit: string[];
+  };
   per_question_results: Array<{
     id: string;
     question: string;
+    gold_answer: string;
+    evidence_quote: string;
+    source_document: string;
+    reference_selection: {
+      strategy: string;
+      match_score: number;
+      quote_token_count: number;
+    };
     retrieved_document_ids: string[];
     reference_document_ids: string[];
     first_hit_rank: number | null;
     has_hit: boolean;
+    retrieved_documents: Array<{
+      rank: number;
+      id: string;
+      score: number;
+      distance: number | null;
+      content_preview: string;
+      is_reference_match: boolean;
+      meta_data: Record<string, unknown>;
+    }>;
+    reference_documents: Array<{
+      id: string;
+      content_preview: string;
+    }>;
   }>;
 };
+
+type RagMethodOption = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+const RAG_METHOD_OPTIONS: RagMethodOption[] = [
+  {
+    id: 'Base',
+    label: 'Base RAG',
+    description: 'Dense retrieval baseline using embeddings.',
+  },
+  {
+    id: 'BM25',
+    label: 'BM25',
+    description: 'Sparse keyword retrieval for exact term matches.',
+  },
+  {
+    id: 'HybridBM25',
+    label: 'Hybrid BM25',
+    description: 'Combines dense semantic retrieval with BM25 lexical signals.',
+  },
+];
 
 const API = API_BASE_URL;
 
@@ -107,6 +163,7 @@ export default function EncouragePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
+  const [selectedRagMethod, setSelectedRagMethod] = useState<string>('Base');
   const [query, setQuery] = useState('');
   const [runGeneration, setRunGeneration] = useState(false);
   const [isRetrieving, setIsRetrieving] = useState(false);
@@ -137,6 +194,13 @@ export default function EncouragePage() {
       return String(value);
     }
     return JSON.stringify(value);
+  };
+
+  const formatReferenceStrategy = (value: string) => {
+    return value
+      .split('_')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
   };
 
   const resolveMlflowUrl = () => {
@@ -249,6 +313,7 @@ export default function EncouragePage() {
         body: JSON.stringify({
           path: selectedPath,
           run_generation: runGeneration,
+          rag_method: selectedRagMethod,
         }),
       });
       if (!response.ok) {
@@ -401,6 +466,26 @@ export default function EncouragePage() {
               )}
             </div>
 
+            <div className="mt-4 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <label className="text-sm font-medium text-slate-700">Select RAG Method</label>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {RAG_METHOD_OPTIONS.map((method) => (
+                  <button
+                    key={method.id}
+                    onClick={() => setSelectedRagMethod(method.id)}
+                    className={`rounded-lg border-2 p-3 text-left transition ${
+                      selectedRagMethod === method.id
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-900'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                    }`}
+                  >
+                    <p className="text-sm font-medium">{method.label}</p>
+                    <p className="mt-1 text-xs text-slate-500">{method.description}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="mt-4 flex items-center gap-3">
               <label className="flex items-center gap-2 text-sm text-slate-700">
                 <input
@@ -425,6 +510,9 @@ export default function EncouragePage() {
                 <p className="font-medium text-emerald-900">✓ Markdown Ingested</p>
                 <p className="mt-2 text-xs text-emerald-700">
                   <strong>{ingested.source_markdown.filename}</strong> · {ingested.source_markdown.document_count} chunks
+                </p>
+                <p className="mt-1 text-xs text-emerald-700">
+                  Method: <strong>{ingested.pipeline.rag_method}</strong>
                 </p>
 
                 {/* Chunks Preview */}
@@ -722,18 +810,26 @@ export default function EncouragePage() {
                 {evaluation && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50 p-4">
                     <p className="font-medium text-purple-900">✓ Evaluation Complete</p>
-                    <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                      <div>
-                        <p className="text-xs text-purple-700">MRR</p>
-                        <p className="font-semibold text-purple-900">{evaluation.mrr.toFixed(4)}</p>
+                    <div className="mt-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                        Optimization Metrics ({Object.keys(evaluation.retrieval_metrics).length})
+                      </p>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {Object.entries(evaluation.retrieval_metrics)
+                          .sort(([left], [right]) => left.localeCompare(right))
+                          .map(([metricName, metricValue]) => (
+                            <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                              <p className="font-medium text-slate-700">{metricName}</p>
+                              <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
+                            </div>
+                          ))}
                       </div>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
                       <div>
-                        <p className="text-xs text-purple-700">Recall@{evaluation.recall_k}</p>
-                        <p className="font-semibold text-purple-900">{evaluation.recall_at_k.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-purple-700">HitRate@{evaluation.recall_k}</p>
-                        <p className="font-semibold text-purple-900">{evaluation.hit_rate_at_k.toFixed(4)}</p>
+                        <p className="text-xs text-purple-700">Context Length Source</p>
+                        <p className="font-semibold text-purple-900">{evaluation.context_length_metric_source}</p>
                       </div>
                       <div>
                         <p className="text-xs text-purple-700">MLflow Run</p>
@@ -755,6 +851,25 @@ export default function EncouragePage() {
                       </div>
                     </div>
 
+                    <div className="mt-4 grid gap-3 md:grid-cols-3">
+                      <div className="rounded-lg border border-purple-100 bg-white p-3">
+                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-purple-700">Questions With Hit</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-900">{evaluation.evaluation_summary.question_hit_count}</p>
+                      </div>
+                      <div className="rounded-lg border border-purple-100 bg-white p-3">
+                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-purple-700">Questions Without Hit</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-900">{evaluation.evaluation_summary.question_miss_count}</p>
+                      </div>
+                      <div className="rounded-lg border border-purple-100 bg-white p-3">
+                        <p className="text-xs font-medium uppercase tracking-[0.2em] text-purple-700">First Hit Breakdown</p>
+                        <p className="mt-1 break-words text-sm text-slate-700">
+                          {Object.entries(evaluation.evaluation_summary.first_hit_rank_breakdown)
+                            .map(([rank, count]) => `${rank}: ${count}`)
+                            .join(' · ') || 'n/a'}
+                        </p>
+                      </div>
+                    </div>
+
                     <details className="mt-4">
                       <summary className="cursor-pointer text-xs font-medium text-purple-700">
                         Show per-question results ({evaluation.per_question_results.length})
@@ -766,8 +881,54 @@ export default function EncouragePage() {
                               {idx + 1}. {item.question}
                             </p>
                             <p className="mt-1">Hit: {item.has_hit ? 'yes' : 'no'} · First hit rank: {item.first_hit_rank ?? 'n/a'}</p>
-                            <p className="mt-1 break-words">Retrieved: {item.retrieved_document_ids.join(', ') || 'n/a'}</p>
-                            <p className="mt-1 break-words">Reference: {item.reference_document_ids.join(', ') || 'n/a'}</p>
+                            <p className="mt-1 text-slate-500">
+                              Reference strategy: {formatReferenceStrategy(item.reference_selection.strategy)} · Match score: {formatNumber(item.reference_selection.match_score)}
+                            </p>
+                            {item.source_document && (
+                              <p className="mt-1 break-words text-slate-500">Source document: {item.source_document}</p>
+                            )}
+                            {item.evidence_quote && (
+                              <p className="mt-2 rounded-md bg-slate-50 p-2 text-slate-700">Evidence quote: {item.evidence_quote}</p>
+                            )}
+                            {item.gold_answer && (
+                              <p className="mt-2 rounded-md bg-emerald-50 p-2 text-slate-700">Gold answer: {item.gold_answer}</p>
+                            )}
+                            <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                <p className="font-semibold text-slate-900">Retrieved chunks</p>
+                                <div className="mt-2 space-y-2">
+                                  {item.retrieved_documents.map((document) => (
+                                    <div
+                                      key={document.id}
+                                      className={`rounded-md border p-2 ${document.is_reference_match ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+                                    >
+                                      <p className="font-medium text-slate-900">#{document.rank} · {document.id}</p>
+                                      <p className="mt-1 text-slate-600">Score {formatNumber(document.score)} · Distance {formatNumber(document.distance)}</p>
+                                      <p className="mt-1 text-slate-700">{document.content_preview || 'n/a'}</p>
+                                    </div>
+                                  ))}
+                                  {item.retrieved_documents.length === 0 && (
+                                    <p className="text-slate-500">No retrieved chunks available.</p>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                <p className="font-semibold text-slate-900">Reference chunks</p>
+                                <div className="mt-2 space-y-2">
+                                  {item.reference_documents.map((document) => (
+                                    <div key={document.id} className="rounded-md border border-slate-200 bg-white p-2">
+                                      <p className="font-medium text-slate-900">{document.id}</p>
+                                      <p className="mt-1 text-slate-700">{document.content_preview || 'n/a'}</p>
+                                    </div>
+                                  ))}
+                                  {item.reference_documents.length === 0 && (
+                                    <p className="text-slate-500">No reference chunks resolved.</p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            <p className="mt-2 break-words text-slate-500">Retrieved IDs: {item.retrieved_document_ids.join(', ') || 'n/a'}</p>
+                            <p className="mt-1 break-words text-slate-500">Reference IDs: {item.reference_document_ids.join(', ') || 'n/a'}</p>
                           </div>
                         ))}
                       </div>

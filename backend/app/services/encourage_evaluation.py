@@ -113,7 +113,54 @@ def _tokenize(text: str) -> set[str]:
     return set(re.findall(r'\w+', _normalize_text(text)))
 
 
-def _pick_reference_documents(chunks: list[Any], evidence_quote: str) -> list[Any]:
+def _average_context_token_length(responses: list[Any]) -> float:
+    lengths: list[int] = []
+    for response in responses:
+        documents = getattr(getattr(response, 'context', None), 'documents', [])
+        total_tokens = 0
+        for document in documents:
+            total_tokens += len(re.findall(r'\w+', str(getattr(document, 'content', ''))))
+        lengths.append(total_tokens)
+    if not lengths:
+        return 0.0
+    return float(sum(lengths) / len(lengths))
+
+
+def _compute_context_length(
+    response_wrapper: Any,
+    responses: list[Any],
+    context_length_metric_cls: Any,
+) -> tuple[float, str]:
+    try:
+        context_length = context_length_metric_cls()(response_wrapper)
+        return float(context_length.score), 'encourage_context_length'
+    except LookupError:
+        # Encourage relies on nltk.word_tokenize, which may need punkt resources
+        # at runtime depending on the container state.
+        try:
+            import nltk
+
+            for resource_name in ('punkt_tab', 'punkt'):
+                resource_path = f'tokenizers/{resource_name}'
+                try:
+                    nltk.data.find(resource_path)
+                except LookupError:
+                    nltk.download(resource_name, quiet=True)
+
+            context_length = context_length_metric_cls()(response_wrapper)
+            return float(context_length.score), 'encourage_context_length'
+        except Exception:
+            return _average_context_token_length(responses), 'fallback_regex_token_count'
+
+
+def _content_preview(text: str, *, max_chars: int = 260) -> str:
+    normalized = re.sub(r'\s+', ' ', text).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return f'{normalized[: max_chars - 3].rstrip()}...'
+
+
+def _pick_reference_documents(chunks: list[Any], evidence_quote: str) -> tuple[list[Any], dict[str, Any]]:
     normalized_quote = _normalize_text(evidence_quote)
     exact_matches = [
         chunk
@@ -121,11 +168,25 @@ def _pick_reference_documents(chunks: list[Any], evidence_quote: str) -> list[An
         if normalized_quote and normalized_quote in _normalize_text(str(getattr(chunk, 'content', '')))
     ]
     if exact_matches:
-        return exact_matches
+        return exact_matches, {
+            'strategy': 'exact_quote_substring',
+            'match_score': 1.0,
+            'quote_token_count': len(_tokenize(evidence_quote)),
+        }
 
     quote_tokens = _tokenize(evidence_quote)
     if not quote_tokens:
-        return [chunks[0]] if chunks else []
+        if chunks:
+            return [chunks[0]], {
+                'strategy': 'fallback_first_chunk',
+                'match_score': 0.0,
+                'quote_token_count': 0,
+            }
+        return [], {
+            'strategy': 'no_reference_available',
+            'match_score': 0.0,
+            'quote_token_count': 0,
+        }
 
     best_score = 0.0
     best_chunks: list[Any] = []
@@ -140,7 +201,25 @@ def _pick_reference_documents(chunks: list[Any], evidence_quote: str) -> list[An
         elif score == best_score and score > 0:
             best_chunks.append(chunk)
 
-    return best_chunks or ([chunks[0]] if chunks else [])
+    if best_chunks:
+        return best_chunks, {
+            'strategy': 'token_overlap',
+            'match_score': best_score,
+            'quote_token_count': len(quote_tokens),
+        }
+
+    if chunks:
+        return [chunks[0]], {
+            'strategy': 'fallback_first_chunk',
+            'match_score': 0.0,
+            'quote_token_count': len(quote_tokens),
+        }
+
+    return [], {
+        'strategy': 'no_reference_available',
+        'match_score': 0.0,
+        'quote_token_count': len(quote_tokens),
+    }
 
 
 def _resolve_dataset_rows(rows: list[dict[str, Any]], *, markdown_path: str) -> list[dict[str, Any]]:
@@ -204,8 +283,11 @@ def run_encourage_evaluation(
 
     from encourage.llm import Response, ResponseWrapper  # type: ignore[reportMissingImports]
     from encourage.metrics.classic import (  # type: ignore[reportMissingImports]
+        ContextLength,
         HitRateAtK,
+        MeanAveragePrecision,
         MeanReciprocalRank,
+        NDCG,
         RecallAtK,
     )
     from encourage.prompts import Context, MetaData  # type: ignore[reportMissingImports]
@@ -224,6 +306,8 @@ def run_encourage_evaluation(
 
     responses: list[Response] = []
     per_question_results: list[dict[str, Any]] = []
+    question_hit_count = 0
+    first_hit_rank_breakdown: dict[str, int] = {}
 
     for row in filtered_rows:
         query = str(row.get('question', '')).strip()
@@ -239,7 +323,10 @@ def run_encourage_evaluation(
             top_k=int(pipeline_metadata.get('top_k', 0) or 1),
         )
         retrieved_docs = retrieved_docs_payload['results']
-        reference_docs = _pick_reference_documents(reference_chunk_documents, evidence_quote)
+        reference_docs, reference_selection = _pick_reference_documents(
+            reference_chunk_documents,
+            evidence_quote,
+        )
 
         response = Response(
             request_id=str(row.get('id', query)),
@@ -272,20 +359,51 @@ def run_encourage_evaluation(
 
         retrieved_document_ids = [str(document['id']) for document in retrieved_docs]
         reference_document_ids = [str(doc.id) for doc in reference_docs]
+        reference_document_id_set = set(reference_document_ids)
         first_hit_rank: int | None = None
         for index, document in enumerate(retrieved_docs, start=1):
             if str(document['id']) in reference_document_ids:
                 first_hit_rank = index
                 break
 
+        if first_hit_rank is not None:
+            question_hit_count += 1
+            breakdown_key = str(first_hit_rank)
+        else:
+            breakdown_key = 'miss'
+        first_hit_rank_breakdown[breakdown_key] = first_hit_rank_breakdown.get(breakdown_key, 0) + 1
+
         per_question_results.append(
             {
                 'id': str(row.get('id', query)),
                 'question': query,
+                'gold_answer': gold_answer,
+                'evidence_quote': evidence_quote,
+                'source_document': str(row.get('source_document', '')).strip(),
+                'reference_selection': reference_selection,
                 'retrieved_document_ids': retrieved_document_ids,
                 'reference_document_ids': reference_document_ids,
                 'first_hit_rank': first_hit_rank,
                 'has_hit': first_hit_rank is not None,
+                'retrieved_documents': [
+                    {
+                        'rank': index,
+                        'id': str(document['id']),
+                        'score': document['score'],
+                        'distance': document['distance'],
+                        'content_preview': _content_preview(str(document.get('content', ''))),
+                        'is_reference_match': str(document['id']) in reference_document_id_set,
+                        'meta_data': document.get('meta_data', {}),
+                    }
+                    for index, document in enumerate(retrieved_docs, start=1)
+                ],
+                'reference_documents': [
+                    {
+                        'id': str(doc.id),
+                        'content_preview': _content_preview(str(getattr(doc, 'content', ''))),
+                    }
+                    for doc in reference_docs
+                ],
             }
         )
 
@@ -294,21 +412,58 @@ def run_encourage_evaluation(
 
     response_wrapper = ResponseWrapper(responses)
     mrr = MeanReciprocalRank()(response_wrapper)
+    map_score = MeanAveragePrecision()(response_wrapper)
+    ndcg_score = NDCG()(response_wrapper)
+    context_length_value, context_length_metric_source = _compute_context_length(
+        response_wrapper,
+        responses,
+        ContextLength,
+    )
     recall = RecallAtK(recall_k)(response_wrapper)
     hit_rate = HitRateAtK(recall_k)(response_wrapper)
+
+    pipeline_top_k = max(1, int(pipeline_metadata.get('top_k', 0) or 1))
+    recall_at_1 = RecallAtK(1)(response_wrapper)
+    hit_rate_at_1 = HitRateAtK(1)(response_wrapper)
+    recall_at_top_k = RecallAtK(pipeline_top_k)(response_wrapper)
+    hit_rate_at_top_k = HitRateAtK(pipeline_top_k)(response_wrapper)
+
+    retrieval_metrics = {
+        'mrr': float(mrr.score),
+        'mean_average_precision': float(map_score.score),
+        'ndcg': float(ndcg_score.score),
+        'context_length': context_length_value,
+        f'recall_at_{recall_k}': float(recall.score),
+        f'hit_rate_at_{recall_k}': float(hit_rate.score),
+        'recall_at_1': float(recall_at_1.score),
+        'hit_rate_at_1': float(hit_rate_at_1.score),
+        f'recall_at_{pipeline_top_k}': float(recall_at_top_k.score),
+        f'hit_rate_at_{pipeline_top_k}': float(hit_rate_at_top_k.score),
+    }
+
+    evaluated_question_count = len(responses)
+    evaluation_summary = {
+        'question_hit_count': question_hit_count,
+        'question_miss_count': max(evaluated_question_count - question_hit_count, 0),
+        'first_hit_rank_breakdown': first_hit_rank_breakdown,
+        'questions_without_hit': [item['id'] for item in per_question_results if not item['has_hit']],
+        'context_length_metric_source': context_length_metric_source,
+    }
 
     mlflow_run = log_evaluation_run(
         metadata=pipeline_metadata,
         dataset_path=str(dataset_file.relative_to(_repo_root().resolve())),
         dataset_filename=dataset_file.name,
         question_count=len(dataset_rows),
-        evaluated_question_count=len(responses),
+        evaluated_question_count=evaluated_question_count,
         recall_k=recall_k,
         mrr=float(mrr.score),
         recall_at_k=float(recall.score),
         hit_rate_at_k=float(hit_rate.score),
+        retrieval_metrics=retrieval_metrics,
         dataset_rows=filtered_rows,
         per_question_results=per_question_results,
+        evaluation_summary=evaluation_summary,
     )
 
     return {
@@ -318,13 +473,19 @@ def run_encourage_evaluation(
         'dataset_path': str(dataset_file.relative_to(_repo_root().resolve())),
         'dataset_filename': dataset_file.name,
         'question_count': len(dataset_rows),
-        'evaluated_question_count': len(responses),
+        'evaluated_question_count': evaluated_question_count,
         'top_k': int(pipeline_metadata.get('top_k', 0) or 0),
         'recall_k': recall_k,
         'mrr': float(mrr.score),
+        'mean_average_precision': float(map_score.score),
+        'ndcg': float(ndcg_score.score),
+        'context_length': context_length_value,
+        'context_length_metric_source': context_length_metric_source,
         'recall_at_k': float(recall.score),
         'hit_rate_at_k': float(hit_rate.score),
+        'retrieval_metrics': retrieval_metrics,
         'mlflow_experiment_id': mlflow_run.get('experiment_id'),
         'mlflow_run_id': mlflow_run.get('run_id'),
+        'evaluation_summary': evaluation_summary,
         'per_question_results': per_question_results,
     }

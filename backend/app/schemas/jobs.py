@@ -167,6 +167,7 @@ class EncourageIngestRequest(BaseModel):
     query: str = Field(default='Worum geht es in diesem Dokument?', min_length=1)
     model_name: str | None = None
     run_generation: bool = False
+    rag_method: str = 'Base'
 
 
 class EncourageRetrieveRequest(BaseModel):
@@ -245,10 +246,16 @@ class EncourageEvaluationResponse(BaseModel):
     top_k: int
     recall_k: int
     mrr: float
+    mean_average_precision: float = 0.0
+    ndcg: float = 0.0
+    context_length: float = 0.0
+    context_length_metric_source: str = 'encourage_context_length'
     recall_at_k: float
     hit_rate_at_k: float
+    retrieval_metrics: dict[str, float] = Field(default_factory=dict)
     mlflow_experiment_id: str | None = None
     mlflow_run_id: str | None = None
+    evaluation_summary: dict[str, Any] = Field(default_factory=dict)
     per_question_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
