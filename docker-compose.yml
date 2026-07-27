@@ -13,6 +13,10 @@ services:
       - '3000:3000'
     environment:
       PADDLEDOC_PUBLIC_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    command: npm run dev
     depends_on:
       - backend
 
@@ -44,6 +48,8 @@ services:
       PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING: ${PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING:-true}
     volumes:
       - ./backend/storage:/app/backend/storage
+      - ./docs:/app/docs
+      - ../encourage:/app/encourage
     depends_on:
       - postgres
       - redis
@@ -84,6 +90,8 @@ services:
       PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING: ${PADDLEDOC_ENCOURAGE_ENABLE_MLFLOW_TRACING:-true}
     volumes:
       - ./backend/storage:/app/backend/storage
+      - ./docs:/app/docs
+      - ../encourage:/app/encourage
       - paddlex_models:/root/.paddlex
       - hf_cache:/root/.cache/huggingface
     depends_on:

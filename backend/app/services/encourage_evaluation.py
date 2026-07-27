@@ -15,6 +15,10 @@ def _repo_root() -> Path:
 
 
 def _evaluation_root() -> Path:
+    # Check /app/docs first (Docker mount), then relative to repo root
+    docker_path = Path('/app/docs/evaluation')
+    if docker_path.exists():
+        return docker_path
     return _repo_root() / 'docs' / 'evaluation'
 
 
@@ -38,30 +42,44 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def list_evaluation_datasets() -> list[dict[str, Any]]:
     root = _evaluation_root().resolve()
+    print(f'[DEBUG] Looking for datasets in: {root}')
+    print(f'[DEBUG] Directory exists: {root.exists()}')
+    
     if not root.exists():
+        print(f'[DEBUG] Directory does not exist, creating it')
+        root.mkdir(parents=True, exist_ok=True)
         return []
 
     items: list[dict[str, Any]] = []
-    for path in sorted(root.glob('*.jsonl')):
-        rows = _load_jsonl(path)
-        source_documents = sorted(
-            {
-                str(row.get('source_document', '')).strip()
-                for row in rows
-                if str(row.get('source_document', '')).strip()
-            }
-        )
-        relative_path = str(path.resolve().relative_to(_repo_root().resolve()))
-        items.append(
-            {
-                'path': relative_path,
-                'filename': path.name,
-                'row_count': len(rows),
-                'source_documents': source_documents,
-                'size_bytes': path.stat().st_size,
-                'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
-            }
-        )
+    files = list(root.glob('*.jsonl'))
+    print(f'[DEBUG] Found {len(files)} JSONL files: {[f.name for f in files]}')
+    
+    for path in sorted(files):
+        try:
+            rows = _load_jsonl(path)
+            source_documents = sorted(
+                {
+                    str(row.get('source_document', '')).strip()
+                    for row in rows
+                    if str(row.get('source_document', '')).strip()
+                }
+            )
+            relative_path = str(path.resolve().relative_to(_repo_root().resolve()))
+            items.append(
+                {
+                    'path': relative_path,
+                    'filename': path.name,
+                    'row_count': len(rows),
+                    'source_documents': source_documents,
+                    'size_bytes': path.stat().st_size,
+                    'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                }
+            )
+            print(f'[DEBUG] Loaded dataset: {path.name} with {len(rows)} rows')
+        except Exception as e:
+            print(f'[DEBUG] Error loading {path.name}: {e}')
+    
+    print(f'[DEBUG] Returning {len(items)} datasets')
     return items
 
 

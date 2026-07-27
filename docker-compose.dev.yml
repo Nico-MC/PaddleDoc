@@ -43,6 +43,7 @@ services:
           /app/app
     volumes:
       - ./backend:/app
+      - ./docs:/app/docs
       - ../encourage:/encourage
       - paddlex_models:/root/.paddlex
     environment:

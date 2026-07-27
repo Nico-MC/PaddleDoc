@@ -1158,7 +1158,7 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
             'path': str(candidate),
             'filename': candidate.name,
             'document_count': document['document_count'],
-            'chunk_preview': document.get('config', {}).get('chunk_preview', []),
+            'chunk_preview': document.get('document_dump', {}).get('chunk_preview', []),
         },
         document=EncourageDocumentResponse(
             id=document['id'],

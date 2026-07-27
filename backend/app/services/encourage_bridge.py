@@ -236,7 +236,7 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
         'content_length': len(source_document.content),
         'meta_data': source_document.meta_data.to_dict(truncated=False),
         'chunk_count': len(documents),
-        'chunk_preview': [chunk.content[:250] for chunk in documents[:3]],
+        'chunk_preview': [chunk.content for chunk in documents],
     }
 
     return {
