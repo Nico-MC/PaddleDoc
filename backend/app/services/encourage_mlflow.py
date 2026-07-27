@@ -6,6 +6,12 @@ from statistics import mean
 from typing import Any
 
 
+def _mlflow_from_pandas() -> Any:
+    import mlflow.data
+
+    return getattr(mlflow.data, 'from_pandas')
+
+
 def _tracking_uri() -> str:
     configured = os.getenv('MLFLOW_TRACKING_URI', '').strip()
     if configured:
@@ -59,13 +65,30 @@ def _log_common_params(*, event: str, metadata: dict[str, Any], query: str | Non
 
 
 def _log_source_md_dataset(*, metadata: dict[str, Any]) -> None:
-    """Log source markdown provenance as an MLflow artifact."""
+    """Log source markdown provenance as an MLflow input dataset and artifact."""
     source_md_path = str(metadata.get('source_md_path', '') or '')
     source_md_filename = str(metadata.get('source_md_filename', '') or '')
     if not source_md_path:
         return
 
     import mlflow
+    import pandas as pd
+
+    dataset = _mlflow_from_pandas()(
+        pd.DataFrame(
+            [
+                {
+                    'source_md_path': source_md_path,
+                    'source_md_filename': source_md_filename,
+                    'pipeline_id': str(metadata.get('pipeline_id', '')),
+                    'collection_name': str(metadata.get('collection_name', '')),
+                }
+            ]
+        ),
+        source=source_md_path,
+        name=source_md_filename or Path(source_md_path).name,
+    )
+    mlflow.log_input(dataset, context='source_markdown')
 
     mlflow.log_dict(
         {
@@ -193,6 +216,7 @@ def log_evaluation_run(
     """Best-effort MLflow logging for Encourage retrieval evaluation runs."""
     try:
         import mlflow
+        import pandas as pd
 
         _ensure_mlflow_no_proxy()
         mlflow.set_tracking_uri(_tracking_uri())
@@ -210,6 +234,12 @@ def log_evaluation_run(
                 }
             )
             _log_common_params(event='evaluation', metadata=metadata)
+            evaluation_dataset = _mlflow_from_pandas()(
+                pd.DataFrame(dataset_rows),
+                source=dataset_path,
+                name=dataset_filename or Path(dataset_path).name,
+            )
+            mlflow.log_input(evaluation_dataset, context='evaluation_dataset')
             mlflow.log_param('dataset_path', dataset_path)
             mlflow.log_param('dataset_filename', dataset_filename)
             mlflow.log_param('question_count', question_count)
@@ -218,8 +248,8 @@ def log_evaluation_run(
             mlflow.log_metric('mrr', float(mrr))
             mlflow.log_metric(f'recall_at_{recall_k}', float(recall_at_k))
             mlflow.log_metric(f'hit_rate_at_{recall_k}', float(hit_rate_at_k))
-            mlflow.log_dict(dataset_rows, 'evaluation_dataset_rows.json')
-            mlflow.log_dict(per_question_results, 'evaluation_question_results.json')
+            mlflow.log_dict({'rows': dataset_rows}, 'evaluation_dataset_rows.json')
+            mlflow.log_dict({'results': per_question_results}, 'evaluation_question_results.json')
             mlflow.log_dict(
                 {
                     'metadata': {
