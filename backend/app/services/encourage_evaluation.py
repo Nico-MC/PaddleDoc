@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.encourage_bridge import (
+    create_llm_runner,
     get_pipeline_metadata,
     get_pipeline_rag,
     load_markdown_chunks,
@@ -240,6 +241,72 @@ def _resolve_dataset_rows(rows: list[dict[str, Any]], *, markdown_path: str) -> 
     return matched_rows
 
 
+def _normalize_evaluation_mode(value: str | None) -> str:
+    normalized = (value or '').strip().lower()
+    if normalized in {'', 'standard'}:
+        return 'standard'
+    if normalized in {'advanced', 'llm', 'enhanced'}:
+        return 'advanced'
+    raise ValueError("Unsupported evaluation mode. Supported modes: 'standard', 'advanced'.")
+
+
+def _compute_advanced_metrics(
+    *,
+    mode: str,
+    response_wrapper: Any,
+    openai_api_base_url: str,
+    openai_api_key: str,
+    model_name: str | None,
+) -> tuple[dict[str, float], str, list[str]]:
+    if mode != 'advanced':
+        return {}, 'disabled', []
+
+    if not openai_api_base_url.strip() or not openai_api_key.strip():
+        return (
+            {},
+            'skipped_missing_credentials',
+            [
+                'Advanced evaluation requested, but OPENAI credentials are missing. '
+                'Set OPENAI_API_BASE_URL and OPENAI_API_BEARER_TOKEN.'
+            ],
+        )
+
+    try:
+        runner = create_llm_runner(
+            api_base_url=openai_api_base_url,
+            api_key=openai_api_key,
+            model_name=model_name,
+            max_tokens=256,
+            temperature=0.0,
+            max_workers=2,
+            batch_size=4,
+        )
+        from encourage.metrics.context_precision import (  # type: ignore[reportMissingImports]
+            ContextPrecision,
+        )
+        from encourage.metrics.context_recall import (  # type: ignore[reportMissingImports]
+            ContextRecall,
+        )
+
+        context_precision = ContextPrecision(runner)(response_wrapper)
+        context_recall = ContextRecall(runner)(response_wrapper)
+
+        return (
+            {
+                'context_precision': float(context_precision.score),
+                'context_recall': float(context_recall.score),
+            },
+            'computed',
+            [],
+        )
+    except Exception as exc:
+        return (
+            {},
+            'failed',
+            [f'Advanced evaluation failed: {exc}'],
+        )
+
+
 def run_encourage_evaluation(
     *,
     pipeline_id: str,
@@ -250,7 +317,12 @@ def run_encourage_evaluation(
     top_k: int | None = None,
     chunk_max_chars: int | None = None,
     chunk_overlap_chars: int | None = None,
+    evaluation_mode: str = 'standard',
+    openai_api_base_url: str = '',
+    openai_api_key: str = '',
+    model_name: str | None = None,
 ) -> dict[str, Any]:
+    resolved_mode = _normalize_evaluation_mode(evaluation_mode)
     rag_pipeline = get_pipeline_rag(pipeline_id)
     pipeline_metadata = get_pipeline_metadata(pipeline_id)
     if pipeline_metadata is None:
@@ -441,6 +513,14 @@ def run_encourage_evaluation(
         f'hit_rate_at_{pipeline_top_k}': float(hit_rate_at_top_k.score),
     }
 
+    advanced_metrics, advanced_status, advanced_warnings = _compute_advanced_metrics(
+        mode=resolved_mode,
+        response_wrapper=response_wrapper,
+        openai_api_base_url=openai_api_base_url,
+        openai_api_key=openai_api_key,
+        model_name=model_name,
+    )
+
     evaluated_question_count = len(responses)
     evaluation_summary = {
         'question_hit_count': question_hit_count,
@@ -457,10 +537,14 @@ def run_encourage_evaluation(
         question_count=len(dataset_rows),
         evaluated_question_count=evaluated_question_count,
         recall_k=recall_k,
+        evaluation_mode=resolved_mode,
         mrr=float(mrr.score),
         recall_at_k=float(recall.score),
         hit_rate_at_k=float(hit_rate.score),
         retrieval_metrics=retrieval_metrics,
+        advanced_metrics=advanced_metrics,
+        advanced_status=advanced_status,
+        warnings=advanced_warnings,
         dataset_rows=filtered_rows,
         per_question_results=per_question_results,
         evaluation_summary=evaluation_summary,
@@ -476,6 +560,7 @@ def run_encourage_evaluation(
         'evaluated_question_count': evaluated_question_count,
         'top_k': int(pipeline_metadata.get('top_k', 0) or 0),
         'recall_k': recall_k,
+        'evaluation_mode': resolved_mode,
         'mrr': float(mrr.score),
         'mean_average_precision': float(map_score.score),
         'ndcg': float(ndcg_score.score),
@@ -484,6 +569,9 @@ def run_encourage_evaluation(
         'recall_at_k': float(recall.score),
         'hit_rate_at_k': float(hit_rate.score),
         'retrieval_metrics': retrieval_metrics,
+        'advanced_metrics': advanced_metrics,
+        'advanced_status': advanced_status,
+        'warnings': advanced_warnings,
         'mlflow_experiment_id': mlflow_run.get('experiment_id'),
         'mlflow_run_id': mlflow_run.get('run_id'),
         'evaluation_summary': evaluation_summary,

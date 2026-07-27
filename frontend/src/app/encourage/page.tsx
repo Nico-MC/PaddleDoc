@@ -88,7 +88,11 @@ type EncourageEvaluationResponse = {
   context_length_metric_source: string;
   recall_at_k: number;
   hit_rate_at_k: number;
+  evaluation_mode: 'standard' | 'advanced';
   retrieval_metrics: Record<string, number>;
+  advanced_metrics: Record<string, number>;
+  advanced_status: string;
+  warnings: string[];
   mlflow_experiment_id: string | null;
   mlflow_run_id: string | null;
   evaluation_summary: {
@@ -170,6 +174,9 @@ export default function EncouragePage() {
   const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evaluation, setEvaluation] = useState<EncourageEvaluationResponse | null>(null);
+  const [selectedEvaluationMode, setSelectedEvaluationMode] = useState<'standard' | 'advanced'>(
+    'standard',
+  );
   const [error, setError] = useState<string | null>(null);
   const [showChunks, setShowChunks] = useState(false);
   const [showDatasetDetails, setShowDatasetDetails] = useState(false);
@@ -201,6 +208,22 @@ export default function EncouragePage() {
       .split('_')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
+  };
+
+  const formatValue = (value: unknown) => {
+    if (value === null || value === undefined || value === '') {
+      return 'n/a';
+    }
+    if (typeof value === 'number') {
+      if (Number.isInteger(value)) {
+        return String(value);
+      }
+      return value.toFixed(4);
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    return String(value);
   };
 
   const resolveMlflowUrl = () => {
@@ -387,6 +410,7 @@ export default function EncouragePage() {
           pipeline_id: ingested.pipeline.pipeline_id,
           dataset_path: selectedDatasetPath,
           recall_k: 3,
+          evaluation_mode: selectedEvaluationMode,
           collection_name: ingested.pipeline.collection_name,
           markdown_path: ingested.source_markdown.path,
           top_k: ingested.pipeline.top_k,
@@ -514,6 +538,80 @@ export default function EncouragePage() {
                 <p className="mt-1 text-xs text-emerald-700">
                   Method: <strong>{ingested.pipeline.rag_method}</strong>
                 </p>
+
+                <div className="mt-3 rounded-lg border border-emerald-200 bg-white p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
+                    Ingestion & Indexing Parameters (Step 1)
+                  </p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs text-slate-700">
+                    <p>
+                      <span className="font-semibold">chunk_count:</span> {ingested.pipeline.document_count}
+                    </p>
+                    <p>
+                      <span className="font-semibold">document_count:</span> {ingested.pipeline.document_count}
+                    </p>
+                    <p>
+                      <span className="font-semibold">chunk_max_chars:</span>{' '}
+                      {formatValue(ingested.debug.config.chunk_max_chars)}
+                    </p>
+                    <p>
+                      <span className="font-semibold">chunk_overlap_chars:</span>{' '}
+                      {formatValue(ingested.debug.config.chunk_overlap_chars)}
+                    </p>
+                    <p>
+                      <span className="font-semibold">collection_name:</span>{' '}
+                      <span className="break-all">{ingested.pipeline.collection_name}</span>
+                    </p>
+                    <p>
+                      <span className="font-semibold">top_k:</span> {ingested.pipeline.top_k}
+                    </p>
+                    <p>
+                      <span className="font-semibold">rag_method:</span> {ingested.pipeline.rag_method}
+                    </p>
+                    <p className="sm:col-span-2 lg:col-span-2 break-all">
+                      <span className="font-semibold">source_md_path:</span> {ingested.source_markdown.path}
+                    </p>
+                    <p className="break-all">
+                      <span className="font-semibold">source_md_filename:</span>{' '}
+                      {ingested.source_markdown.filename}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 rounded-lg border border-emerald-200 bg-white p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
+                    Generation Preview (Step 1)
+                  </p>
+                  {runGeneration ? (
+                    ingested.rag_run ? (
+                      <>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2 text-xs text-slate-700">
+                          <p>
+                            <span className="font-semibold">model:</span> {ingested.rag_run.model_name}
+                          </p>
+                          <p>
+                            <span className="font-semibold">answer chars:</span> {ingested.rag_run.answer.length}
+                          </p>
+                          <p className="sm:col-span-2 break-words">
+                            <span className="font-semibold">query:</span> {ingested.rag_run.query}
+                          </p>
+                        </div>
+                        <p className="mt-2 text-xs font-medium text-emerald-700">generated answer:</p>
+                        <p className="mt-1 rounded border border-emerald-100 bg-emerald-50 p-2 text-xs text-slate-700 whitespace-pre-wrap">
+                          {ingested.rag_run.answer || 'n/a'}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-600">
+                        Generation was requested, but no preview was returned.
+                      </p>
+                    )
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-600">
+                      Disabled. Enable Run generation to capture a one-shot preview during ingest.
+                    </p>
+                  )}
+                </div>
 
                 {/* Chunks Preview */}
                 <button
@@ -807,49 +905,264 @@ export default function EncouragePage() {
                   {isEvaluating ? 'Evaluating...' : 'Run Evaluation'}
                 </Button>
 
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-sm font-medium text-slate-700">Evaluation Mode</p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedEvaluationMode('standard')}
+                      className={`rounded-lg border-2 p-3 text-left transition ${
+                        selectedEvaluationMode === 'standard'
+                          ? 'border-purple-500 bg-purple-50 text-purple-900'
+                          : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      }`}
+                    >
+                      <p className="text-sm font-medium">Standard Evaluation</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Fast retrieval metrics for iterative experiments.
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedEvaluationMode('advanced')}
+                      className={`rounded-lg border-2 p-3 text-left transition ${
+                        selectedEvaluationMode === 'advanced'
+                          ? 'border-purple-500 bg-purple-50 text-purple-900'
+                          : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
+                      }`}
+                    >
+                      <p className="text-sm font-medium">Advanced Evaluation</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Adds LLM-based context metrics (more cost and runtime).
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
                 {evaluation && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50 p-4">
                     <p className="font-medium text-purple-900">✓ Evaluation Complete</p>
-                    <div className="mt-3">
-                      <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
-                        Optimization Metrics ({Object.keys(evaluation.retrieval_metrics).length})
-                      </p>
-                      <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                        {Object.entries(evaluation.retrieval_metrics)
-                          .sort(([left], [right]) => left.localeCompare(right))
-                          .map(([metricName, metricValue]) => (
-                            <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
-                              <p className="font-medium text-slate-700">{metricName}</p>
-                              <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
-                            </div>
-                          ))}
-                      </div>
-                    </div>
+                    {(() => {
+                      const metricEntries = Object.entries(evaluation.retrieval_metrics).sort(([left], [right]) =>
+                        left.localeCompare(right),
+                      );
+                      const coreMetricSet = new Set(['mrr', 'mean_average_precision', 'ndcg']);
+                      const retrievalCoreMetrics = metricEntries.filter(
+                        ([metricName]) =>
+                          coreMetricSet.has(metricName) ||
+                          metricName.startsWith('recall_at_') ||
+                          metricName.startsWith('hit_rate_at_'),
+                      );
+                      const retrievalCoreMetricNames = new Set(
+                        retrievalCoreMetrics.map(([metricName]) => metricName),
+                      );
+                      const retrievalDiagnosticMetrics = metricEntries.filter(
+                        ([metricName]) => !retrievalCoreMetricNames.has(metricName),
+                      );
+                      const advancedMetricEntries = Object.entries(
+                        evaluation.advanced_metrics || {},
+                      ).sort(([left], [right]) => left.localeCompare(right));
+                      const resolvedQuery = retrieval?.query ?? (query.trim() || null);
 
-                    <div className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
-                      <div>
-                        <p className="text-xs text-purple-700">Context Length Source</p>
-                        <p className="font-semibold text-purple-900">{evaluation.context_length_metric_source}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-purple-700">MLflow Run</p>
-                        {evaluation.mlflow_run_id && evaluation.mlflow_experiment_id ? (
-                          <a
-                            href={resolveMlflowRunUrl(
-                              evaluation.mlflow_experiment_id,
-                              evaluation.mlflow_run_id,
+                      const chunkMaxChars =
+                        typeof ingested?.debug.config.chunk_max_chars === 'number'
+                          ? ingested.debug.config.chunk_max_chars
+                          : null;
+                      const chunkOverlapChars =
+                        typeof ingested?.debug.config.chunk_overlap_chars === 'number'
+                          ? ingested.debug.config.chunk_overlap_chars
+                          : null;
+
+                      const indexingMetrics: Array<[string, unknown]> = [
+                        ['chunk_count', ingested?.pipeline.document_count ?? null],
+                        ['document_count', ingested?.pipeline.document_count ?? null],
+                        ['chunk_max_chars', chunkMaxChars],
+                        ['chunk_overlap_chars', chunkOverlapChars],
+                        ['collection_name', evaluation.collection_name],
+                        ['top_k', evaluation.top_k],
+                      ];
+
+                      const ingestionParameterMetrics: Array<[string, unknown]> = [
+                        ['chunk_max_chars', chunkMaxChars],
+                        ['chunk_overlap_chars', chunkOverlapChars],
+                        ['document_count', ingested?.pipeline.document_count ?? null],
+                        ['collection_name', evaluation.collection_name],
+                        ['rag_method', ingested?.pipeline.rag_method ?? null],
+                        ['source_md_filename', ingested?.source_markdown.filename ?? null],
+                        ['source_md_path', evaluation.markdown_path],
+                        ['top_k', evaluation.top_k],
+                      ];
+
+                      const evaluationParameterMetrics: Array<[string, unknown]> = [
+                        ['dataset_filename', evaluation.dataset_filename],
+                        ['dataset_path', evaluation.dataset_path],
+                        ['evaluated_question_count', evaluation.evaluated_question_count],
+                        ['event', 'evaluation'],
+                        ['pipeline_id', evaluation.pipeline_id],
+                        ['query', resolvedQuery],
+                        ['question_count', evaluation.question_count],
+                        ['evaluation_mode', evaluation.evaluation_mode],
+                        ['advanced_status', evaluation.advanced_status],
+                        ['recall_k', evaluation.recall_k],
+                        ['context_length_source', evaluation.context_length_metric_source],
+                      ];
+
+                      return (
+                        <>
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                              Retrieval (Core for Comparison) ({retrievalCoreMetrics.length})
+                            </p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {retrievalCoreMetrics.map(([metricName, metricValue]) => (
+                                <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">{metricName}</p>
+                                  <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {retrievalDiagnosticMetrics.length > 0 && (
+                            <div className="mt-3">
+                              <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                                Retrieval Diagnostics ({retrievalDiagnosticMetrics.length})
+                              </p>
+                              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                {retrievalDiagnosticMetrics.map(([metricName, metricValue]) => (
+                                  <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                    <p className="font-medium text-slate-700">{metricName}</p>
+                                    <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                              Indexing ({indexingMetrics.length})
+                            </p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {indexingMetrics.map(([name, value]) => (
+                                <div key={name} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">{name}</p>
+                                  <p className="mt-1 font-semibold text-slate-900 break-words">{formatValue(value)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                              Advanced Evaluation ({advancedMetricEntries.length})
+                            </p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              <div className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                <p className="font-medium text-slate-700">advanced_status</p>
+                                <p className="mt-1 font-semibold text-slate-900 break-words">
+                                  {evaluation.advanced_status}
+                                </p>
+                              </div>
+                              {advancedMetricEntries.map(([metricName, metricValue]) => (
+                                <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">{metricName}</p>
+                                  <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
+                                </div>
+                              ))}
+                            </div>
+                            {evaluation.warnings.length > 0 && (
+                              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                                <p className="font-semibold">Warnings</p>
+                                {evaluation.warnings.map((warning, idx) => (
+                                  <p key={`${warning}-${idx}`} className="mt-1">
+                                    {warning}
+                                  </p>
+                                ))}
+                              </div>
                             )}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block truncate font-mono text-xs font-semibold text-purple-900 underline decoration-purple-300 underline-offset-2 hover:text-purple-700"
-                          >
-                            {evaluation.mlflow_run_id}
-                          </a>
-                        ) : (
-                          <p className="truncate font-mono text-xs font-semibold text-purple-900">N/A</p>
-                        )}
-                      </div>
-                    </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                              Ingestion Parameters ({ingestionParameterMetrics.length})
+                            </p>
+                            <p className="mt-1 text-[11px] text-purple-700/80">
+                              These values come from Step 1 (Ingest) and remain visible for comparison.
+                            </p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {ingestionParameterMetrics.map(([name, value]) => (
+                                <div key={name} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">{name}</p>
+                                  <p className="mt-1 font-semibold text-slate-900 break-words">{formatValue(value)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">
+                              Evaluation Parameters ({evaluationParameterMetrics.length})
+                            </p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                              {evaluationParameterMetrics.map(([name, value]) => (
+                                <div key={name} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">{name}</p>
+                                  <p className="mt-1 font-semibold text-slate-900 break-words">{formatValue(value)}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <p className="text-xs font-medium uppercase tracking-wide text-purple-700">Tracking</p>
+                            <div className="mt-2 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                              <div className="rounded-lg border border-purple-100 bg-white px-3 py-2">
+                                <p className="text-xs text-purple-700">Context Length Source</p>
+                                <p className="font-semibold text-purple-900 break-words">
+                                  {evaluation.context_length_metric_source}
+                                </p>
+                              </div>
+                              <div className="rounded-lg border border-purple-100 bg-white px-3 py-2">
+                                <p className="text-xs text-purple-700">MLflow Run</p>
+                                {evaluation.mlflow_run_id && evaluation.mlflow_experiment_id ? (
+                                  <a
+                                    href={resolveMlflowRunUrl(
+                                      evaluation.mlflow_experiment_id,
+                                      evaluation.mlflow_run_id,
+                                    )}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="block truncate font-mono text-xs font-semibold text-purple-900 underline decoration-purple-300 underline-offset-2 hover:text-purple-700"
+                                  >
+                                    {evaluation.mlflow_run_id}
+                                  </a>
+                                ) : (
+                                  <p className="truncate font-mono text-xs font-semibold text-purple-900">N/A</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <details className="mt-4">
+                            <summary className="cursor-pointer text-xs font-medium text-purple-700">
+                              Show complete raw payload
+                            </summary>
+                            <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-100">
+                              {JSON.stringify(
+                                {
+                                  evaluation,
+                                  ingest: ingested,
+                                  retrieval,
+                                },
+                                null,
+                                2,
+                              )}
+                            </pre>
+                          </details>
+                        </>
+                      );
+                    })()}
 
                     <div className="mt-4 grid gap-3 md:grid-cols-3">
                       <div className="rounded-lg border border-purple-100 bg-white p-3">

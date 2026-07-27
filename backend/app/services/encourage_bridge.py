@@ -397,29 +397,17 @@ def run_pipeline_once(
             'OPENAI_API_BEARER_TOKEN is not configured. Set it in PaddleDoc settings or docker env.'
         )
 
-    model_name_clean = (model_name or '').strip() or os.getenv(
-        'PADDLEDOC_ENCOURAGE_MODEL_NAME',
-        'gpt-4o-mini',
-    )
-    api_base = _normalize_openai_base_url(api_base_url)
-    runner_cls = _batch_inference_runner_class()
-
-    env_var_name = 'PADDLEDOC_ENCOURAGE_LLM_API_KEY'
-    os.environ[env_var_name] = api_key_clean
-
-    sampling_params = _PaddleDocSamplingParams(
+    runner = create_llm_runner(
+        api_base_url=api_base_url,
+        api_key=api_key_clean,
+        model_name=model_name,
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
-    )
-    runner = runner_cls(
-        sampling_parameters=sampling_params,
-        model_name=model_name_clean,
-        base_url=api_base,
-        env_var_name=env_var_name,
         max_workers=1,
         batch_size=1,
     )
+    model_name_clean = str(getattr(runner, 'model_name', model_name or 'gpt-4o-mini'))
 
     responses = rag_pipeline.run(
         runner=runner,
@@ -438,6 +426,48 @@ def run_pipeline_once(
         'model_name': model_name_clean,
         'answer': answer,
     }
+
+
+def create_llm_runner(
+    *,
+    api_base_url: str,
+    api_key: str,
+    model_name: str | None = None,
+    max_tokens: int = 512,
+    temperature: float = 0.1,
+    top_p: float = 1.0,
+    max_workers: int = 2,
+    batch_size: int = 4,
+) -> Any:
+    api_key_clean = api_key.strip()
+    if not api_key_clean:
+        raise ValueError(
+            'OPENAI_API_BEARER_TOKEN is not configured. Set it in PaddleDoc settings or docker env.'
+        )
+
+    model_name_clean = (model_name or '').strip() or os.getenv(
+        'PADDLEDOC_ENCOURAGE_MODEL_NAME',
+        'gpt-4o-mini',
+    )
+    api_base = _normalize_openai_base_url(api_base_url)
+    runner_cls = _batch_inference_runner_class()
+
+    env_var_name = 'PADDLEDOC_ENCOURAGE_LLM_API_KEY'
+    os.environ[env_var_name] = api_key_clean
+
+    sampling_params = _PaddleDocSamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    return runner_cls(
+        sampling_parameters=sampling_params,
+        model_name=model_name_clean,
+        base_url=api_base,
+        env_var_name=env_var_name,
+        max_workers=max(1, int(max_workers)),
+        batch_size=max(1, int(batch_size)),
+    )
 
 
 def retrieve_from_pipeline(

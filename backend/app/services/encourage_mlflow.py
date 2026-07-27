@@ -207,10 +207,14 @@ def log_evaluation_run(
     question_count: int,
     evaluated_question_count: int,
     recall_k: int,
+    evaluation_mode: str,
     mrr: float,
     recall_at_k: float,
     hit_rate_at_k: float,
     retrieval_metrics: dict[str, float],
+    advanced_metrics: dict[str, float],
+    advanced_status: str,
+    warnings: list[str],
     dataset_rows: list[dict[str, Any]],
     per_question_results: list[dict[str, Any]],
     evaluation_summary: dict[str, Any],
@@ -247,15 +251,21 @@ def log_evaluation_run(
             mlflow.log_param('question_count', question_count)
             mlflow.log_param('evaluated_question_count', evaluated_question_count)
             mlflow.log_param('recall_k', recall_k)
+            mlflow.log_param('evaluation_mode', evaluation_mode)
+            mlflow.log_param('advanced_status', advanced_status)
             mlflow.log_metric('mrr', float(mrr))
             mlflow.log_metric(f'recall_at_{recall_k}', float(recall_at_k))
             mlflow.log_metric(f'hit_rate_at_{recall_k}', float(hit_rate_at_k))
             for metric_name, metric_value in retrieval_metrics.items():
                 mlflow.log_metric(metric_name, float(metric_value))
+            for metric_name, metric_value in advanced_metrics.items():
+                mlflow.log_metric(metric_name, float(metric_value))
             mlflow.log_dict({'rows': dataset_rows}, 'evaluation_dataset_rows.json')
             mlflow.log_dict({'results': per_question_results}, 'evaluation_question_results.json')
             mlflow.log_dict(evaluation_summary, 'evaluation_summary.json')
             mlflow.log_dict(retrieval_metrics, 'evaluation_retrieval_metrics.json')
+            mlflow.log_dict(advanced_metrics, 'evaluation_advanced_metrics.json')
+            mlflow.log_dict({'warnings': warnings}, 'evaluation_warnings.json')
             mlflow.log_dict(
                 {
                     'metadata': {
@@ -266,12 +276,16 @@ def log_evaluation_run(
                         'question_count': question_count,
                         'evaluated_question_count': evaluated_question_count,
                         'recall_k': recall_k,
+                        'evaluation_mode': evaluation_mode,
+                        'advanced_status': advanced_status,
                     },
                     'summary': {
                         'mrr': float(mrr),
                         'recall_at_k': float(recall_at_k),
                         'hit_rate_at_k': float(hit_rate_at_k),
                         'retrieval_metrics': retrieval_metrics,
+                        'advanced_metrics': advanced_metrics,
+                        'warnings': warnings,
                         'evaluation_summary': evaluation_summary,
                     },
                     'dataset_rows': dataset_rows,
@@ -288,10 +302,14 @@ def log_evaluation_run(
                     'question_count': question_count,
                     'evaluated_question_count': evaluated_question_count,
                     'recall_k': recall_k,
+                    'evaluation_mode': evaluation_mode,
+                    'advanced_status': advanced_status,
                     'mrr': float(mrr),
                     'recall_at_k': float(recall_at_k),
                     'hit_rate_at_k': float(hit_rate_at_k),
                     'retrieval_metrics': retrieval_metrics,
+                    'advanced_metrics': advanced_metrics,
+                    'warnings': warnings,
                 },
                 'evaluation_overview.json',
             )

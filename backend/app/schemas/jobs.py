@@ -181,6 +181,8 @@ class EncourageEvaluateRequest(BaseModel):
     pipeline_id: str = Field(min_length=1)
     dataset_path: str = Field(min_length=1)
     recall_k: int = 3
+    evaluation_mode: Literal['standard', 'advanced'] = 'standard'
+    model_name: str | None = None
     collection_name: str | None = None
     markdown_path: str | None = None
     top_k: int | None = None
@@ -252,7 +254,11 @@ class EncourageEvaluationResponse(BaseModel):
     context_length_metric_source: str = 'encourage_context_length'
     recall_at_k: float
     hit_rate_at_k: float
+    evaluation_mode: Literal['standard', 'advanced'] = 'standard'
     retrieval_metrics: dict[str, float] = Field(default_factory=dict)
+    advanced_metrics: dict[str, float] = Field(default_factory=dict)
+    advanced_status: str = 'disabled'
+    warnings: list[str] = Field(default_factory=list)
     mlflow_experiment_id: str | None = None
     mlflow_run_id: str | None = None
     evaluation_summary: dict[str, Any] = Field(default_factory=dict)
