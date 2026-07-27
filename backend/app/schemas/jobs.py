@@ -177,6 +177,20 @@ class EncourageRetrieveRequest(BaseModel):
     top_k: int | None = None
 
 
+class EncourageGenerateRequest(BaseModel):
+    pipeline_id: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    model_name: str | None = None
+
+
+class EncourageGenerateResponse(BaseModel):
+    pipeline_id: str
+    query: str
+    model_name: str
+    answer: str
+    raw_output: str = ''
+
+
 class EncourageEvaluateRequest(BaseModel):
     pipeline_id: str = Field(min_length=1)
     dataset_path: str = Field(min_length=1)
@@ -217,6 +231,7 @@ class EncourageRagRunResponse(BaseModel):
     query: str
     model_name: str
     answer: str
+    raw_output: str = ''
 
 
 class EncourageIngestResponse(BaseModel):

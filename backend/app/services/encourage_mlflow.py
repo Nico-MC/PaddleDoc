@@ -199,6 +199,46 @@ def log_retrieve_run(
         return
 
 
+def log_generate_run(
+    *,
+    metadata: dict[str, Any],
+    query: str,
+    model_name: str,
+    answer: str,
+) -> None:
+    """Best-effort MLflow logging for Encourage generation probes."""
+    try:
+        import mlflow
+
+        _ensure_mlflow_no_proxy()
+        mlflow.set_tracking_uri(_tracking_uri())
+        mlflow.set_experiment(_experiment_name())
+
+        with mlflow.start_run(run_name='encourage_generate'):
+            mlflow.set_tags(
+                {
+                    'component': 'encourage',
+                    'event_type': 'generate',
+                    'pipeline_id': str(metadata.get('pipeline_id', '')),
+                    'source_md_path': str(metadata.get('source_md_path', '')),
+                }
+            )
+            _log_common_params(event='generate', metadata=metadata, query=query)
+            mlflow.log_param('generation_model_name', model_name)
+            mlflow.log_metric('generation_answer_chars', float(len(answer)))
+            mlflow.log_dict(
+                {
+                    'query': query,
+                    'model_name': model_name,
+                    'answer': answer,
+                },
+                'generation_preview.json',
+            )
+    except Exception:
+        # Never fail API requests because tracking is unavailable.
+        return
+
+
 def log_evaluation_run(
     *,
     metadata: dict[str, Any],

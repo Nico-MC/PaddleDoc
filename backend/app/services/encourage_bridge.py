@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -13,7 +14,8 @@ _RAG_PIPELINES: dict[str, Any] = {}
 _RAG_PIPELINE_METADATA: dict[str, dict[str, Any]] = {}
 _DEFAULT_SYSTEM_PROMPT = (
     'Du bist ein hilfreicher Assistent. Beantworte die Frage nur auf Basis des bereitgestellten Kontexts. '
-    'Wenn die Information im Kontext fehlt, sage das klar.'
+    'Wenn die Antwort aus dem Kontext direkt hervorgeht oder durch offensichtliche Schreibvarianten klar belegbar ist, '
+    'beantworte sie knapp und praezise. Wenn die Information im Kontext wirklich nicht enthalten ist, sage das klar.'
 )
 _DEFAULT_TOP_K = 5
 _DEFAULT_CHUNK_MAX_CHARS = 1100
@@ -57,9 +59,112 @@ def _markdown_ingestion_class() -> type:
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
 
-    from encourage.utils.markdown_ingestion import MarkdownIngestion  # type: ignore[reportMissingImports]
+    try:
+        from encourage.utils.markdown_ingestion import MarkdownIngestion  # type: ignore[reportMissingImports]
 
-    return MarkdownIngestion
+        return MarkdownIngestion
+    except ModuleNotFoundError:
+        # Some runtime environments have an older encourage package without
+        # encourage.utils.markdown_ingestion. Keep PaddleDoc functional by
+        # falling back to a local, minimal markdown ingester.
+        from encourage.prompts.context import Document  # type: ignore[reportMissingImports]
+        from encourage.prompts.meta_data import MetaData  # type: ignore[reportMissingImports]
+
+        class MarkdownIngestion:  # noqa: D401
+            """Minimal fallback markdown ingestion for PaddleDoc runtimes."""
+
+            def __init__(
+                self,
+                *,
+                chunk_documents: bool = False,
+                chunk_max_chars: int = 1200,
+                chunk_overlap_chars: int = 150,
+                encoding: str = 'utf-8',
+                **_: Any,
+            ) -> None:
+                self.chunk_documents = chunk_documents
+                self.chunk_max_chars = max(200, int(chunk_max_chars))
+                self.chunk_overlap_chars = max(
+                    0,
+                    min(int(chunk_overlap_chars), self.chunk_max_chars // 2),
+                )
+                self.encoding = encoding
+
+            def load(self, path: str | Path) -> list[Any]:
+                file_path = Path(path).expanduser().resolve()
+                if not file_path.exists() or not file_path.is_file():
+                    raise FileNotFoundError(f'File not found: {file_path}')
+
+                raw = file_path.read_text(encoding=self.encoding)
+                content = self._strip_frontmatter(raw)
+                base_doc = Document(
+                    id=uuid.uuid5(uuid.NAMESPACE_URL, str(file_path)),
+                    content=content,
+                    meta_data=MetaData(
+                        tags={
+                            'source': 'markdown',
+                            'loader': 'PaddleDocFallbackMarkdownIngestion',
+                            'filename': file_path.name,
+                            'filepath': str(file_path),
+                        }
+                    ),
+                )
+
+                if not self.chunk_documents:
+                    return [base_doc]
+
+                chunk_texts = self._chunk_text(content)
+                if len(chunk_texts) <= 1:
+                    return [base_doc]
+
+                chunked_docs: list[Any] = []
+                for idx, chunk_text in enumerate(chunk_texts):
+                    chunked_docs.append(
+                        Document(
+                            id=uuid.uuid5(uuid.NAMESPACE_URL, f'{file_path}#{idx}'),
+                            content=chunk_text,
+                            meta_data=MetaData(
+                                tags={
+                                    'source': 'markdown',
+                                    'loader': 'PaddleDocFallbackMarkdownIngestion',
+                                    'filename': file_path.name,
+                                    'filepath': str(file_path),
+                                    'chunk_index': idx,
+                                    'chunk_count': len(chunk_texts),
+                                }
+                            ),
+                        )
+                    )
+                return chunked_docs
+
+            @staticmethod
+            def _strip_frontmatter(text: str) -> str:
+                if not text.startswith('---\n'):
+                    return text
+                end = text.find('\n---\n', 4)
+                if end == -1:
+                    return text
+                return text[end + 5 :].lstrip('\n')
+
+            def _chunk_text(self, text: str) -> list[str]:
+                normalized = text.replace('\r\n', '\n').strip()
+                if not normalized:
+                    return []
+
+                blocks = [block.strip() for block in re.split(r'\n{2,}', normalized) if block.strip()]
+                chunks: list[str] = []
+                for block in blocks:
+                    if len(block) <= self.chunk_max_chars:
+                        chunks.append(block)
+                        continue
+                    step = max(1, self.chunk_max_chars - self.chunk_overlap_chars)
+                    for start in range(0, len(block), step):
+                        part = block[start : start + self.chunk_max_chars].strip()
+                        if part:
+                            chunks.append(part)
+                return chunks
+
+        return MarkdownIngestion
 
 
 def _normalize_rag_method_name(rag_method: str | None) -> str:
@@ -409,6 +514,42 @@ def run_pipeline_once(
     )
     model_name_clean = str(getattr(runner, 'model_name', model_name or 'gpt-4o-mini'))
 
+    raw_output = ''
+    try:
+        retrieved_docs = rag_pipeline.retrieve_contexts([query_text])[0]
+        context_snippets = [doc.content.strip() for doc in retrieved_docs if getattr(doc, 'content', '').strip()]
+        context_block = '\n\n'.join(context_snippets[:5])
+
+        raw_system_prompt = (
+            'Du bist ein hilfreicher Assistent. Gib die bestmoegliche direkte Antwort auf die Frage. '
+            'Wenn der bereitgestellte Kontext nicht reicht, darfst du eine vorsichtige Antwort geben und '
+            'Unsicherheit transparent markieren.'
+        )
+        if context_block:
+            raw_user_prompt = (
+                f'Frage:\n{query_text}\n\n'
+                f'Kontext (optional):\n{context_block}\n\n'
+                'Antworte knapp und konkret auf Deutsch.'
+            )
+        else:
+            raw_user_prompt = f'Frage:\n{query_text}\n\nAntworte knapp und konkret auf Deutsch.'
+
+        raw_completion = runner.client.chat.completions.create(
+            model=model_name_clean,
+            messages=[
+                {'role': 'system', 'content': raw_system_prompt},
+                {'role': 'user', 'content': raw_user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            seed=getattr(runner.sampling_parameters, 'seed', None),
+        )
+        raw_output = str(raw_completion.choices[0].message.content or '').strip()
+    except Exception:
+        # Raw output is a debug artifact; never fail the main generation path.
+        raw_output = ''
+
     responses = rag_pipeline.run(
         runner=runner,
         sys_prompt=system_prompt,
@@ -419,12 +560,17 @@ def run_pipeline_once(
     answer = ''
     if len(responses) > 0:
         first = responses[0].response
-        answer = first.strip() if isinstance(first, str) else str(first)
+        constrained_output = first if isinstance(first, str) else str(first)
+        answer = constrained_output.strip()
+
+    if not raw_output:
+        raw_output = answer
 
     return {
         'query': query_text,
         'model_name': model_name_clean,
         'answer': answer,
+        'raw_output': raw_output,
     }
 
 

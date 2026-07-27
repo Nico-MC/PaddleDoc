@@ -71,6 +71,14 @@ type EncourageRetrieveResponse = {
   results: EncourageDocument[];
 };
 
+type EncourageGenerateResponse = {
+  pipeline_id: string;
+  query: string;
+  model_name: string;
+  answer: string;
+  raw_output: string;
+};
+
 type EncourageEvaluationResponse = {
   pipeline_id: string;
   collection_name: string;
@@ -157,6 +165,7 @@ const RAG_METHOD_OPTIONS: RagMethodOption[] = [
 ];
 
 const API = API_BASE_URL;
+const DEFAULT_STEP_TWO_QUERY = 'Variiert die Hoehe der Pauschalerstattung nach Tarifklasse?';
 
 export default function EncouragePage() {
   const [items, setItems] = useState<MarkdownFileEntry[]>([]);
@@ -168,10 +177,11 @@ export default function EncouragePage() {
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
   const [selectedRagMethod, setSelectedRagMethod] = useState<string>('Base');
-  const [query, setQuery] = useState('');
-  const [runGeneration, setRunGeneration] = useState(false);
+  const [query, setQuery] = useState(DEFAULT_STEP_TWO_QUERY);
   const [isRetrieving, setIsRetrieving] = useState(false);
   const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generation, setGeneration] = useState<EncourageGenerateResponse | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evaluation, setEvaluation] = useState<EncourageEvaluationResponse | null>(null);
   const [selectedEvaluationMode, setSelectedEvaluationMode] = useState<'standard' | 'advanced'>(
@@ -179,6 +189,7 @@ export default function EncouragePage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [showChunks, setShowChunks] = useState(false);
+  const [showTopKChunks, setShowTopKChunks] = useState(false);
   const [showDatasetDetails, setShowDatasetDetails] = useState(false);
   const [isLoadingDatasetDetails, setIsLoadingDatasetDetails] = useState(false);
   const [selectedDatasetDetails, setSelectedDatasetDetails] = useState<EvaluationDatasetDetail | null>(null);
@@ -329,13 +340,13 @@ export default function EncouragePage() {
     setIsIngesting(true);
     setError(null);
     setShowChunks(false);
+    setShowTopKChunks(false);
     try {
       const response = await fetch(`${API}/api/v1/encourage/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           path: selectedPath,
-          run_generation: runGeneration,
           rag_method: selectedRagMethod,
         }),
       });
@@ -348,6 +359,7 @@ export default function EncouragePage() {
       const payload = (await response.json()) as EncourageIngestResponse;
       setIngested(payload);
       setRetrieval(null);
+      setGeneration(null);
       setEvaluation(null);
     } catch {
       setError('Failed to reach the backend while ingesting markdown file.');
@@ -369,7 +381,7 @@ export default function EncouragePage() {
         body: JSON.stringify({
           pipeline_id: ingested.pipeline.pipeline_id,
           query,
-          top_k: 3,
+          top_k: ingested.pipeline.top_k,
           collection_name: ingested.pipeline.collection_name,
         }),
       });
@@ -385,6 +397,36 @@ export default function EncouragePage() {
       setError('Failed to reach the backend while retrieving from pipeline.');
     } finally {
       setIsRetrieving(false);
+    }
+  };
+
+  const generateFromPipeline = async () => {
+    if (!ingested?.pipeline.pipeline_id || !query.trim()) {
+      return;
+    }
+    setIsGenerating(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/api/v1/encourage/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pipeline_id: ingested.pipeline.pipeline_id,
+          query,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to generate answer.';
+        setError(detail);
+        return;
+      }
+      const payload = (await response.json()) as EncourageGenerateResponse;
+      setGeneration(payload);
+    } catch {
+      setError('Failed to reach the backend while generating an answer.');
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -511,15 +553,6 @@ export default function EncouragePage() {
             </div>
 
             <div className="mt-4 flex items-center gap-3">
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={runGeneration}
-                  onChange={(e: { target: { checked: boolean } }) => setRunGeneration(e.target.checked)}
-                  className="h-4 w-4 rounded"
-                />
-                Run generation
-              </label>
               <Button
                 onClick={ingestSelectedFile}
                 disabled={!selectedPath || isIngesting || isLoading}
@@ -578,48 +611,46 @@ export default function EncouragePage() {
                   </div>
                 </div>
 
-                <div className="mt-3 rounded-lg border border-emerald-200 bg-white p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
-                    Generation Preview (Step 1)
-                  </p>
-                  {runGeneration ? (
-                    ingested.rag_run ? (
-                      <>
-                        <div className="mt-2 grid gap-2 sm:grid-cols-2 text-xs text-slate-700">
-                          <p>
-                            <span className="font-semibold">model:</span> {ingested.rag_run.model_name}
-                          </p>
-                          <p>
-                            <span className="font-semibold">answer chars:</span> {ingested.rag_run.answer.length}
-                          </p>
-                          <p className="sm:col-span-2 break-words">
-                            <span className="font-semibold">query:</span> {ingested.rag_run.query}
-                          </p>
-                        </div>
-                        <p className="mt-2 text-xs font-medium text-emerald-700">generated answer:</p>
-                        <p className="mt-1 rounded border border-emerald-100 bg-emerald-50 p-2 text-xs text-slate-700 whitespace-pre-wrap">
-                          {ingested.rag_run.answer || 'n/a'}
-                        </p>
-                      </>
-                    ) : (
-                      <p className="mt-2 text-xs text-slate-600">
-                        Generation was requested, but no preview was returned.
-                      </p>
-                    )
-                  ) : (
-                    <p className="mt-2 text-xs text-slate-600">
-                      Disabled. Enable Run generation to capture a one-shot preview during ingest.
-                    </p>
-                  )}
+                {/* Chunks Preview */}
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    onClick={() => setShowChunks(!showChunks)}
+                    className="text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
+                  >
+                    {showChunks ? '▼ Hide' : '▶ Show'} All Chunks ({ingested.source_markdown.document_count})
+                  </button>
+                  <button
+                    onClick={() => setShowTopKChunks(!showTopKChunks)}
+                    className="text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
+                  >
+                    {showTopKChunks ? '▼ Hide' : '▶ Show'} Top-{ingested.pipeline.top_k} Chunks
+                  </button>
                 </div>
 
-                {/* Chunks Preview */}
-                <button
-                  onClick={() => setShowChunks(!showChunks)}
-                  className="mt-3 text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
-                >
-                  {showChunks ? '▼ Hide' : '▶ Show'} Chunks ({ingested.source_markdown.document_count})
-                </button>
+                {showTopKChunks && (
+                  <div className="mt-3 space-y-2 max-h-96 overflow-y-auto">
+                    {ingested.source_markdown.chunk_preview.length > 0 ? (
+                      <>
+                        <p className="text-xs text-emerald-700">
+                          Showing first {Math.min(ingested.pipeline.top_k, ingested.source_markdown.chunk_preview.length)} of{' '}
+                          {ingested.source_markdown.chunk_preview.length} chunks
+                        </p>
+                        {ingested.source_markdown.chunk_preview
+                          .slice(0, ingested.pipeline.top_k)
+                          .map((chunk, idx) => (
+                            <div key={`topk-${idx}`} className="rounded border border-emerald-200 bg-white p-3">
+                              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                                Chunk {idx + 1}
+                              </p>
+                              <p className="text-xs font-mono leading-relaxed text-slate-600">{chunk}</p>
+                            </div>
+                          ))}
+                      </>
+                    ) : (
+                      <p className="text-xs text-slate-500">No chunk preview returned by the backend.</p>
+                    )}
+                  </div>
+                )}
 
                 {showChunks && (
                   <div className="mt-3 space-y-2 max-h-96 overflow-y-auto">
@@ -660,11 +691,11 @@ export default function EncouragePage() {
                 2
               </div>
               <h2 className={`text-xl font-semibold ${ingested ? 'text-slate-950' : 'text-slate-500'}`}>
-                Retrieve
+                Retrieve & Generate
               </h2>
             </div>
             <p className={`mb-4 text-sm ${ingested ? 'text-slate-600' : 'text-slate-500'}`}>
-              Query the vector store to see what documents are retrieved.
+              Ask your own question, inspect retrieved chunks, and generate an answer from top-k context.
             </p>
 
             {ingested ? (
@@ -676,13 +707,50 @@ export default function EncouragePage() {
                   rows={3}
                   className="w-full rounded-lg border border-slate-200 p-3 text-sm"
                 />
-                <Button
-                  onClick={retrieveFromPipeline}
-                  disabled={isRetrieving || !query.trim()}
-                  className="w-full bg-blue-600 hover:bg-blue-700"
-                >
-                  {isRetrieving ? 'Retrieving...' : 'Retrieve'}
-                </Button>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button
+                    onClick={retrieveFromPipeline}
+                    disabled={isRetrieving || !query.trim()}
+                    className="w-full bg-blue-600 hover:bg-blue-700"
+                  >
+                    {isRetrieving ? 'Retrieving...' : 'Retrieve'}
+                  </Button>
+                  <Button
+                    onClick={generateFromPipeline}
+                    disabled={isGenerating || !query.trim()}
+                    className="w-full bg-cyan-600 hover:bg-cyan-700"
+                  >
+                    {isGenerating ? 'Generating...' : 'Generate Answer'}
+                  </Button>
+                </div>
+
+                {generation && (
+                  <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-4 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
+                      Generated Answer
+                    </p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2 text-xs text-cyan-900">
+                      <p>
+                        <span className="font-semibold">model:</span> {generation.model_name}
+                      </p>
+                      <p>
+                        <span className="font-semibold">answer chars:</span> {generation.answer.length}
+                      </p>
+                      <p className="sm:col-span-2 break-words">
+                        <span className="font-semibold">query:</span> {generation.query}
+                      </p>
+                    </div>
+                    <p className="mt-2 rounded-lg border border-cyan-100 bg-white p-3 text-sm whitespace-pre-wrap text-slate-800">
+                      {generation.answer || 'n/a'}
+                    </p>
+                    <p className="mt-3 text-xs font-medium uppercase tracking-wide text-cyan-700">
+                      Raw Model Output
+                    </p>
+                    <pre className="mt-1 overflow-x-auto rounded-lg border border-cyan-100 bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-100 whitespace-pre-wrap">
+                      {generation.raw_output || generation.answer || 'n/a'}
+                    </pre>
+                  </div>
+                )}
 
                 {retrieval && (
                   <div className="mt-4 space-y-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
@@ -740,7 +808,11 @@ export default function EncouragePage() {
                                 )}
                               </div>
 
-                              <p className="line-clamp-3 text-slate-700">{result.content}</p>
+                              <div className="max-h-80 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                <pre className="whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-700">
+                                  {result.content}
+                                </pre>
+                              </div>
 
                               <div className="flex flex-wrap gap-3 text-xs text-slate-500">
                                 <span className="font-mono">id: {result.id}</span>

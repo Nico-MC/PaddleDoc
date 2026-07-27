@@ -22,6 +22,8 @@ from app.schemas.jobs import (
     EncourageDocumentResponse,
     EncourageEvaluateRequest,
     EncourageEvaluationResponse,
+    EncourageGenerateRequest,
+    EncourageGenerateResponse,
     EncourageIngestRequest,
     EncourageIngestResponse,
     EncouragePipelineResponse,
@@ -62,7 +64,7 @@ from app.services.encourage_evaluation import (
     list_evaluation_datasets,
     run_encourage_evaluation,
 )
-from app.services.encourage_mlflow import log_ingest_run, log_retrieve_run
+from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     get_paddle_capabilities,
     get_paddle_settings,
@@ -1202,6 +1204,7 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
                 query=rag_run['query'],
                 model_name=rag_run['model_name'],
                 answer=rag_run['answer'],
+                raw_output=str(rag_run.get('raw_output', '')),
             )
             if rag_run
             else None
@@ -1257,6 +1260,58 @@ def retrieve_from_encourage_pipeline(payload: EncourageRetrieveRequest) -> Encou
             )
             for document in result['results']
         ],
+    )
+
+
+@router.post('/encourage/generate', response_model=EncourageGenerateResponse)
+def generate_with_encourage_pipeline(payload: EncourageGenerateRequest) -> EncourageGenerateResponse:
+    openai_base_url = settings.openai_api_base_url.strip()
+    openai_token = settings.openai_api_bearer_token.strip()
+    if not openai_base_url or not openai_token:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='OpenAI endpoint is not configured. Set OPENAI_API_BASE_URL and OPENAI_API_BEARER_TOKEN.',
+        )
+
+    try:
+        rag_run = run_pipeline_once(
+            pipeline_id=payload.pipeline_id,
+            query=payload.query,
+            model_name=payload.model_name,
+            api_base_url=openai_base_url,
+            api_key=openai_token,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    metadata = get_pipeline_metadata(payload.pipeline_id) or {
+        'pipeline_id': payload.pipeline_id,
+        'collection_name': '',
+        'rag_method': 'BaseRAG',
+        'top_k': 0,
+        'document_count': 0,
+        'chunk_max_chars': 0,
+        'chunk_overlap_chars': 0,
+        'source_md_path': '',
+        'source_md_filename': '',
+    }
+    log_generate_run(
+        metadata=metadata,
+        query=rag_run['query'],
+        model_name=rag_run['model_name'],
+        answer=rag_run['answer'],
+    )
+
+    return EncourageGenerateResponse(
+        pipeline_id=payload.pipeline_id,
+        query=rag_run['query'],
+        model_name=rag_run['model_name'],
+        answer=rag_run['answer'],
+        raw_output=str(rag_run.get('raw_output', '')),
     )
 
 
