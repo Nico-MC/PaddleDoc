@@ -1013,10 +1013,31 @@ export default function EncouragePage() {
 
                 {evaluation && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50 p-4">
-                    <p className="font-medium text-purple-900">✓ Evaluation Complete</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-purple-900">✓ Evaluation Complete</p>
+                      <span className="rounded-full border border-purple-200 bg-white px-2.5 py-1 text-xs font-semibold text-purple-700">
+                        Mode {evaluation.evaluation_mode}
+                      </span>
+                      {evaluation.evaluation_mode === 'advanced' && (
+                        <span
+                          className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+                            evaluation.advanced_status === 'computed'
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                              : evaluation.advanced_status === 'failed'
+                                ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                : 'border-amber-200 bg-amber-50 text-amber-700'
+                          }`}
+                        >
+                          Advanced {evaluation.advanced_status}
+                        </span>
+                      )}
+                    </div>
                     {(() => {
                       const metricEntries = Object.entries(evaluation.retrieval_metrics).sort(([left], [right]) =>
                         left.localeCompare(right),
+                      );
+                      const advancedMetricEntries = Object.entries(evaluation.advanced_metrics).sort(
+                        ([left], [right]) => left.localeCompare(right),
                       );
                       const coreMetricSet = new Set(['mrr', 'mean_average_precision', 'ndcg']);
                       const retrievalCoreMetrics = metricEntries.filter(
@@ -1096,6 +1117,43 @@ export default function EncouragePage() {
                                   </div>
                                 ))}
                               </div>
+                            </details>
+                          )}
+
+                          {(evaluation.evaluation_mode === 'advanced' || advancedMetricEntries.length > 0) && (
+                            <details className="mt-3" open>
+                              <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-purple-700">
+                                Advanced Context Metrics ({advancedMetricEntries.length})
+                              </summary>
+                              <p className="mt-1 text-[11px] text-purple-700/80">
+                                LLM-based supplemental metrics for context precision and context recall.
+                              </p>
+                              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                <div className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                  <p className="font-medium text-slate-700">advanced_status</p>
+                                  <p className="mt-1 font-semibold text-slate-900">{evaluation.advanced_status}</p>
+                                </div>
+                                {advancedMetricEntries.map(([metricName, metricValue]) => (
+                                  <div key={metricName} className="rounded-lg border border-purple-100 bg-white px-3 py-2 text-xs">
+                                    <p className="font-medium text-slate-700">{metricName}</p>
+                                    <p className="mt-1 font-semibold text-slate-900">{formatNumber(metricValue)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                              {advancedMetricEntries.length === 0 && (
+                                <p className="mt-2 text-xs text-slate-500">
+                                  No advanced metrics were computed for this run.
+                                </p>
+                              )}
+                              {evaluation.warnings.length > 0 && (
+                                <div className="mt-3 space-y-2">
+                                  {evaluation.warnings.map((warning, index) => (
+                                    <div key={index} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                      {warning}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </details>
                           )}
 
