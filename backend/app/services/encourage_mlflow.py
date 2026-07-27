@@ -222,6 +222,27 @@ def log_evaluation_run(
             mlflow.log_dict(per_question_results, 'evaluation_question_results.json')
             mlflow.log_dict(
                 {
+                    'metadata': {
+                        'pipeline_id': str(metadata.get('pipeline_id', '')),
+                        'source_md_path': str(metadata.get('source_md_path', '')),
+                        'dataset_path': dataset_path,
+                        'dataset_filename': dataset_filename,
+                        'question_count': question_count,
+                        'evaluated_question_count': evaluated_question_count,
+                        'recall_k': recall_k,
+                    },
+                    'summary': {
+                        'mrr': float(mrr),
+                        'recall_at_k': float(recall_at_k),
+                        'hit_rate_at_k': float(hit_rate_at_k),
+                    },
+                    'dataset_rows': dataset_rows,
+                    'per_question_results': per_question_results,
+                },
+                'evaluation_run.json',
+            )
+            mlflow.log_dict(
+                {
                     'pipeline_id': str(metadata.get('pipeline_id', '')),
                     'source_md_path': str(metadata.get('source_md_path', '')),
                     'dataset_path': dataset_path,

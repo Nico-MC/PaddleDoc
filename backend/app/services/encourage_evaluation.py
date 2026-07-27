@@ -42,18 +42,13 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def list_evaluation_datasets() -> list[dict[str, Any]]:
     root = _evaluation_root().resolve()
-    print(f'[DEBUG] Looking for datasets in: {root}')
-    print(f'[DEBUG] Directory exists: {root.exists()}')
-    
     if not root.exists():
-        print(f'[DEBUG] Directory does not exist, creating it')
         root.mkdir(parents=True, exist_ok=True)
         return []
 
     items: list[dict[str, Any]] = []
     files = list(root.glob('*.jsonl'))
-    print(f'[DEBUG] Found {len(files)} JSONL files: {[f.name for f in files]}')
-    
+
     for path in sorted(files):
         try:
             rows = _load_jsonl(path)
@@ -75,12 +70,34 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
                     'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
                 }
             )
-            print(f'[DEBUG] Loaded dataset: {path.name} with {len(rows)} rows')
-        except Exception as e:
-            print(f'[DEBUG] Error loading {path.name}: {e}')
-    
-    print(f'[DEBUG] Returning {len(items)} datasets')
+        except Exception:
+            continue
     return items
+
+
+def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
+    dataset_file = _resolve_repo_path(dataset_path)
+    if not dataset_file.exists() or not dataset_file.is_file() or dataset_file.suffix.lower() != '.jsonl':
+        raise FileNotFoundError(f'Dataset file not found: {dataset_file}')
+
+    rows = _load_jsonl(dataset_file)
+    source_documents = sorted(
+        {
+            str(row.get('source_document', '')).strip()
+            for row in rows
+            if str(row.get('source_document', '')).strip()
+        }
+    )
+
+    return {
+        'path': str(dataset_file.relative_to(_repo_root().resolve())),
+        'filename': dataset_file.name,
+        'row_count': len(rows),
+        'source_documents': source_documents,
+        'size_bytes': dataset_file.stat().st_size,
+        'updated_at': datetime.fromtimestamp(dataset_file.stat().st_mtime, tz=timezone.utc),
+        'rows': rows,
+    }
 
 
 def _normalize_text(text: str) -> str:

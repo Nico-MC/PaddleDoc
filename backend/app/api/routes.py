@@ -35,6 +35,7 @@ from app.schemas.jobs import (
     FolderActionResponse,
     HealthResponse,
     EvaluationDatasetBrowserResponse,
+    EvaluationDatasetDetailResponse,
     MarkdownBrowserResponse,
     MarkdownFileEntry,
     JobListResponse,
@@ -56,7 +57,11 @@ from app.services.encourage_bridge import (
     retrieve_from_pipeline,
     run_pipeline_once,
 )
-from app.services.encourage_evaluation import list_evaluation_datasets, run_encourage_evaluation
+from app.services.encourage_evaluation import (
+    get_evaluation_dataset_details,
+    list_evaluation_datasets,
+    run_encourage_evaluation,
+)
 from app.services.encourage_mlflow import log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     get_paddle_capabilities,
@@ -1097,6 +1102,16 @@ def get_markdown_file(relative_path: str) -> PlainTextResponse:
 @router.get('/evaluation-datasets', response_model=EvaluationDatasetBrowserResponse)
 def list_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse:
     return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets())
+
+
+@router.get('/evaluation-datasets/{dataset_path:path}', response_model=EvaluationDatasetDetailResponse)
+def get_evaluation_dataset_file(dataset_path: str) -> EvaluationDatasetDetailResponse:
+    try:
+        return EvaluationDatasetDetailResponse(**get_evaluation_dataset_details(dataset_path))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post('/encourage/ingest', response_model=EncourageIngestResponse)

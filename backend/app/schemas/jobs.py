@@ -152,11 +152,21 @@ class EvaluationDatasetBrowserResponse(BaseModel):
     items: list[EvaluationDatasetEntry]
 
 
+class EvaluationDatasetDetailResponse(BaseModel):
+    path: str
+    filename: str
+    row_count: int
+    source_documents: list[str] = Field(default_factory=list)
+    size_bytes: int
+    updated_at: datetime
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class EncourageIngestRequest(BaseModel):
     path: str = Field(min_length=1)
     query: str = Field(default='Worum geht es in diesem Dokument?', min_length=1)
     model_name: str | None = None
-    run_generation: bool = True
+    run_generation: bool = False
 
 
 class EncourageRetrieveRequest(BaseModel):
@@ -231,6 +241,7 @@ class EncourageEvaluationResponse(BaseModel):
     recall_at_k: float
     hit_rate_at_k: float
     mlflow_run_id: str | None = None
+    per_question_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FolderActionRequest(BaseModel):

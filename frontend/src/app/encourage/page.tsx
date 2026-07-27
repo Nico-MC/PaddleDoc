@@ -21,6 +21,10 @@ type EvaluationDatasetEntry = {
   updated_at: string;
 };
 
+type EvaluationDatasetDetail = EvaluationDatasetEntry & {
+  rows: Record<string, unknown>[];
+};
+
 type EncourageDocument = {
   id: string;
   content: string;
@@ -81,6 +85,14 @@ type EncourageEvaluationResponse = {
   recall_at_k: number;
   hit_rate_at_k: number;
   mlflow_run_id: string | null;
+  per_question_results: Array<{
+    id: string;
+    question: string;
+    retrieved_document_ids: string[];
+    reference_document_ids: string[];
+    first_hit_rank: number | null;
+    has_hit: boolean;
+  }>;
 };
 
 const API = API_BASE_URL;
@@ -95,19 +107,35 @@ export default function EncouragePage() {
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
   const [query, setQuery] = useState('');
-  const [runGeneration, setRunGeneration] = useState(true);
+  const [runGeneration, setRunGeneration] = useState(false);
   const [isRetrieving, setIsRetrieving] = useState(false);
   const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evaluation, setEvaluation] = useState<EncourageEvaluationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showChunks, setShowChunks] = useState(false);
+  const [showDatasetDetails, setShowDatasetDetails] = useState(false);
+  const [isLoadingDatasetDetails, setIsLoadingDatasetDetails] = useState(false);
+  const [selectedDatasetDetails, setSelectedDatasetDetails] = useState<EvaluationDatasetDetail | null>(null);
 
   const formatNumber = (value: number | null) => {
     if (value === null || Number.isNaN(value)) {
       return 'n/a';
     }
     return value.toFixed(4);
+  };
+
+  const formatDatasetValue = (value: unknown) => {
+    if (value === null || value === undefined) {
+      return 'n/a';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return JSON.stringify(value);
   };
 
   useEffect(() => {
@@ -162,6 +190,37 @@ export default function EncouragePage() {
 
     void loadDatasets();
   }, []);
+
+  useEffect(() => {
+    if (!showDatasetDetails || !selectedDatasetPath) {
+      return;
+    }
+
+    const loadDatasetDetails = async () => {
+      setIsLoadingDatasetDetails(true);
+      setError(null);
+      try {
+        const response = await fetch(
+          `${API}/api/v1/evaluation-datasets/${encodeURI(selectedDatasetPath)}`,
+          { cache: 'no-store' },
+        );
+        if (!response.ok) {
+          setError('Failed to load dataset details.');
+          setSelectedDatasetDetails(null);
+          return;
+        }
+        const payload = (await response.json()) as EvaluationDatasetDetail;
+        setSelectedDatasetDetails(payload);
+      } catch {
+        setError('Failed to reach the backend while loading dataset details.');
+        setSelectedDatasetDetails(null);
+      } finally {
+        setIsLoadingDatasetDetails(false);
+      }
+    };
+
+    void loadDatasetDetails();
+  }, [selectedDatasetPath, showDatasetDetails]);
 
   const ingestSelectedFile = async () => {
     if (!selectedPath) {
@@ -256,6 +315,10 @@ export default function EncouragePage() {
     } finally {
       setIsEvaluating(false);
     }
+  };
+
+  const toggleDatasetDetails = () => {
+    setShowDatasetDetails((current) => !current);
   };
 
   return (
@@ -509,7 +572,16 @@ export default function EncouragePage() {
             {ingested ? (
               <div className="space-y-3">
                 <div>
-                  <label className="text-sm font-medium text-slate-700">Select Dataset</label>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-sm font-medium text-slate-700">Select Dataset</label>
+                    <button
+                      type="button"
+                      onClick={toggleDatasetDetails}
+                      className="text-xs font-medium text-purple-700 underline hover:text-purple-900"
+                    >
+                      {showDatasetDetails ? 'Hide dataset' : 'Show dataset'}
+                    </button>
+                  </div>
                   {isLoadingDatasets ? (
                     <p className="mt-2 text-sm text-slate-500">Loading datasets...</p>
                   ) : datasets.length === 0 ? (
@@ -534,6 +606,80 @@ export default function EncouragePage() {
                           <p className="text-xs text-slate-500">{item.row_count} questions</p>
                         </button>
                       ))}
+                    </div>
+                  )}
+
+                  {showDatasetDetails && selectedDatasetPath && (
+                    <div className="mt-3 rounded-2xl border border-purple-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-purple-950">Dataset Inspector</p>
+                          <p className="text-xs text-slate-500">Opens the selected JSONL only when needed.</p>
+                        </div>
+                        <span className="rounded-full border border-purple-200 bg-purple-50 px-2.5 py-1 text-xs font-medium text-purple-700">
+                          {isLoadingDatasetDetails ? 'Loading...' : 'Ready'}
+                        </span>
+                      </div>
+
+                      {isLoadingDatasetDetails ? (
+                        <p className="mt-3 text-sm text-slate-500">Loading dataset rows...</p>
+                      ) : selectedDatasetDetails ? (
+                        <div className="mt-3 space-y-3">
+                          <div className="grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                            <p><span className="font-semibold">Rows:</span> {selectedDatasetDetails.row_count}</p>
+                            <p><span className="font-semibold">File:</span> {selectedDatasetDetails.filename}</p>
+                            <p className="sm:col-span-2"><span className="font-semibold">Source docs:</span> {selectedDatasetDetails.source_documents.length > 0 ? selectedDatasetDetails.source_documents.join(', ') : 'n/a'}</p>
+                          </div>
+
+                          <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
+                            {selectedDatasetDetails.rows.map((row, idx) => {
+                              const headline =
+                                typeof row.question === 'string' && row.question.trim()
+                                  ? row.question
+                                  : typeof row.query === 'string' && row.query.trim()
+                                    ? row.query
+                                    : `Row ${idx + 1}`;
+
+                              return (
+                                <div key={idx} className="rounded-xl border border-purple-100 bg-purple-50/40 p-3">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                      <p className="text-xs font-semibold uppercase tracking-wide text-purple-700">
+                                        Row {idx + 1}
+                                      </p>
+                                      <p className="mt-1 text-sm font-medium text-slate-900">{headline}</p>
+                                    </div>
+                                  </div>
+                                  <dl className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                                    {['source_document', 'gold_answer', 'answer', 'evidence_quote'].map((key) => {
+                                      const value = row[key];
+                                      if (value === undefined || value === null || value === '') {
+                                        return null;
+                                      }
+                                      return (
+                                        <div key={key} className="rounded-lg bg-white px-3 py-2">
+                                          <dt className="font-semibold text-slate-700">{key}</dt>
+                                          <dd className="mt-1 break-words text-slate-600">{formatDatasetValue(value)}</dd>
+                                        </div>
+                                      );
+                                    })}
+                                  </dl>
+                                  <details className="mt-3">
+                                    <summary className="cursor-pointer text-xs font-medium text-purple-700">
+                                      Show raw JSON
+                                    </summary>
+                                    <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-100">
+                                      {JSON.stringify(row, null, 2)}
+                                    </pre>
+                                  </details>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="mt-3 text-sm text-slate-500">No dataset details available.</p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -569,6 +715,24 @@ export default function EncouragePage() {
                         </p>
                       </div>
                     </div>
+
+                    <details className="mt-4">
+                      <summary className="cursor-pointer text-xs font-medium text-purple-700">
+                        Show per-question results ({evaluation.per_question_results.length})
+                      </summary>
+                      <div className="mt-3 space-y-2">
+                        {evaluation.per_question_results.map((item, idx) => (
+                          <div key={item.id} className="rounded-lg border border-purple-100 bg-white p-3 text-xs text-slate-600">
+                            <p className="font-semibold text-slate-900">
+                              {idx + 1}. {item.question}
+                            </p>
+                            <p className="mt-1">Hit: {item.has_hit ? 'yes' : 'no'} · First hit rank: {item.first_hit_rank ?? 'n/a'}</p>
+                            <p className="mt-1 break-words">Retrieved: {item.retrieved_document_ids.join(', ') || 'n/a'}</p>
+                            <p className="mt-1 break-words">Reference: {item.reference_document_ids.join(', ') || 'n/a'}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   </div>
                 )}
               </div>
