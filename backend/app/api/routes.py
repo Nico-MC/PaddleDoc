@@ -1210,7 +1210,12 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
 @router.post('/encourage/retrieve', response_model=EncourageRetrieveResponse)
 def retrieve_from_encourage_pipeline(payload: EncourageRetrieveRequest) -> EncourageRetrieveResponse:
     try:
-        result = retrieve_from_pipeline(payload.pipeline_id, payload.query)
+        result = retrieve_from_pipeline(
+            payload.pipeline_id,
+            payload.query,
+            collection_name=payload.collection_name,
+            top_k=payload.top_k,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1260,6 +1265,11 @@ def evaluate_encourage_pipeline(payload: EncourageEvaluateRequest) -> EncourageE
             pipeline_id=payload.pipeline_id,
             dataset_path=payload.dataset_path,
             recall_k=payload.recall_k,
+            collection_name=payload.collection_name,
+            markdown_path=payload.markdown_path,
+            top_k=payload.top_k,
+            chunk_max_chars=payload.chunk_max_chars,
+            chunk_overlap_chars=payload.chunk_overlap_chars,
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -1284,6 +1294,7 @@ def evaluate_encourage_pipeline(payload: EncourageEvaluateRequest) -> EncourageE
         recall_at_k=result['recall_at_k'],
         hit_rate_at_k=result['hit_rate_at_k'],
         mlflow_run_id=result['mlflow_run_id'],
+        per_question_results=result['per_question_results'],
     )
 
 

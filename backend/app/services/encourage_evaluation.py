@@ -6,12 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.services.encourage_bridge import get_pipeline_metadata, get_pipeline_rag
+from app.services.encourage_bridge import (
+    get_pipeline_metadata,
+    get_pipeline_rag,
+    load_markdown_chunks,
+    retrieve_from_pipeline,
+)
 from app.services.encourage_mlflow import log_evaluation_run
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[2]
 
 
 def _evaluation_root() -> Path:
@@ -161,14 +166,28 @@ def run_encourage_evaluation(
     pipeline_id: str,
     dataset_path: str,
     recall_k: int,
+    collection_name: str | None = None,
+    markdown_path: str | None = None,
+    top_k: int | None = None,
+    chunk_max_chars: int | None = None,
+    chunk_overlap_chars: int | None = None,
 ) -> dict[str, Any]:
     rag_pipeline = get_pipeline_rag(pipeline_id)
-    if rag_pipeline is None:
-        raise KeyError(f'Encourage pipeline not found: {pipeline_id}')
-
     pipeline_metadata = get_pipeline_metadata(pipeline_id)
     if pipeline_metadata is None:
-        raise KeyError(f'Encourage pipeline metadata not found: {pipeline_id}')
+        if not collection_name or not markdown_path:
+            raise KeyError(f'Encourage pipeline not found: {pipeline_id}')
+        pipeline_metadata = {
+            'pipeline_id': pipeline_id,
+            'collection_name': collection_name,
+            'rag_method': 'BaseRAG',
+            'top_k': max(1, int(top_k or 1)),
+            'document_count': 0,
+            'chunk_max_chars': chunk_max_chars or 0,
+            'chunk_overlap_chars': chunk_overlap_chars or 0,
+            'source_md_path': markdown_path,
+            'source_md_filename': Path(markdown_path).name,
+        }
 
     dataset_file = _resolve_repo_path(dataset_path)
     if not dataset_file.exists() or not dataset_file.is_file() or dataset_file.suffix.lower() != '.jsonl':
@@ -184,8 +203,24 @@ def run_encourage_evaluation(
         )
 
     from encourage.llm import Response, ResponseWrapper  # type: ignore[reportMissingImports]
-    from encourage.metrics import HitRateAtK, MeanReciprocalRank, RecallAtK  # type: ignore[reportMissingImports]
+    from encourage.metrics.classic import (  # type: ignore[reportMissingImports]
+        HitRateAtK,
+        MeanReciprocalRank,
+        RecallAtK,
+    )
     from encourage.prompts import Context, MetaData  # type: ignore[reportMissingImports]
+
+    if rag_pipeline is not None:
+        reference_chunk_documents = rag_pipeline.context_collection
+    else:
+        source_markdown_file = Path(source_markdown_path)
+        if not source_markdown_file.exists():
+            raise FileNotFoundError(f'Markdown file not found for evaluation: {source_markdown_file}')
+        reference_chunk_documents = load_markdown_chunks(
+            source_markdown_file,
+            chunk_max_chars=chunk_max_chars,
+            chunk_overlap_chars=chunk_overlap_chars,
+        )
 
     responses: list[Response] = []
     per_question_results: list[dict[str, Any]] = []
@@ -197,8 +232,14 @@ def run_encourage_evaluation(
         evidence_quote = str(row.get('evidence_quote', '')).strip()
         gold_answer = str(row.get('gold_answer', '')).strip()
 
-        retrieved_docs = rag_pipeline.retrieve_contexts([query])[0]
-        reference_docs = _pick_reference_documents(rag_pipeline.context_collection, evidence_quote)
+        retrieved_docs_payload = retrieve_from_pipeline(
+            pipeline_id,
+            query,
+            collection_name=str(pipeline_metadata.get('collection_name', '') or ''),
+            top_k=int(pipeline_metadata.get('top_k', 0) or 1),
+        )
+        retrieved_docs = retrieved_docs_payload['results']
+        reference_docs = _pick_reference_documents(reference_chunk_documents, evidence_quote)
 
         response = Response(
             request_id=str(row.get('id', query)),
@@ -206,7 +247,18 @@ def run_encourage_evaluation(
             sys_prompt='',
             user_prompt=query,
             response='',
-            context=Context.from_documents(retrieved_docs),
+            context=Context.from_documents(
+                [
+                    {
+                        'content': document['content'],
+                        'score': document['score'],
+                        'distance': document['distance'],
+                        'id': document['id'],
+                        'meta_data': document['meta_data'],
+                    }
+                    for document in retrieved_docs
+                ]
+            ),
             meta_data=MetaData(
                 tags={
                     'reference_answer': gold_answer,
@@ -218,11 +270,11 @@ def run_encourage_evaluation(
         )
         responses.append(response)
 
-        retrieved_document_ids = [str(doc.id) for doc in retrieved_docs]
+        retrieved_document_ids = [str(document['id']) for document in retrieved_docs]
         reference_document_ids = [str(doc.id) for doc in reference_docs]
         first_hit_rank: int | None = None
-        for index, doc in enumerate(retrieved_docs, start=1):
-            if str(doc.id) in reference_document_ids:
+        for index, document in enumerate(retrieved_docs, start=1):
+            if str(document['id']) in reference_document_ids:
                 first_hit_rank = index
                 break
 

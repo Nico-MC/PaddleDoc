@@ -154,30 +154,12 @@ def ingest_markdown_file(path: Path) -> dict[str, Any]:
     if not source_documents:
         raise RuntimeError(f'No encourage documents created from markdown file: {path}')
 
-    chunk_max_chars_env = os.getenv(
-        'PADDLEDOC_ENCOURAGE_CHUNK_MAX_CHARS',
-        str(_DEFAULT_CHUNK_MAX_CHARS),
-    ).strip()
-    try:
-        chunk_max_chars = max(200, int(chunk_max_chars_env))
-    except ValueError:
-        chunk_max_chars = _DEFAULT_CHUNK_MAX_CHARS
-
-    chunk_overlap_chars_env = os.getenv(
-        'PADDLEDOC_ENCOURAGE_CHUNK_OVERLAP_CHARS',
-        str(_DEFAULT_CHUNK_OVERLAP_CHARS),
-    ).strip()
-    try:
-        chunk_overlap_chars = max(0, int(chunk_overlap_chars_env))
-    except ValueError:
-        chunk_overlap_chars = _DEFAULT_CHUNK_OVERLAP_CHARS
-
-    loader = loader_cls(
-        chunk_documents=True,
+    chunk_max_chars, chunk_overlap_chars = _resolve_chunk_settings()
+    documents = load_markdown_chunks(
+        path,
         chunk_max_chars=chunk_max_chars,
         chunk_overlap_chars=chunk_overlap_chars,
     )
-    documents = loader.load(path)
 
     if not documents:
         raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
@@ -266,6 +248,83 @@ def get_pipeline_rag(pipeline_id: str) -> Any | None:
     return _RAG_PIPELINES.get(pipeline_id)
 
 
+def _resolve_chunk_settings(
+    *,
+    chunk_max_chars: int | None = None,
+    chunk_overlap_chars: int | None = None,
+) -> tuple[int, int]:
+    if chunk_max_chars is None:
+        chunk_max_chars_env = os.getenv(
+            'PADDLEDOC_ENCOURAGE_CHUNK_MAX_CHARS',
+            str(_DEFAULT_CHUNK_MAX_CHARS),
+        ).strip()
+        try:
+            resolved_chunk_max_chars = max(200, int(chunk_max_chars_env))
+        except ValueError:
+            resolved_chunk_max_chars = _DEFAULT_CHUNK_MAX_CHARS
+    else:
+        resolved_chunk_max_chars = max(200, int(chunk_max_chars))
+
+    if chunk_overlap_chars is None:
+        chunk_overlap_chars_env = os.getenv(
+            'PADDLEDOC_ENCOURAGE_CHUNK_OVERLAP_CHARS',
+            str(_DEFAULT_CHUNK_OVERLAP_CHARS),
+        ).strip()
+        try:
+            resolved_chunk_overlap_chars = max(0, int(chunk_overlap_chars_env))
+        except ValueError:
+            resolved_chunk_overlap_chars = _DEFAULT_CHUNK_OVERLAP_CHARS
+    else:
+        resolved_chunk_overlap_chars = max(0, int(chunk_overlap_chars))
+
+    return resolved_chunk_max_chars, resolved_chunk_overlap_chars
+
+
+def load_markdown_chunks(
+    path: Path,
+    *,
+    chunk_max_chars: int | None = None,
+    chunk_overlap_chars: int | None = None,
+) -> list[Any]:
+    loader_cls = _markdown_ingestion_class()
+    resolved_chunk_max_chars, resolved_chunk_overlap_chars = _resolve_chunk_settings(
+        chunk_max_chars=chunk_max_chars,
+        chunk_overlap_chars=chunk_overlap_chars,
+    )
+    loader = loader_cls(
+        chunk_documents=True,
+        chunk_max_chars=resolved_chunk_max_chars,
+        chunk_overlap_chars=resolved_chunk_overlap_chars,
+    )
+    documents = loader.load(path)
+    if not documents:
+        raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
+    return documents
+
+
+def _query_collection(collection_name: str, query: str, *, top_k: int) -> list[Any]:
+    encourage_src = _encourage_src_path()
+    encourage_src_str = str(encourage_src)
+    if encourage_src_str not in sys.path:
+        sys.path.insert(0, encourage_src_str)
+
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    from encourage.vector_store.chroma import ChromaClient  # type: ignore[reportMissingImports]
+
+    query_text = query.strip()
+    if not query_text:
+        raise ValueError('Query must not be empty')
+
+    client = ChromaClient()
+    return client.query(
+        collection_name=collection_name,
+        query=[query_text],
+        top_k=max(1, int(top_k)),
+        embedding_function=DefaultEmbeddingFunction(),
+        batch_size=1,
+    )[0]
+
+
 def run_pipeline_once(
     pipeline_id: str,
     query: str,
@@ -337,21 +396,35 @@ def run_pipeline_once(
     }
 
 
-def retrieve_from_pipeline(pipeline_id: str, query: str) -> dict[str, Any]:
+def retrieve_from_pipeline(
+    pipeline_id: str,
+    query: str,
+    *,
+    collection_name: str | None = None,
+    top_k: int | None = None,
+) -> dict[str, Any]:
     rag_pipeline = _RAG_PIPELINES.get(pipeline_id)
-    if rag_pipeline is None:
-        raise KeyError(f'Encourage pipeline not found: {pipeline_id}')
 
     query_text = query.strip()
     if not query_text:
         raise ValueError('Query must not be empty')
 
-    documents = rag_pipeline.retrieve_contexts([query_text])[0]
+    if rag_pipeline is not None:
+        documents = rag_pipeline.retrieve_contexts([query_text])[0]
+        resolved_collection_name = rag_pipeline.collection_name
+        resolved_top_k = rag_pipeline.top_k
+    else:
+        if not collection_name:
+            raise KeyError(f'Encourage pipeline not found: {pipeline_id}')
+        resolved_top_k = max(1, int(top_k or _DEFAULT_TOP_K))
+        documents = _query_collection(collection_name, query_text, top_k=resolved_top_k)
+        resolved_collection_name = collection_name
+
     return {
         'pipeline_id': pipeline_id,
-        'collection_name': rag_pipeline.collection_name,
+        'collection_name': resolved_collection_name,
         'query': query_text,
-        'top_k': rag_pipeline.top_k,
+        'top_k': resolved_top_k,
         'results': [
             {
                 'id': str(document.id),

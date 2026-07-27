@@ -269,6 +269,7 @@ export default function EncouragePage() {
           pipeline_id: ingested.pipeline.pipeline_id,
           query,
           top_k: 3,
+          collection_name: ingested.pipeline.collection_name,
         }),
       });
       if (!response.ok) {
@@ -290,6 +291,14 @@ export default function EncouragePage() {
     if (!ingested?.pipeline.pipeline_id || !selectedDatasetPath) {
       return;
     }
+    const chunkMaxChars =
+      typeof ingested.debug.config.chunk_max_chars === 'number'
+        ? ingested.debug.config.chunk_max_chars
+        : undefined;
+    const chunkOverlapChars =
+      typeof ingested.debug.config.chunk_overlap_chars === 'number'
+        ? ingested.debug.config.chunk_overlap_chars
+        : undefined;
     setIsEvaluating(true);
     setError(null);
     try {
@@ -300,6 +309,11 @@ export default function EncouragePage() {
           pipeline_id: ingested.pipeline.pipeline_id,
           dataset_path: selectedDatasetPath,
           recall_k: 3,
+          collection_name: ingested.pipeline.collection_name,
+          markdown_path: ingested.source_markdown.path,
+          top_k: ingested.pipeline.top_k,
+          chunk_max_chars: chunkMaxChars,
+          chunk_overlap_chars: chunkOverlapChars,
         }),
       });
       if (!response.ok) {

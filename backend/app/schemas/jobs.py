@@ -172,12 +172,19 @@ class EncourageIngestRequest(BaseModel):
 class EncourageRetrieveRequest(BaseModel):
     pipeline_id: str = Field(min_length=1)
     query: str = Field(min_length=1)
+    collection_name: str | None = None
+    top_k: int | None = None
 
 
 class EncourageEvaluateRequest(BaseModel):
     pipeline_id: str = Field(min_length=1)
     dataset_path: str = Field(min_length=1)
     recall_k: int = 3
+    collection_name: str | None = None
+    markdown_path: str | None = None
+    top_k: int | None = None
+    chunk_max_chars: int | None = None
+    chunk_overlap_chars: int | None = None
 
 
 class EncourageDocumentResponse(BaseModel):
