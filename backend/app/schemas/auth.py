@@ -140,6 +140,48 @@ class ProviderTestResponse(BaseModel):
     token_endpoint: str | None = None
 
 
+class VlConnectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    base_url: str = Field(min_length=1, max_length=1024)
+    model: str = Field(min_length=1, max_length=255)
+    api_key: str = Field(min_length=1, max_length=4096)
+    system_prompt: str = Field(default='', max_length=8000)
+    enabled: bool = True
+
+
+class VlConnectionUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    base_url: str | None = Field(default=None, min_length=1, max_length=1024)
+    model: str | None = Field(default=None, min_length=1, max_length=255)
+    # Write-only: omit or leave null to keep the existing stored key unchanged.
+    api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    enabled: bool | None = None
+
+
+class VlConnectionAdminResponse(BaseModel):
+    id: str
+    name: str
+    base_url: str
+    model: str
+    # Never the key itself -- just whether one is on file.
+    has_api_key: bool
+    system_prompt: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class VlConnectionAdminListResponse(BaseModel):
+    items: list[VlConnectionAdminResponse]
+
+
+class VlConnectionTestResponse(BaseModel):
+    ok: bool
+    detail: str | None = None
+    latency_ms: int | None = None
+
+
 class ClaimOwnerlessRequest(BaseModel):
     owner_id: str = Field(min_length=1)
 
@@ -181,3 +223,36 @@ class WorkerLogEntryResponse(BaseModel):
 class WorkerLogListResponse(BaseModel):
     items: list[WorkerLogEntryResponse]
     total: int
+
+
+# --- Personal API bearer tokens -----------------------------------------------
+
+class ApiTokenCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class ApiTokenCreateResponse(BaseModel):
+    """The only response that ever carries the raw token value -- every
+    other read of an api_tokens row (GET /tokens) exposes token_prefix
+    only."""
+
+    id: str
+    name: str
+    token: str
+    token_prefix: str
+    created_at: datetime
+    expires_at: datetime | None = None
+
+
+class ApiTokenResponse(BaseModel):
+    id: str
+    name: str
+    token_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class ApiTokenListResponse(BaseModel):
+    items: list[ApiTokenResponse]

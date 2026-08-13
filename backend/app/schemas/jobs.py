@@ -59,6 +59,10 @@ class JobResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     error_message: str | None = None
     processing_info: dict | None = None
+    content_sha256: str | None = None
+    document_version: int = 1
+    previous_job_id: str | None = None
+    benchmark_run_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -69,6 +73,20 @@ class JobListResponse(BaseModel):
 
 class JobSearchResponse(JobListResponse):
     total: int
+
+
+class JobVersionEntry(BaseModel):
+    job_id: str
+    document_version: int
+    content_sha256: str | None = None
+    status: JobStatus
+    created_at: datetime
+    uploaded_by: str | None = None
+    is_current: bool
+
+
+class JobVersionsResponse(BaseModel):
+    items: list[JobVersionEntry]
 
 
 class DashboardStatsResponse(BaseModel):

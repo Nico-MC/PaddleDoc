@@ -7,7 +7,7 @@ import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import type { JobArtifact } from '@/components/markdown/markdown-view';
-import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
+import { apiFetch, redirectIfSessionExpired, type JobVersionEntry, type JobVersionsResponse } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 import { peekCached, setCached } from '@/lib/data-cache';
 
@@ -36,6 +36,13 @@ const LOWER_PROFILE_RETRY_MAP: Record<string, string> = {
   ppocrv6_small: 'ppocrv6_tiny',
 };
 
+const VERSION_STATUS_BADGE: Record<string, string> = {
+  PENDING: 'bg-slate-100 text-slate-700',
+  RUNNING: 'bg-emerald-100 text-emerald-800',
+  FINISHED: 'bg-emerald-100 text-emerald-800',
+  FAILED: 'bg-red-600/20 text-red-300',
+};
+
 type Job = {
   id: string;
   original_filename: string;
@@ -46,18 +53,32 @@ type Job = {
     execution?: Record<string, unknown>;
   } | null;
   created_at: string;
+  content_sha256?: string | null;
+  document_version?: number;
+  previous_job_id?: string | null;
 };
 
 const API = API_BASE_URL;
 
-export default function JobDetails() {
+export default function JobDetailsPage() {
   const params = useParams<{ id: string }>();
+  if (!params.id) {
+    return null;
+  }
+  // The Versions table links between jobs on this same dynamic route. Keying
+  // the details component by id remounts it on every id change, so all
+  // per-job state (markdown, artifacts, password gate, edit mode) starts
+  // fresh instead of leaking from the previously viewed version.
+  return <JobDetails key={params.id} jobId={params.id} />;
+}
+
+function JobDetails({ jobId }: { jobId: string }) {
   // Job metadata (unlike the markdown preview) isn't gated behind the
   // document password, so it's safe to reuse: re-opening a job you already
   // viewed this session (e.g. the browser back button) paints its header
   // and status instantly instead of the loading skeleton every time.
-  const [job, setJob] = useState<Job | null>(() =>
-    params.id ? (peekCached<Job>(`/api/v1/jobs/${params.id}`) ?? null) : null
+  const [job, setJob] = useState<Job | null>(
+    () => peekCached<Job>(`/api/v1/jobs/${jobId}`) ?? null
   );
   const [markdown, setMarkdown] = useState('');
   const [draftMarkdown, setDraftMarkdown] = useState('');
@@ -72,8 +93,39 @@ export default function JobDetails() {
   // null = artifact list not fetched yet (images render skeletons); [] after
   // a completed fetch that found nothing or failed (broken-image placeholder).
   const [artifacts, setArtifacts] = useState<JobArtifact[] | null>(null);
+  // null = not fetched yet, or the backend doesn't support this endpoint yet
+  // (404) — the Versions section stays hidden in both cases.
+  const [versions, setVersions] = useState<JobVersionEntry[] | null>(null);
 
-  const loadArtifacts = async (id: string, pw: string) => {
+  // `isActive` lets the load effect discard results that finish after the
+  // user has navigated to another job id on this same dynamic route (the
+  // component does not remount, so a late response would otherwise clobber
+  // the newer job's state). Direct user actions pass the always-true default.
+  const loadVersions = async (id: string, isActive: () => boolean = () => true) => {
+    try {
+      const resp = await apiFetch(`/api/v1/jobs/${id}/versions`, { cache: 'no-store', skipAuthRedirect: true });
+      if (!isActive()) {
+        return;
+      }
+      if (!resp.ok) {
+        setVersions(null);
+        return;
+      }
+      const payload = (await resp.json()) as JobVersionsResponse;
+      if (!isActive()) {
+        return;
+      }
+      setVersions(Array.isArray(payload?.items) ? payload.items : null);
+    } catch {
+      // Non-fatal: an older backend without this endpoint (or any transient
+      // error) simply hides the Versions section.
+      if (isActive()) {
+        setVersions(null);
+      }
+    }
+  };
+
+  const loadArtifacts = async (id: string, pw: string, isActive: () => boolean = () => true) => {
     try {
       const url = new URL(`${API}/api/v1/jobs/${id}/artifacts`);
       if (pw) {
@@ -82,8 +134,14 @@ export default function JobDetails() {
       // skipAuthRedirect: a 401 here means the document password, same as
       // the sibling /preview fetches — never bounce to /login for it.
       const resp = await apiFetch(url.toString(), { cache: 'no-store', skipAuthRedirect: true });
+      if (!isActive()) {
+        return;
+      }
       if (resp.ok) {
         const payload = await resp.json();
+        if (!isActive()) {
+          return;
+        }
         setArtifacts(Array.isArray(payload?.items) ? payload.items : []);
       } else {
         // Completed but failed: resolve to "no artifacts" so images show the
@@ -92,32 +150,47 @@ export default function JobDetails() {
       }
     } catch {
       // Non-fatal: artifact images fall back to their placeholder.
-      setArtifacts([]);
+      if (isActive()) {
+        setArtifacts([]);
+      }
     }
   };
 
   useEffect(() => {
+    // Per-job state resets are handled by the key={id} remount in
+    // JobDetailsPage; this effect only fetches.
+    const id = jobId;
+    let active = true;
     const run = async () => {
-      const id = params.id;
-      if (!id) {
+      const jobResp = await apiFetch(`/api/v1/jobs/${id}`, { cache: 'no-store' });
+      if (!active) {
         return;
       }
-      const jobResp = await apiFetch(`/api/v1/jobs/${id}`, { cache: 'no-store' });
       if (!jobResp.ok) {
         setLoadError('Failed to load job');
         return;
       }
       const jobData = await jobResp.json();
+      if (!active) {
+        return;
+      }
       setJob(jobData);
       setCached(`/api/v1/jobs/${id}`, jobData);
+      void loadVersions(id, () => active);
       const jobSettings = jobData.processing_info?.settings as Record<string, unknown> | undefined;
       setViewTab(jobSettings?.mode === 'import' ? 'rendered' : 'raw');
       if (jobData.status === 'FINISHED') {
         const previewResp = await apiFetch(`/api/v1/jobs/${id}/preview`, { cache: 'no-store', skipAuthRedirect: true });
+        if (!active) {
+          return;
+        }
         if (previewResp.status === 401) {
           // Could also be an expired session — redirect instead of
           // showing a password prompt that can never succeed.
           if (await redirectIfSessionExpired()) {
+            return;
+          }
+          if (!active) {
             return;
           }
           setRequirePassword(true);
@@ -125,18 +198,23 @@ export default function JobDetails() {
         }
         if (previewResp.ok) {
           const text = await previewResp.text();
+          if (!active) {
+            return;
+          }
           setMarkdown(text);
           setDraftMarkdown(text);
-          void loadArtifacts(id, '');
+          void loadArtifacts(id, '', () => active);
         }
       }
     };
-    run();
-  }, [params]);
+    void run();
+    return () => {
+      active = false;
+    };
+  }, [jobId]);
 
   const loadMarkdownWithPassword = async () => {
-    const id = params.id;
-    if (!id) return;
+    const id = jobId;
     
     const url = new URL(`${API}/api/v1/jobs/${id}/preview`);
     if (password) {
@@ -304,7 +382,14 @@ export default function JobDetails() {
         <h1 className="font-serif text-2xl font-semibold">Job Details</h1>
         <p>Filename: {job.original_filename}</p>
         {job.tags && job.tags.length > 0 && <p>Tags: {job.tags.join(', ')}</p>}
-        <p>Status: {job.status}</p>
+        <p className="flex items-center gap-2">
+          Status: {job.status}
+          {typeof job.document_version === 'number' && (
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
+              v{job.document_version}
+            </span>
+          )}
+        </p>
         <p>Created: {new Date(job.created_at).toLocaleString()}</p>
         {selectedProfileId && <p>Profile: {selectedProfileId}</p>}
         {selectedProfileLabel && <p>Profile name: {selectedProfileLabel}</p>}
@@ -351,6 +436,50 @@ export default function JobDetails() {
             {qualityRecommendation ? ` - ${qualityRecommendation}` : ''}
           </p>
         )}
+        {versions && versions.length > 1 && (
+          <section>
+            <h2 className="mb-2 text-lg font-semibold">Versions</h2>
+            <div className="overflow-x-auto rounded-md border border-slate-200">
+              <table className="w-full table-auto text-left text-sm">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Version</th>
+                    <th className="px-3 py-2 font-medium">SHA</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Created</th>
+                    <th className="px-3 py-2 font-medium">Uploaded by</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {versions.map((entry) => (
+                    <tr key={entry.job_id} className="border-t border-slate-100">
+                      <td className="px-3 py-2 text-slate-950">
+                        {entry.job_id === job.id ? (
+                          <span className="font-medium">v{entry.document_version}</span>
+                        ) : (
+                          <Link href={`/jobs/${entry.job_id}`} className="font-medium text-emerald-700 hover:underline">
+                            v{entry.document_version}
+                          </Link>
+                        )}
+                        {entry.is_current && <span className="ml-2 text-xs font-medium text-emerald-700">(current)</span>}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-600" title={entry.content_sha256 ?? ''}>
+                        {entry.content_sha256 ? entry.content_sha256.slice(0, 12) : '-'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`rounded px-2 py-1 text-xs ${VERSION_STATUS_BADGE[entry.status] ?? 'bg-slate-100 text-slate-700'}`}>
+                          {entry.status}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-slate-700">{new Date(entry.created_at).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-slate-700">{entry.uploaded_by ?? '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
         <section>
           <h2 className="mb-2 text-lg font-semibold">Processing Info</h2>
           <pre className="overflow-x-auto rounded-md border border-slate-200 bg-white p-4 text-sm text-emerald-800">
@@ -358,9 +487,14 @@ export default function JobDetails() {
           </pre>
         </section>
         {job.status === 'FINISHED' && (
-          <a href={`${API}/api/v1/jobs/${job.id}/download${password ? `?password=${encodeURIComponent(password)}` : ''}`}>
-            <Button>Download Markdown</Button>
-          </a>
+          <div className="flex flex-wrap gap-2">
+            <a href={`${API}/api/v1/jobs/${job.id}/download${password ? `?password=${encodeURIComponent(password)}` : ''}`}>
+              <Button>Download Markdown</Button>
+            </a>
+            <a href={`${API}/api/v1/jobs/${job.id}/export.json${password ? `?password=${encodeURIComponent(password)}` : ''}`}>
+              <Button variant="outline">Download JSON</Button>
+            </a>
+          </div>
         )}
         <section>
           <h2 className="mb-2 text-lg font-semibold">Markdown Preview</h2>
