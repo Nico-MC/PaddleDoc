@@ -2,8 +2,8 @@ apiVersion: v2
 name: paddledoc
 description: Helm chart for paddledoc (frontend + FastAPI backend + Celery worker)
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 1.3.0
+appVersion: "1.3.0"
 keywords:
   - mineru
   - paddleocr

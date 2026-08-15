@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-15
+
+### Added
+- Universal mail ingestion: `POST /api/v1/mail/messages` accepts a raw RFC-822 email
+  (`Content-Type: message/rfc822`, or `multipart/form-data` with a single `file` part for
+  `curl -F` / n8n form mode) from any client — SMTP gateway, n8n workflow, a script — reading
+  the body with a streaming, size-capped reader (413 once `MAX_MAIL_MESSAGE_BYTES`, default
+  100 MiB, is exceeded) so nothing buffers unboundedly. The message is parsed server-side with
+  Python's stdlib `email` package via a deterministic depth-first MIME-tree walk (not
+  `iter_attachments()`, which loses content inside `multipart/signed`): S/MIME-signed mail,
+  nested containers, inline `Content-ID` images, and forwarded `message/rfc822` attachments are
+  all classified correctly, and an unsupported or oversized part is recorded as skipped without
+  failing the whole request. The body renders straight to Markdown (no OCR) via the existing
+  Confluence markdownify pipeline; every supported attachment becomes an ordinary job and runs
+  through the standard OCR pipeline like any upload. Identity is `sha256(raw bytes)`: replaying
+  already-seen bytes returns the existing message instead of reprocessing it (200,
+  `replayed: true`) and re-dispatches any of its attachment jobs still stuck PENDING from a
+  crashed request — the mechanism that makes sender-side retry loops (gateway outbox, n8n
+  retry-on-fail) safe. Full retrieval API for downstream consumers (n8n, Bedrock AgentCore, RAG
+  ingestors): list/detail with filters (`q`, `message_id`, `sha256`, `source`, date range), body
+  as plain text, the original `.eml` and any individual part as a download, and
+  `GET .../export.json` (schema `paddledoc.mail-export/1`) bundling the envelope, body markdown,
+  and every attachment's OCR markdown in one call for poll-until-`complete` consumers. `DELETE`
+  removes a message, optionally cascading to its attachment jobs. See
+  [docs/integrations/mail-ingestion.md](docs/integrations/mail-ingestion.md)
+- Mail UI: a first-class **Mail** section (`/mail`, sidebar entry) with a filterable, paginated
+  message list showing an aggregate status derived from each message's attachment jobs, and a
+  message detail page (`/mail/{id}`) with the envelope, rendered body, a parts table linking
+  every processed attachment to its job, and downloads for the raw `.eml` and individual parts.
+  The detail page polls every 2.5s while any attachment job is still PENDING/RUNNING. Attachment
+  jobs carry a "from mail" badge linking back to their source message on the job list and job
+  detail pages
+- Manual `.eml` upload on `/mail`: a drag-and-drop zone plus file picker uploads one or more
+  `.eml` files sequentially against the ingest endpoint, with per-file progress and a result
+  list (ingested / already ingested / failed, per file — one bad file never aborts the rest of
+  the batch); uploading a single file that ingests successfully navigates straight to its
+  detail page. Also reachable from the Processing page's step-1 source picker
+
+### Changed
+- Uploaded-file version chaining (matching filename -> next `document_version`) now excludes
+  mail-attachment jobs — an attachment named e.g. `invoice.pdf` arriving by mail from an
+  unrelated sender no longer gets chained into an unrelated document's version history. Mail
+  attachment jobs still appear normally everywhere else (stats, folders, `/markdown-files`)
+
+### Fixed
+- `_attach_tags` could create a duplicate `Tag` row (surfacing only as a misleading commit-time
+  `IntegrityError`) when called more than once for the same brand-new tag name inside a single
+  uncommitted transaction — exactly what mail ingestion now does once per attachment job. A
+  missing `db.flush()` after inserting a new tag meant a second call's lookup couldn't see the
+  first call's still-pending insert
+
 ## [1.2.1] - 2026-08-13
 
 ### Added

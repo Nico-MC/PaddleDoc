@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Sparkles, UploadCloud } from 'lucide-react';
+import { Mail, Sparkles, UploadCloud } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
@@ -516,7 +516,7 @@ export function ProcessingFlow() {
               exit={{ opacity: 0, y: -12 }}
               className="space-y-4"
             >
-              <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <button
                   type="button"
                   onClick={() => setMode('single')}
@@ -540,6 +540,16 @@ export function ProcessingFlow() {
                 >
                   <p className="text-sm font-semibold text-slate-950">Import from Confluence</p>
                   <p className="mt-1 text-xs text-slate-600">Crawl a space or page tree into markdown jobs.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => router.push('/mail')}
+                  className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
+                >
+                  <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+                    <Mail className="h-4 w-4 text-slate-500" /> Upload email
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600">Ingest a raw .eml file and process its attachments.</p>
                 </button>
               </div>
               <div className="grid gap-3 md:grid-cols-2">

@@ -33,7 +33,7 @@ helm upgrade --install paddledoc ./charts/paddledoc \
 Install from GHCR OCI registry:
 
 ```bash
-helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.1.0 \
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.3.0 \
   --namespace paddledoc --create-namespace \
   --set auth.secretKey.value=<openssl rand -hex 32>
 ```

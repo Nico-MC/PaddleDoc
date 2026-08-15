@@ -74,7 +74,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/paddledoc-${{ matrix.name }}
           tags: |
             type=raw,value=${{ steps.tag.outputs.value }}
-            # Pre-release tags (anything with a hyphen, e.g. 1.2.1-rc.1) must not move latest
+            # Pre-release tags (anything with a hyphen, e.g. 1.3.0-rc.1) must not move latest
             type=raw,value=latest,enable=${{ !contains(steps.tag.outputs.value, '-') }}
 
       - name: Build and push image

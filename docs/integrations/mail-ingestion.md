@@ -1,6 +1,6 @@
 # Mail Ingestion (Design)
 
-Status: **draft / to be implemented** — written 2026-08-15 against PaddleDoc v1.2.1
+Status: **implemented — shipped in v1.3.0** — written 2026-08-15 against PaddleDoc v1.2.1
 (`main`, migration head `0008_vl_benchmarks`). This document specifies a **universal**
 mail-ingestion feature: any client — an SMTP gateway or mail relay, an n8n workflow, a
 script — POSTs a raw RFC-822 email, and PaddleDoc itself parses it,
@@ -344,33 +344,35 @@ that is the point of the universal design.
 
 ## Implementation checklist (PaddleDoc)
 
-- [ ] `MailMessage` model + `jobs.mail_message_id` + migration `0009_mail_ingestion`
+- [x] `MailMessage` model + `jobs.mail_message_id` + migration `0009_mail_ingestion`
       (sqlite-compatible, `test_migrations.py` green)
-- [ ] `backend/app/services/mail_ingest.py`: streaming reader with cap + incremental
+- [x] `backend/app/services/mail_ingest.py`: streaming reader with cap + incremental
       sha256 (new `request.stream()` code, no in-repo precedent); MIME parse; header
       decode; body→markdown (reusing `confluence_markdown` internals, `cid:` placeholder
       rewriting); deterministic MIME-tree walk handling `multipart/signed`, nested
       containers, inline `Content-ID` parts and `message/rfc822`, with non-raising
       validation
-- [ ] `backend/app/api/mail_routes.py` (`/api/v1/mail` router, registered in `main.py`
+- [x] `backend/app/api/mail_routes.py` (`/api/v1/mail` router, registered in `main.py`
       with `get_current_user` + `origin_guard` like the others): ingest + list + detail +
       body + raw + part-content + export.json + delete; `_visible_mail_filter`;
       `_MAIL_BLOB_DEFER_OPTIONS`
-- [ ] Commit-then-dispatch via `process_job.delay` with mode `mail_attachment` and
+- [x] Commit-then-dispatch via `process_job.delay` with mode `mail_attachment` and
       correct `storage_folder`; replay-path + poll-path re-dispatch of stranded PENDING
       mail jobs
-- [ ] `max_mail_message_bytes` setting + Helm `values.yaml` env passthrough + README
+- [x] `max_mail_message_bytes` setting + Helm `values.yaml` env passthrough + README
       proxy-body-size note
-- [ ] Frontend: `lib/mail.ts`, `app/mail/**`, sidebar entry, `mail_attachment` sentinel
-      branches
-- [ ] Tests: idempotent replay (incl. concurrent-duplicate race and PENDING re-dispatch),
+- [x] Frontend: `lib/mail.ts`, `app/mail/**`, sidebar entry, `mail_attachment` sentinel
+      branches (incl. manual `.eml` upload on `/mail`, added after the initial ingestion
+      landing)
+- [x] Tests: idempotent replay (incl. concurrent-duplicate race and PENDING re-dispatch),
       mixed supported/skipped parts, `multipart/signed` (S/MIME) and nested-multipart
       topologies, inline-image classification (incl. top-level `multipart/related`),
-      body-only and attachment-only messages, charset-odd bodies, oversize 413,
-      unparseable 422, part-content extraction fidelity, visibility (team/admin/foreign
-      404), export.json completeness states, DELETE leaves no dangling
-      `mail_message_id` on SQLite
-- [ ] Docs: API reference section + n8n example
+      body-only and attachment-only messages, oversize 413, unparseable 422,
+      part-content extraction fidelity, visibility (team/admin/foreign 404), export.json
+      completeness states, DELETE leaves no dangling `mail_message_id` on SQLite
+- [ ] Tests: charset-odd bodies (non-UTF-8 / mismatched declared charsets) — not yet
+      covered; every ingest fixture so far declares `charset="utf-8"`
+- [x] Docs: API reference section + n8n example
 
 ## Open points (decide during implementation)
 

@@ -15,6 +15,8 @@ Managing OCR and document normalization at scale gets messy fast. PaddleDoc give
 - Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
 - **VL benchmark** — run one document against up to 6 vision-language models plus an OCR baseline and compare the results side by side
 - **Personal API tokens** — programmatic access via `Authorization: Bearer`, no cookie handling
+- **Mail ingestion (since v1.3.0)** — POST a raw email and PaddleDoc parses it, renders the body
+  to Markdown, and OCRs every attachment as its own job; idempotent by content hash
 - Folder and tag organization, search, quality grades, JSON export per job
 - Queue-based processing with backend + worker separation; worker logs live in the admin console
 - User accounts with team visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID)
@@ -85,7 +87,7 @@ helm upgrade --install paddledoc ./charts/paddledoc \
 Install from GHCR OCI chart:
 
 ```bash
-helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.2.1 \
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.3.0 \
   --namespace paddledoc --create-namespace \
   --set auth.secretKey.value=$(openssl rand -hex 32)
 ```
@@ -103,6 +105,7 @@ Since chart 1.1.0 a `SECRET_KEY` is required — the chart refuses to render wit
 - **JSON export per job** — metadata, uploader, processing details, and markdown in one file
 - **VL benchmark** with per-variant metrics and side-by-side markdown comparison
 - **Personal API tokens** for programmatic access (created on the Settings page, shown once, stored hashed)
+- **Mail ingestion (since v1.3.0)** — POST a raw RFC-822 email, body renders to Markdown, attachments become regular jobs; idempotent by content hash, with a Mail UI and manual `.eml` upload
 - **Worker logs in the admin console** — level/worker/text filters, auto-refresh, tracebacks
 - Password-gated view/download/edit/delete per job
 - OpenAI-compatible page-by-page vision profile
@@ -132,6 +135,12 @@ Browse all jobs with folder tree, filters, quality grades, and version badges �
 ![Job detail](docs/screenshots/job-detail.png)
 
 Review metadata, quality gate, and processing info; preview or edit markdown; download the result as Markdown or JSON. The **Versions** table shows the full history of the document — who uploaded which version when, with content hashes — and links to every prior version.
+
+### Mail (`/mail`)
+
+Ingested email messages, their rendered body, and the attachment jobs derived from them. Upload `.eml` files directly (drag and drop or file picker) the same way a mail gateway would, or POST them via the API — see [API Quickstart](#api-quickstart) below. The list is filterable by subject/sender, source, and date range; each message shows an aggregate status rolled up from its attachment jobs.
+
+Open a message to see the full envelope, the body rendered as Markdown, and a parts table — every attachment links to its OCR job, with per-part downloads and a raw `.eml` download for the whole message. The page polls while any attachment job is still processing. Attachment jobs carry a "from mail" badge back to their source message on the Tasks list and Job Detail pages.
 
 ### Benchmark (`/benchmark`)
 
@@ -193,6 +202,22 @@ curl -H "Authorization: Bearer $TOKEN" -o result.json \
   http://localhost:8000/api/v1/jobs/<job_id>/export.json
 ```
 
+Mail ingestion (since v1.3.0) takes the raw `.eml` bytes as the request body — no multipart encoding needed:
+
+```bash
+# POST a raw email; 201 on first ingest, 200 (replayed:true) if those exact
+# bytes were already ingested — either way the response has the message id
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: message/rfc822" \
+  --data-binary @quarterly-report.eml \
+  http://localhost:8000/api/v1/mail/messages
+
+# Poll until every attachment job is terminal, then fetch the aggregated export
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/mail/messages/<message_id>
+curl -H "Authorization: Bearer $TOKEN" -o mail-export.json \
+  http://localhost:8000/api/v1/mail/messages/<message_id>/export.json
+```
+
 Browser-style session login works too (`POST /api/v1/auth/login` with a cookie jar); token management endpoints themselves always require a session.
 
 Common endpoints:
@@ -229,6 +254,8 @@ flowchart LR
 ```
 
 Since v1.2.1, the simplest integration is a **personal API token**: create one under Settings for a dedicated PaddleDoc user and set a single `Authorization: Bearer pd_...` header on every HTTP Request node — no login node, no cookie forwarding. Use `/export.json` to get markdown plus metadata (hash, version, quality grade) in one call.
+
+**Mail ingestion (since v1.3.0)** gives n8n a second, even simpler pattern: an HTTP Request node with `Bearer pd_...` auth, method `POST`, URL `{base}/api/v1/mail/messages?source=n8n`, and the body set to **binary data** with content type `message/rfc822` — straight from an IMAP/Email-Trigger node's raw output, no attachment decoding or base64 handling on the n8n side. `id` in the response (200 and 201 are both success — 200 just means "already known") feeds the same poll-then-fetch pattern, ending at `GET .../{id}/export.json` for the body markdown plus every attachment's OCR markdown in one call.
 
 n8n URL choice:
 
@@ -328,11 +355,11 @@ Workflow: `.github/workflows/publish-ghcr-images.yml`
 Trigger publish via git tag:
 
 ```bash
-git tag v1.2.1
-git push origin v1.2.1
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
-This publishes multi-arch images (`linux/amd64`, `linux/arm64`; worker is amd64) tagged with the version and `latest`. Pre-release tags (anything with a hyphen, e.g. `v1.2.1-rc.1`) publish their version tag but deliberately do **not** move `latest`, and their GitHub release is marked as a prerelease.
+This publishes multi-arch images (`linux/amd64`, `linux/arm64`; worker is amd64) tagged with the version and `latest`. Pre-release tags (anything with a hyphen, e.g. `v1.3.0-rc.1`) publish their version tag but deliberately do **not** move `latest`, and their GitHub release is marked as a prerelease.
 
 ### Helm chart publishing (automated)
 

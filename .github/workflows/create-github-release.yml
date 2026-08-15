@@ -25,7 +25,7 @@ jobs:
             exit 0
           fi
 
-          # Hyphenated tags (e.g. v1.2.1-rc.1) are semver pre-releases
+          # Hyphenated tags (e.g. v1.3.0-rc.1) are semver pre-releases
           prerelease=()
           case "$GITHUB_REF_NAME" in
             *-*) prerelease=(--prerelease) ;;
