@@ -1,6 +1,6 @@
 # PaddleDoc
 
-PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, and images into structured Markdown for RAG pipelines.
+PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, Mails and images into structured Markdown for RAG and AI pipelines.
 
 It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
 
@@ -10,7 +10,7 @@ It is built for teams that need reliable ingestion quality, searchable outputs, 
 
 Managing OCR and document normalization at scale gets messy fast. PaddleDoc gives you one workflow for ingestion, extraction, quality scoring, versioning, and retrieval-ready output.
 
-- RAG-first Markdown output with rich YAML frontmatter (source, hash, version, uploader, team, engine)
+- AI-first Markdown output with rich YAML frontmatter (source, hash, version, uploader, team, engine)
 - **Document versioning built in** — re-uploading a changed file becomes version N+1 with full history; byte-identical re-uploads are detected and skipped
 - Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
 - **VL benchmark** — run one document against up to 6 vision-language models plus an OCR baseline and compare the results side by side
