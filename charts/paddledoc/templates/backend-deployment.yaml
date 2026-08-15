@@ -90,6 +90,10 @@ spec:
             - name: MAX_UPLOAD_BYTES
               value: {{ .Values.backend.maxUploadBytes | quote }}
             {{- end }}
+            {{- if .Values.mail.maxMessageBytes }}
+            - name: MAX_MAIL_MESSAGE_BYTES
+              value: {{ .Values.mail.maxMessageBytes | quote }}
+            {{- end }}
             - name: IMPORT_ENABLED
               value: {{ .Values.importer.enabled | quote }}
             - name: IMPORT_PRIVATE_HOST_ALLOWLIST

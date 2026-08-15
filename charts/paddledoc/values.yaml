@@ -181,6 +181,19 @@ worker:
 # (performs the crawl -- import egress originates from worker pods: Cloud
 # Confluence needs NAT egress to *.atlassian.net:443; an internal Server/DC
 # instance needs pod-network reachability plus an allowlist entry below).
+mail:
+  # Hard cap on the raw .eml body accepted by POST /api/v1/mail/messages,
+  # enforced by streaming reads in the backend (there is no ingress/uvicorn
+  # body-size limit otherwise). Empty string (default) leaves
+  # MAX_MAIL_MESSAGE_BYTES unset so the app default (100 MiB, same as
+  # backend.maxUploadBytes) applies. When set, also raise your ingress
+  # controller's body-size limit to match (see the chart README's "Running
+  # without shared storage" section). Passed through to the worker too, for
+  # parity with SECRET_KEY/IMPORT_* -- it isn't consumed there today (mail
+  # ingest runs entirely in the backend process), but the worker imports the
+  # same config module.
+  maxMessageBytes: ""
+
 importer:
   # Kill-switch; when false the /import API surface returns 404s.
   enabled: true

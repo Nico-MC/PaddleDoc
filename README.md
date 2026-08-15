@@ -205,6 +205,9 @@ Common endpoints:
 - `PUT /api/v1/jobs/{id}/save` — edit markdown (creates an edit version)
 - `POST /api/v1/benchmarks` — start a benchmark run; `GET /api/v1/benchmarks/{id}/report` for the comparison
 - `GET /api/v1/vl-connections` — enabled VL connections (id, name, model)
+- `POST /api/v1/mail/messages` — ingest a raw RFC-822 email (`Content-Type: message/rfc822`, or `multipart/form-data` with a `file` part); parses the message, converts the body to markdown, and OCRs each supported attachment as its own job. Idempotent by content hash: replaying the same bytes returns the existing message (200) instead of reprocessing; a new message is 201. See [docs/integrations/mail-ingestion.md](docs/integrations/mail-ingestion.md).
+- `GET /api/v1/mail/messages` / `GET /api/v1/mail/messages/{id}` — list/detail (filters: `q`, `message_id`, `sha256`, `source`, `from_date`/`to_date`)
+- `GET /api/v1/mail/messages/{id}/export.json` — envelope + body markdown + every attachment's OCR markdown in one call, for n8n/Bedrock AgentCore-style polling consumers
 - `POST /api/v1/auth/tokens` / `GET` / `DELETE /api/v1/auth/tokens/{id}` — API token management (session only)
 - `GET /api/v1/auth/admin/worker-logs` — worker logs (admin)
 - `GET /api/v1/stats`, `GET /api/v1/health`, `GET /api/v1/paddle/status`, `GET /api/v1/paddle/capabilities`

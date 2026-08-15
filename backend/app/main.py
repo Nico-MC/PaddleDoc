@@ -9,6 +9,7 @@ from app.api.auth import router_public as auth_public_router
 from app.api.benchmarks import router as benchmarks_router
 from app.api.deps import get_current_user, origin_guard
 from app.api.import_routes import router as import_router
+from app.api.mail_routes import router as mail_router
 from app.api.routes import router
 from app.core.config import settings
 from app.schemas.jobs import HealthResponse
@@ -64,3 +65,7 @@ app.include_router(import_router, dependencies=[Depends(get_current_user), Depen
 # Benchmark runs + user-facing VL-connections list: same session + CSRF gate
 # as the main router, no separate kill-switch.
 app.include_router(benchmarks_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
+
+# Mail ingestion (/api/v1/mail/...): same session + CSRF gate as the main
+# router, no separate kill-switch (mirrors benchmarks_router's registration).
+app.include_router(mail_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])

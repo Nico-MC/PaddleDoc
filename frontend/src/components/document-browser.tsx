@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import { Download, LoaderCircle, Mail, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
@@ -100,6 +100,29 @@ function isImportJob(job: Job): boolean {
   // Confluence-import page jobs must not be restarted (the backend 409s:
   // a restart would wipe the converted markdown and OCR the raw HTML).
   return job.processing_info?.settings?.mode === 'import';
+}
+
+/**
+ * Mail-attachment jobs are normal `process_job` jobs (upload_content is
+ * present, unlike import page jobs) — they are NOT added to isImportJob's
+ * exclusion, so Restart stays enabled for them.
+ */
+function isMailAttachmentJob(job: Job): boolean {
+  return job.processing_info?.settings?.mode === 'mail_attachment';
+}
+
+/** Defensive read of settings.mail.mail_message_id, mirroring the backend's isinstance() guards on processing_info. */
+function mailMessageIdForJob(job: Job): string | null {
+  const settings = job.processing_info?.settings;
+  if (!settings || typeof settings !== 'object') {
+    return null;
+  }
+  const mail = (settings as Record<string, unknown>).mail;
+  if (!mail || typeof mail !== 'object') {
+    return null;
+  }
+  const id = (mail as Record<string, unknown>).mail_message_id;
+  return typeof id === 'string' ? id : null;
 }
 
 function profileForJob(job: Job): string {
@@ -757,6 +780,14 @@ export function DocumentBrowser({
                         <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
                           v{job.document_version}
                         </span>
+                      )}
+                      {isMailAttachmentJob(job) && mailMessageIdForJob(job) && (
+                        <Link
+                          href={`/mail/${mailMessageIdForJob(job)}`}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-100"
+                        >
+                          <Mail className="h-3 w-3" /> from mail
+                        </Link>
                       )}
                     </div>
                     {job.status === 'FAILED' && (

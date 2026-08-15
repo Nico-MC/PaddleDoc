@@ -103,6 +103,10 @@ Practical implications:
   uploads aren't rejected by the ingress controller before they reach the
   backend.
 
+  The same applies to raw mail ingestion (`POST /api/v1/mail/messages`, see
+  `mail.maxMessageBytes`): size the ingress body-size limit to cover
+  whichever of `backend.maxUploadBytes` / `mail.maxMessageBytes` is larger.
+
 ## Scaling Logic
 
 This chart supports two scaling modes for backend and worker:

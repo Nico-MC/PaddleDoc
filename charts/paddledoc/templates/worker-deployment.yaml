@@ -103,6 +103,14 @@ spec:
               value: {{ .Values.worker.log.captureLevel | quote }}
             - name: WORKER_LOG_RETENTION_MAX_ROWS
               value: {{ .Values.worker.log.retentionMaxRows | int64 | quote }}
+            {{- if .Values.mail.maxMessageBytes }}
+            # Mail ingestion itself runs entirely in the backend process; set
+            # here only for parity with SECRET_KEY above -- the worker
+            # imports the same app/core/config.py module and this setting is
+            # otherwise inert on this side.
+            - name: MAX_MAIL_MESSAGE_BYTES
+              value: {{ .Values.mail.maxMessageBytes | quote }}
+            {{- end }}
             # Confluence import: the crawl (and its outbound egress) runs on
             # this worker, so it needs the same IMPORT_* settings as the
             # backend. Credential decryption additionally relies on the

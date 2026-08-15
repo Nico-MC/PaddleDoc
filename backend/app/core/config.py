@@ -119,6 +119,20 @@ class Settings(BaseSettings):
     # Per-process asyncio semaphore capping concurrent outbound test probes.
     import_probe_concurrency: int = 4
 
+    # --- Mail ingestion (POST /api/v1/mail/messages, app/services/mail_ingest.py).
+    # Hard cap on the raw .eml body size, enforced by streaming
+    # request.stream() chunk-wise and aborting with 413 once exceeded --
+    # there is no body-size middleware anywhere in this stack (uvicorn is
+    # started bare), so nothing else bounds it. Defaults to max_upload_bytes
+    # (100 MiB) but is its own setting since a raw email (with attachments
+    # inline as MIME parts) can legitimately want a different cap than a
+    # single-file upload. Same ops caveat as uploads: the Helm chart sets no
+    # proxy-body-size ingress annotation by default.
+    max_mail_message_bytes: int = 100 * 1024 * 1024
+    # Inline Content-ID parts (signature images, logos) never get an OCR Job
+    # by default -- flip this on to burn worker time on them anyway.
+    ocr_inline_images: bool = False
+
 
 def _build_database_url(settings: Settings) -> str:
     if settings.database_url:

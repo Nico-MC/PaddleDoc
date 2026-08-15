@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { useParams } from 'next/navigation';
+import { Mail } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import type { JobArtifact } from '@/components/markdown/markdown-view';
@@ -42,6 +43,19 @@ const VERSION_STATUS_BADGE: Record<string, string> = {
   FINISHED: 'bg-emerald-100 text-emerald-800',
   FAILED: 'bg-red-600/20 text-red-300',
 };
+
+/** Defensive read of settings.mail.mail_message_id, mirroring the backend's isinstance() guards on processing_info. */
+function mailMessageIdFromSettings(settings: Record<string, unknown> | undefined): string | null {
+  if (!settings || typeof settings !== 'object') {
+    return null;
+  }
+  const mail = settings.mail;
+  if (!mail || typeof mail !== 'object') {
+    return null;
+  }
+  const id = (mail as Record<string, unknown>).mail_message_id;
+  return typeof id === 'string' ? id : null;
+}
 
 type Job = {
   id: string;
@@ -388,6 +402,14 @@ function JobDetails({ jobId }: { jobId: string }) {
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
               v{job.document_version}
             </span>
+          )}
+          {settings?.mode === 'mail_attachment' && mailMessageIdFromSettings(settings) && (
+            <Link
+              href={`/mail/${mailMessageIdFromSettings(settings)}`}
+              className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+            >
+              <Mail className="h-3 w-3" /> from mail
+            </Link>
           )}
         </p>
         <p>Created: {new Date(job.created_at).toLocaleString()}</p>

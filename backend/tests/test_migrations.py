@@ -488,3 +488,80 @@ def test_0008_vl_benchmarks_migration_upgrade_downgrade_round_trip(tmp_path, mon
     for expected in ('vl_connections', 'benchmark_runs'):
         assert expected in tables
     assert 'benchmark_run_id' in {c['name'] for c in insp.get_columns('jobs')}
+
+
+def test_0009_mail_ingestion_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0009.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade (through 0004-0008 to 0009 for real, same as the 0008 test
+    # -- stamping straight to 0008 would skip physically creating `users` /
+    # `benchmark_runs` / etc., which the assertions below (and mail_messages'
+    # own FK to users) depend on): mail_messages + jobs.mail_message_id ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert 'mail_messages' in tables, 'mail_messages missing after upgrade'
+
+    mail_columns = {c['name'] for c in insp.get_columns('mail_messages')}
+    assert {
+        'id', 'owner_id', 'content_sha256', 'rfc_message_id', 'subject', 'from_address',
+        'recipients', 'sent_at', 'source', 'raw_content', 'raw_size_bytes', 'body_format',
+        'body_markdown', 'parts', 'parse_error', 'created_at', 'updated_at',
+    } <= mail_columns
+
+    mail_fks = insp.get_foreign_keys('mail_messages')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in mail_fks
+    ), mail_fks
+
+    mail_uniques = {uc['name'] for uc in insp.get_unique_constraints('mail_messages')}
+    assert 'uq_mail_messages_owner_id_content_sha256' in mail_uniques
+
+    mail_indexes = {ix['name'] for ix in insp.get_indexes('mail_messages')}
+    assert 'ix_mail_messages_owner_id' in mail_indexes
+    assert 'ix_mail_messages_content_sha256' in mail_indexes
+    assert 'ix_mail_messages_rfc_message_id' in mail_indexes
+
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'mail_message_id' in job_columns
+    job_fks = insp.get_foreign_keys('jobs')
+    assert any(
+        fk['referred_table'] == 'mail_messages' and fk['constrained_columns'] == ['mail_message_id']
+        for fk in job_fks
+    ), job_fks
+    # The batch_alter_table rebuild must not have dropped earlier FKs.
+    assert any(fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in job_fks), job_fks
+    assert any(
+        fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['previous_job_id'] for fk in job_fks
+    ), job_fks
+
+    jobs_indexes = {ix['name'] for ix in insp.get_indexes('jobs')}
+    assert 'ix_jobs_mail_message_id' in jobs_indexes
+
+    # --- downgrade one revision: only the 0009 additions should disappear ---
+    command.downgrade(cfg, '0008_vl_benchmarks')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert 'mail_messages' not in tables, 'mail_messages still present after downgrade'
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'mail_message_id' not in job_columns
+    # 0008's schema must survive a 0009-only downgrade untouched.
+    assert 'benchmark_run_id' in job_columns
+    assert 'benchmark_runs' in tables
+
+    # --- re-upgrade: should cleanly re-apply from the 0008 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert 'mail_messages' in tables
+    assert 'mail_message_id' in {c['name'] for c in insp.get_columns('jobs')}

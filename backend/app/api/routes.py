@@ -507,6 +507,17 @@ def _delete_job_outputs(job: Job) -> None:
 
 
 def _attach_tags(db: Session, job: Job, tags: list[str]) -> None:
+    """Resolve `tags` to Tag rows (creating any that don't exist yet) and
+    attach them to `job`. The session is `autoflush=False` (see
+    app/database/session.py), so a `db.flush()` after adding a brand-new Tag
+    is required, not optional: mail ingestion calls this once per attachment
+    Job, all inside one uncommitted transaction (app/api/mail_routes.py's
+    ingest_mail_message), and without the flush a second call's `SELECT ...
+    WHERE name IN (...)` cannot see the first call's still-pending Tag insert
+    -- it creates a second Tag row with the identical (unique) name, which
+    only surfaces as an IntegrityError at commit time, indistinguishable
+    there from the message-hash dedup race the caller's except-IntegrityError
+    branch is actually meant to catch."""
     if not tags:
         return
     existing_tags = {tag.name: tag for tag in db.scalars(select(Tag).where(Tag.name.in_(tags))).all()}
@@ -515,6 +526,7 @@ def _attach_tags(db: Session, job: Job, tags: list[str]) -> None:
         if tag_obj is None:
             tag_obj = Tag(name=tag_name)
             db.add(tag_obj)
+            db.flush()
             existing_tags[tag_name] = tag_obj
         if tag_obj not in job.tags:
             job.tags.append(tag_obj)
@@ -549,10 +561,17 @@ def _find_predecessor_job(db: Session, user: User, filename: str) -> Job | None:
     document_version, tie-broken by newest created_at. Used both to compute
     the next version number on upload and to detect an exact re-upload via
     content_sha256 (see DuplicateUploadError). Benchmark-variant children
-    are never candidates -- `_apply_visible_filter` excludes them."""
+    are never candidates -- `_apply_visible_filter` excludes them. Mail-
+    attachment children (`Job.mail_message_id` set) are excluded here too --
+    chaining e.g. `invoice.pdf` from an unrelated sender's mail into an
+    unrelated upload's version history would be wrong; unlike the benchmark
+    exclusion this is scoped to this lookup only, so mail-attachment jobs
+    still appear normally on the browsing surfaces that reuse
+    `_apply_visible_filter` (stats, /markdown-files, /folders/*)."""
     query = _apply_visible_filter(
         select(Job)
         .where(Job.original_filename == filename)
+        .where(Job.mail_message_id.is_(None))
         .options(*_JOB_BLOB_DEFER_OPTIONS),
         user,
     )

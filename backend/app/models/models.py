@@ -79,6 +79,18 @@ class Job(Base):
     benchmark_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey('benchmark_runs.id', ondelete='SET NULL'), nullable=True, index=True
     )
+    # Set on jobs created as attachment children of a mail ingest (one Job
+    # per supported attachment on POST /api/v1/mail/messages) -- see
+    # app/services/mail_ingest.py and MailMessage.jobs. Mirrors
+    # import_run_id/benchmark_run_id: SET NULL so deleting the message
+    # doesn't cascade-delete an already-useful OCR result. DELETE
+    # /mail/messages explicitly NULLs this column itself before deleting the
+    # message row -- SQLite here runs without PRAGMA foreign_keys, so the
+    # ON DELETE SET NULL cascade alone is inert (see delete_import_run for
+    # the same reasoning applied to import_run_id).
+    mail_message_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('mail_messages.id', ondelete='SET NULL'), nullable=True, index=True
+    )
     # sha256 hex of the raw upload bytes, computed once at upload time.
     # Drives duplicate-content detection and document versioning (see
     # create_job_from_upload in app/api/routes.py) -- NULL for jobs created
@@ -113,6 +125,7 @@ class Job(Base):
     owner: Mapped['User | None'] = relationship(back_populates='owned_jobs')
     import_run: Mapped['ImportRun | None'] = relationship(back_populates='jobs')
     benchmark_run: Mapped['BenchmarkRun | None'] = relationship(back_populates='jobs')
+    mail_message: Mapped['MailMessage | None'] = relationship(back_populates='jobs')
 
 
 class JobMarkdownVersion(Base):
@@ -289,6 +302,7 @@ class User(Base):
     import_runs: Mapped[list['ImportRun']] = relationship(back_populates='owner')
     benchmark_runs: Mapped[list['BenchmarkRun']] = relationship(back_populates='owner')
     api_tokens: Mapped[list['ApiToken']] = relationship(back_populates='user', cascade='all, delete-orphan')
+    mail_messages: Mapped[list['MailMessage']] = relationship(back_populates='owner')
 
 
 # Case-insensitive uniqueness on email. Declared after the class body (not in
@@ -537,6 +551,107 @@ class BenchmarkRun(Base):
     # ImportRun.jobs. DELETE /benchmarks/{id} explicitly deletes each child
     # Job itself before deleting the run (see app/api/benchmarks.py).
     jobs: Mapped[list[Job]] = relationship(back_populates='benchmark_run')
+
+
+class MailMessage(Base):
+    """One ingested raw RFC-822 email (see docs/integrations/mail-ingestion.md).
+
+    POST /api/v1/mail/messages parses the raw bytes with stdlib `email`
+    (BytesParser + policy.default) and stores everything here -- the
+    verbatim .eml, the decoded envelope, the rendered body markdown and a
+    per-part manifest -- following the same DB-is-the-source-of-truth
+    convention as Job.upload_content/result_markdown (disk under storage/
+    is a best-effort cache the worker rehydrates from the DB, never relied
+    on; the Helm chart's shared RWX PVC is optional and no code path
+    depends on it). Each supported attachment becomes an ordinary Job
+    linked back via Job.mail_message_id.
+
+    content_sha256 (sha256 over the raw .eml bytes) is the idempotency key
+    -- the same primitive as Job.content_sha256, lifted to message level.
+    A replayed POST with identical bytes returns the existing row (200)
+    instead of re-ingesting, which is what makes sender-side retry loops
+    (gateway outbox, n8n retry-on-fail) safe. rfc_message_id (the parsed
+    Message-ID header) is a lookup convenience only, never the dedup key --
+    it is sender-controlled, spoofable, and not always present.
+    """
+
+    __tablename__ = 'mail_messages'
+    __table_args__ = (
+        # Dedup scope = owning user. Postgres/SQLite both treat NULLs as
+        # distinct, so rows orphaned by user deletion (owner_id NULL) never
+        # collide with each other here -- the scoped lookup in the ingest
+        # handler (own + team + admin visibility), not this constraint, is
+        # what catches same-team duplicates. This is only the last-resort
+        # backstop for a concurrent duplicate racing to commit within one
+        # owner (caught as IntegrityError -> rollback -> re-fetch -> 200).
+        UniqueConstraint('owner_id', 'content_sha256', name='uq_mail_messages_owner_id_content_sha256'),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # NULL = owning user was later deleted (SET NULL), mirrors
+    # Job.owner_id/ImportRun.owner_id/BenchmarkRun.owner_id semantics.
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
+    )
+    # sha256 hex over the raw .eml bytes -- see class docstring. Indexed on
+    # its own (in addition to the composite unique constraint above)
+    # because the dedup lookup and the ?sha256= retrieval filter are scoped
+    # by the caller's full visibility (own + team + admin), not just
+    # owner_id.
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # Parsed Message-ID header. NULL when absent -- not every sender sets
+    # one, and identity never rests on this (see docstring).
+    rfc_message_id: Mapped[str | None] = mapped_column(String(998), nullable=True, index=True)
+    subject: Mapped[str] = mapped_column(String(998), default='', server_default='', nullable=False)
+    from_address: Mapped[str] = mapped_column(String(998), default='', server_default='', nullable=False)
+    # {"to": [...], "cc": [...]} decoded address lists.
+    recipients: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Free-form client label from the ?source= query param (e.g.
+    # 'mail-gateway', 'n8n'); not validated against a fixed set.
+    source: Mapped[str] = mapped_column(String(64), default='', server_default='', nullable=False)
+    # The original .eml, verbatim -- served by the raw-download endpoint.
+    # Must be deferred on every list/lookup query except that one (mirror
+    # _JOB_BLOB_DEFER_OPTIONS / _ARTIFACT_BLOB_DEFER_OPTIONS via
+    # _MAIL_BLOB_DEFER_OPTIONS = (defer(MailMessage.raw_content),)).
+    raw_content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    raw_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 'text/plain' | 'text/html' -- which MIME part body_markdown came
+    # from. NULL for a body-less (attachment-only) message.
+    body_format: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Rendered body incl. YAML frontmatter (source/subject/from/to/date/
+    # message_id/content_sha256/ingested_by/ingested_at). NULL for a
+    # body-less message -- that is a valid ingest, not an error.
+    body_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-part manifest in MIME-tree walk order:
+    # [{index, filename, content_type, size_bytes,
+    #   outcome: 'job'|'inline'|'skipped', job_id?, skip_reason?}, ...].
+    # Authoritative -- the part-content endpoint re-walks the MIME tree and
+    # cross-checks filename/content_type against this manifest before
+    # serving.
+    parts: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # Reserved for future use: normal parse failures reject the POST (422)
+    # without storing a row at all, so this stays NULL in practice today.
+    parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    owner: Mapped[User | None] = relationship(back_populates='mail_messages')
+    # No cascade -- ondelete=SET NULL at the DB level, same pattern as
+    # ImportRun.jobs/BenchmarkRun.jobs. DELETE /mail/messages explicitly
+    # NULLs jobs.mail_message_id itself before deleting this row (SQLite
+    # here runs without PRAGMA foreign_keys, so relying on the FK's SET
+    # NULL alone is inert -- delete_import_run does exactly this, for
+    # exactly this reason).
+    jobs: Mapped[list[Job]] = relationship(back_populates='mail_message')
 
 
 class JobArtifact(Base):
