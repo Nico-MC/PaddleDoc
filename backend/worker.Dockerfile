@@ -24,12 +24,6 @@ RUN apt-get update \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Required by PaddleOCR doc parser engines (PP-StructureV3).
-RUN pip install --no-cache-dir onnxruntime
-
-# Required by the OpenAI vision pipeline to render PDF pages to images.
-RUN pip install --no-cache-dir pypdfium2
-
 # PaddlePaddle install is architecture-specific:
 # - amd64: use CUDA-enabled wheel for GPU deployments.
 # - arm64: use CPU wheel (GPU wheel is not published for aarch64).
@@ -40,8 +34,16 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 			pip install --no-cache-dir paddlepaddle==3.2.1; \
 		fi
 
-# PaddleOCR PP-StructureV3 and PaddleOCR-VL for document parsing.
-RUN pip install --no-cache-dir "paddleocr[doc-parser]"
+# Worker-only extras, version- and hash-locked (supply-chain hardening):
+# - onnxruntime: PaddleOCR doc parser engines (PP-StructureV3)
+# - pypdfium2: renders PDF pages to images for the OpenAI vision pipeline
+# - paddleocr[doc-parser]: PP-StructureV3 and PaddleOCR-VL document parsing
+# --require-hashes rejects any artifact not matching the recorded hashes; the
+# lock is regenerated via the command documented in requirements-worker.in.
+# Note: like the previous unpinned install, the paddleocr tree pins pyyaml to
+# 6.0.2 via paddlex, overriding the 6.0.3 pin from requirements.txt.
+COPY requirements-worker.txt /app/requirements-worker.txt
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements-worker.txt
 
 COPY app /app/app
 
