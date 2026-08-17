@@ -11,6 +11,15 @@ and duplicate deliveries while the owner is alive no-op silently.
 Registered from app/workers/tasks.py (the `celery -A app.workers.tasks`
 entrypoint) via an explicit import; the API enqueues by name only
 (`import_confluence`).
+
+Also processes Confluence-refresh runs (started by
+app/workers/refresh_tasks.py's confluence_refresh_tick, flagged via
+`options['is_refresh']`) through this exact same task -- the only
+difference is per-page: unchanged pages (matching ImportPageState) are
+skipped instead of re-imported, and changed pages chain onto their
+predecessor via Job.previous_job_id/document_version, same as a manual
+re-upload. See _import_one_page, _seed_page_states_if_empty, and
+_record_refresh_outcome.
 """
 
 import hashlib
@@ -25,7 +34,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.database.session import SessionLocal
-from app.models.models import ImportRun, ImportRunStatus, ImportSource, Job, JobArtifact, JobStatus, Tag
+from app.models.models import ImportPageState, ImportRun, ImportRunStatus, ImportSource, Job, JobArtifact, JobStatus, Tag
 from app.services import security
 from app.services.confluence import AttachmentMeta, ConfluenceError, Page, PageSource, create_client
 from app.services.confluence_markdown import convert_page, rewrite_cross_page_links, sanitize_filename
@@ -252,12 +261,36 @@ def _commit_owned(db, run_id: str, claimed_seq: int) -> None:
     db.commit()
 
 
+def _record_refresh_outcome(db, run: ImportRun, *, error: str | None) -> None:
+    """Confluence-refresh bookkeeping (spec AUFGABE 3): last_refresh_at /
+    last_refresh_error on ImportSource, only for runs started by the
+    refresh scheduler (options['is_refresh'] -- see
+    app/workers/refresh_tasks.py). Success clears the error and advances
+    the timestamp; failure only records the error text and leaves
+    last_refresh_at untouched, so the very next tick retries a possibly-
+    transient failure instead of waiting out a full interval. Cancellation
+    is neither -- deliberately left untouched, same as any other run that
+    never reaches finished/failed."""
+    options = run.options if isinstance(run.options, dict) else {}
+    if not options.get('is_refresh') or not run.source_id:
+        return
+    source = db.get(ImportSource, run.source_id)
+    if source is None:
+        return
+    if error is None:
+        source.last_refresh_at = datetime.now(timezone.utc)
+        source.last_refresh_error = None
+    else:
+        source.last_refresh_error = _truncate(error, _ERROR_MESSAGE_MAX_CHARS)
+
+
 def _fail_run(db, run: ImportRun, state: _RunState, message: str, claimed_seq: int) -> None:
     run.status = ImportRunStatus.FAILED
     run.error_message = _truncate(message, _ERROR_MESSAGE_MAX_CHARS)
     run.finished_at = datetime.now(timezone.utc)
     run.current_page_title = ''
     state.persist(run)
+    _record_refresh_outcome(db, run, error=message)
     _commit_owned(db, run.id, claimed_seq)
 
 
@@ -294,6 +327,7 @@ def _finalize_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> Non
     run.finished_at = datetime.now(timezone.utc)
     run.current_page_title = ''
     state.persist(run)
+    _record_refresh_outcome(db, run, error=None)
     _commit_owned(db, run.id, claimed_seq)
 
     # Backstop for child OCR jobs that were committed but never enqueued (a
@@ -449,6 +483,72 @@ def _store_attachments(
     return child_job_ids
 
 
+def _seed_page_states_if_empty(db, run: ImportRun, claimed_seq: int) -> None:
+    """One-time backfill for a source's very first refresh run (spec AUFGABE
+    2 "Seeding"): turn every still-known page-level job across the source's
+    PAST runs into an ImportPageState row before any per-page comparison
+    happens -- otherwise the first refresh would find no state anywhere and
+    re-import (duplicating) every page in scope. A no-op once any state row
+    already exists for this source, which also covers normal (non-refresh)
+    runs having already written rows themselves (see _import_one_page's
+    unconditional upsert) by the time refresh is ever turned on.
+
+    Page-level jobs are identified by processing_info.settings.mode ==
+    'import' (excludes attachment-OCR children, which carry a
+    source_page_id too but a different mode -- the same discriminator
+    _finalize_run uses); the most recently created job wins per page_id when
+    a page was imported more than once across separate runs.
+    """
+    if not run.source_id:
+        return
+    already_seeded = db.scalar(
+        select(ImportPageState.id).where(ImportPageState.source_id == run.source_id).limit(1)
+    )
+    if already_seeded is not None:
+        return
+
+    source_run_ids = db.scalars(select(ImportRun.id).where(ImportRun.source_id == run.source_id)).all()
+    if not source_run_ids:
+        return
+    jobs = db.scalars(
+        select(Job)
+        .where(Job.import_run_id.in_(source_run_ids))
+        .order_by(Job.created_at.asc())
+        .options(defer(Job.upload_content), defer(Job.result_markdown))
+    ).all()
+
+    latest_by_page: dict[str, Job] = {}
+    for job in jobs:
+        info = job.processing_info if isinstance(job.processing_info, dict) else {}
+        job_settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+        if job_settings.get('mode') != 'import':
+            continue
+        import_info = job_settings.get('import') if isinstance(job_settings.get('import'), dict) else {}
+        page_id = import_info.get('source_page_id')
+        version = import_info.get('source_page_version')
+        if isinstance(page_id, str) and page_id and isinstance(version, int):
+            latest_by_page[page_id] = job  # ascending created_at: last write wins
+
+    if not latest_by_page:
+        return
+
+    for page_id, job in latest_by_page.items():
+        info = job.processing_info if isinstance(job.processing_info, dict) else {}
+        job_settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+        import_info = job_settings.get('import') if isinstance(job_settings.get('import'), dict) else {}
+        db.add(
+            ImportPageState(
+                source_id=run.source_id,
+                page_id=page_id,
+                page_version=import_info.get('source_page_version'),
+                job_id=job.id,
+                title=job.original_filename,
+                url=str(import_info.get('source_url') or '')[:2048],
+            )
+        )
+    _commit_owned(db, run.id, claimed_seq)
+
+
 def _import_one_page(
     db,
     run: ImportRun,
@@ -473,6 +573,74 @@ def _import_one_page(
     if not run.root_page_title:
         run.root_page_title = page.title[:512]
     run.current_page_title = page.title[:512]
+
+    # Confluence refresh (spec AUFGABE 2): compare against the page's last
+    # known state. Looked up unconditionally (not just for refresh runs) --
+    # a NORMAL run can also land on an already-known page_id (re-importing
+    # overlapping scope without ever having enabled refresh), and the
+    # upsert below must UPDATE rather than INSERT then, since (source_id,
+    # page_id) is unique. Only a refresh run acts on the comparison itself
+    # (skip unchanged / version-chain changed); normal runs always take the
+    # plain-import path below, unchanged from before this feature.
+    existing_state = (
+        db.scalar(
+            select(ImportPageState).where(
+                ImportPageState.source_id == run.source_id,
+                ImportPageState.page_id == str(page.id),
+            )
+        )
+        if run.source_id
+        else None
+    )
+    is_refresh = bool(options.get('is_refresh'))
+    # The predecessor job the state row points to, looked up once and reused
+    # below by both branches -- it may be gone (deleted independently of its
+    # state row, notably on sqlite where ImportPageState.job_id's ON DELETE
+    # SET NULL is never enforced -- see the model docstring).
+    existing_job = (
+        db.get(Job, existing_state.job_id)
+        if is_refresh and existing_state is not None and existing_state.job_id
+        else None
+    )
+
+    if (
+        is_refresh
+        and existing_state is not None
+        and existing_state.page_version == page.version
+        and existing_job is not None
+    ):
+        # Case (b): unchanged since last known state -- no new job. Still
+        # marked visited (with the PREVIOUS job id, so _finalize_run's
+        # cross-page link rewriting still resolves this page id) and
+        # children are still discovered by the caller below, so new pages
+        # nested under an unchanged parent are not missed. Deliberately does
+        # NOT increment pages_imported (no job was created); a refresh run
+        # over an all-unchanged space can finish with pages_imported == 0
+        # despite visiting every page in scope, which is now the correct
+        # reading of that counter. Requires existing_job is not None: a page
+        # whose predecessor was manually deleted must never be silently
+        # skipped forever just because its remote version hasn't changed --
+        # it falls through to the changed-page branch below instead, which
+        # re-imports it (existing_job is None there too, so it starts a
+        # fresh version-1 chain, exactly like a page seen for the first
+        # time).
+        state.visited[str(page.id)] = existing_state.job_id
+        state.persist(run)
+        _commit_owned(db, run.id, claimed_seq)
+        return page, False
+
+    document_version = 1
+    previous_job_id: str | None = None
+    if is_refresh and existing_state is not None:
+        # Case (c): version changed, or the page's predecessor job was
+        # deleted (existing_job is None despite existing_state being
+        # present -- see above) -- chain onto the predecessor exactly like
+        # the manual re-upload path (routes.create_job_from_upload). Falls
+        # back to a fresh version-1 chain start when there is no predecessor
+        # to chain onto.
+        if existing_job is not None:
+            document_version = existing_job.document_version + 1
+            previous_job_id = existing_job.id
 
     conversion = convert_page(
         page.html,
@@ -506,6 +674,8 @@ def _import_one_page(
         status=JobStatus.FINISHED,
         owner_id=run.owner_id,
         import_run_id=run.id,
+        document_version=document_version,
+        previous_job_id=previous_job_id,
         processing_info={
             'settings': {
                 'mode': 'import',
@@ -527,6 +697,29 @@ def _import_one_page(
     )
     db.add(job)
     _attach_tags(db, job, options.get('tags') or [])
+
+    # Upsert ImportPageState -- spec AUFGABE 2/5: written for BOTH normal
+    # and refresh runs, so a later refresh always has real prior state to
+    # diff against instead of relying on _seed_page_states_if_empty's
+    # historical-jobs backfill. Must UPDATE (not INSERT) when a row already
+    # exists, since (source_id, page_id) is unique.
+    if run.source_id:
+        if existing_state is not None:
+            existing_state.page_version = page.version
+            existing_state.job_id = job_id
+            existing_state.title = job.original_filename
+            existing_state.url = page.url[:2048]
+        else:
+            db.add(
+                ImportPageState(
+                    source_id=run.source_id,
+                    page_id=str(page.id),
+                    page_version=page.version,
+                    job_id=job_id,
+                    title=job.original_filename,
+                    url=page.url[:2048],
+                )
+            )
 
     state.visited[str(page.id)] = job_id
     run.pages_imported += 1
@@ -645,6 +838,10 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
         # the space homepage for space-scoped runs (creation makes no
         # outbound requests, so their frontier starts empty).
         if run.pages_discovered == 0 and not state.visited:
+            if options.get('is_refresh'):
+                # Seeding must run before ANY page is compared -- see
+                # _seed_page_states_if_empty's docstring (spec AUFGABE 2).
+                _seed_page_states_if_empty(db, run, claimed_seq)
             if not state.frontier and run.scope_type == 'space':
                 try:
                     root_id = client.resolve_space_root(run.scope_value)
@@ -765,6 +962,7 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
             run.status = ImportRunStatus.FAILED
             run.error_message = _truncate(str(exc), _ERROR_MESSAGE_MAX_CHARS)
             run.finished_at = datetime.now(timezone.utc)
+            _record_refresh_outcome(db, run, error=str(exc))
             db.commit()
     finally:
         db.close()

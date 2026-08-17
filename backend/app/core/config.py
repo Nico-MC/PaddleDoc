@@ -133,6 +133,47 @@ class Settings(BaseSettings):
     # by default -- flip this on to burn worker time on them anyway.
     ocr_inline_images: bool = False
 
+    # --- OpenWebUI push (app/services/openwebui.py, app/api/openwebui_routes.py,
+    # app/workers/openwebui_tasks.py). Kill-switch: when False the
+    # /openwebui API surface returns 404s, mirroring IMPORT_ENABLED.
+    openwebui_enabled: bool = True
+    # Overall wall-clock budget for one push: upload + processing poll +
+    # knowledge-attach + best-effort replace. Also doubles as the worst-case
+    # legitimate runtime the claim's stale-lease reclaim allows for before
+    # treating a 'running' push as worker-lost (see _claim_push).
+    openwebui_push_timeout_seconds: int = 300
+    # Redis-backed cooldown between POST /openwebui/connections/{id}/test
+    # probes (429 + Retry-After inside the window) -- Redis rather than a
+    # DB column like ImportSource.last_test_at, since OpenWebUIConnection
+    # carries no last-tested timestamp field.
+    openwebui_test_cooldown_seconds: int = 10
+    # Cap on pending+running OpenWebUIPush rows per user, enforced by
+    # POST /openwebui/pushes -- a wedged/very active OpenWebUI instance must
+    # not let one user queue unbounded outbound work.
+    openwebui_push_max_pending_per_user: int = 50
+    # Hostnames ('host' or 'host:port') of private-network OpenWebUI
+    # instances outbound pushes may reach -- same shape and enforcement as
+    # import_private_host_allowlist (passed into safe_fetch as
+    # allowed_private_hosts, re-checked per redirect hop; cloud-metadata IPs
+    # stay blocked unconditionally). Not part of the original OpenWebUI push
+    # spec's config list, but required for the SSRF protection it does
+    # mandate to be usable at all: OpenWebUI is typically self-hosted on a
+    # private network, exactly like the Confluence Server/DC case this
+    # mirrors. JSON list env value (OPENWEBUI_PRIVATE_HOST_ALLOWLIST), same
+    # parsing as cors_origins/import_private_host_allowlist.
+    openwebui_private_host_allowlist: list[str] = []
+
+    # --- Confluence refresh (periodic re-crawl of an ImportSource to pick up
+    # upstream edits; the tick/dispatch worker itself is built separately --
+    # these are just the shared cadence knobs it and PATCH /import/sources/{id}
+    # both read).
+    # How often the refresh scheduler checks for sources due a re-crawl.
+    confluence_refresh_tick_seconds: int = 300
+    # Server-side floor for ImportSource.refresh_interval_seconds: a
+    # client-supplied value can only raise it, never lower it below this,
+    # same clamp-never-raise-the-cap discipline as import_max_pages.
+    confluence_refresh_min_interval_seconds: int = 900
+
 
 def _build_database_url(settings: Settings) -> str:
     if settings.database_url:

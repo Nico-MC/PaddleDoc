@@ -19,7 +19,52 @@ export type ImportSource = {
   has_credential: boolean;
   last_validated_at: string | null;
   created_at: string;
+  // Periodic re-crawl toggle/cadence. Optional: an older backend may not
+  // send these yet, so render them defensively (?? a default) rather than
+  // assuming presence.
+  refresh_enabled?: boolean;
+  refresh_interval_seconds?: number | null;
+  last_refresh_at?: string | null;
+  last_refresh_error?: string | null;
 };
+
+/** PATCH /api/v1/import/sources/{id} body -- all fields optional, only refresh_* used by the Sources UI so far. */
+export type ImportSourceUpdateRequest = {
+  name?: string;
+  base_url?: string;
+  auth_type?: ImportAuthType;
+  auth_username?: string;
+  credential?: string;
+  refresh_enabled?: boolean;
+  refresh_interval_seconds?: number;
+};
+
+/**
+ * Auto-refresh cadence choices surfaced in the Sources UI, in seconds. The
+ * server clamps below its configured minimum
+ * (confluence_refresh_min_interval_seconds, default 900s) rather than
+ * rejecting the request.
+ */
+export const REFRESH_INTERVAL_OPTIONS: { value: number; label: string }[] = [
+  { value: 3600, label: 'Hourly' },
+  { value: 21600, label: 'Every 6 hours' },
+  { value: 86400, label: 'Daily' },
+  { value: 604800, label: 'Weekly' },
+];
+
+/**
+ * Label for a refresh_interval_seconds value not covered by
+ * REFRESH_INTERVAL_OPTIONS -- notably the server's own floor default
+ * (confluence_refresh_min_interval_seconds, 900s) that PATCH /import/sources
+ * applies when a source is enabled via the toggle alone, without the caller
+ * ever picking one of the options above. Without this, the Sources select
+ * would carry a `value` matching none of its `<option>`s and render blank.
+ */
+export function formatRefreshInterval(seconds: number): string {
+  if (seconds % 3600 === 0) return `Every ${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `Every ${seconds / 60} min`;
+  return `Every ${seconds}s`;
+}
 
 export type ImportSourceListResponse = {
   items: ImportSource[];

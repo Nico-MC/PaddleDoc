@@ -207,6 +207,20 @@ def _recover_jobs_on_worker_ready(sender=None, **kwargs) -> None:  # pragma: no 
     finally:
         _release_recovery_lock(lock_client, lock_token)
 
+    # Kickstart the confluence-refresh self-re-enqueue chain (see
+    # app/workers/refresh_tasks.py's module docstring for the full design).
+    # Deliberately NOT gated on the recovery lock above -- that one is a
+    # one-shot startup action and releases (or expires) in seconds, whereas
+    # the refresh chain must be revived by ANY future restart if it ever
+    # died. confluence_refresh_tick is itself the single source of truth for
+    # whether a chain is already alive (its own long-lived NX lock, checked
+    # on every call including this token-less kickstart), so a redundant
+    # send from a simultaneous multi-replica startup is a harmless no-op.
+    try:
+        celery_app.send_task('confluence_refresh_tick', args=[None])
+    except Exception:
+        logger.exception('Failed to kickstart the confluence-refresh tick chain')
+
 
 @celery_app.task(name='process_job', bind=True, acks_late=True, reject_on_worker_lost=True)
 def process_job(
@@ -450,3 +464,5 @@ def probe_paddle() -> dict[str, str | None]:
 # The worker entrypoint is `celery -A app.workers.tasks`, so any task module
 # must be imported from here to register with the app.
 import app.workers.import_tasks  # noqa: E402,F401  (registers import_confluence)
+import app.workers.openwebui_tasks  # noqa: E402,F401  (registers push_openwebui)
+import app.workers.refresh_tasks  # noqa: E402,F401  (registers confluence_refresh_tick)

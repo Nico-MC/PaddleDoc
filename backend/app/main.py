@@ -10,6 +10,7 @@ from app.api.benchmarks import router as benchmarks_router
 from app.api.deps import get_current_user, origin_guard
 from app.api.import_routes import router as import_router
 from app.api.mail_routes import router as mail_router
+from app.api.openwebui_routes import router as openwebui_router
 from app.api.routes import router
 from app.core.config import settings
 from app.schemas.jobs import HealthResponse
@@ -69,3 +70,8 @@ app.include_router(benchmarks_router, dependencies=[Depends(get_current_user), D
 # Mail ingestion (/api/v1/mail/...): same session + CSRF gate as the main
 # router, no separate kill-switch (mirrors benchmarks_router's registration).
 app.include_router(mail_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
+
+# OpenWebUI push surface (/api/v1/openwebui/...): same session + CSRF gate as
+# the main router; the module itself adds the OPENWEBUI_ENABLED kill-switch
+# (mirrors import_router's registration).
+app.include_router(openwebui_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
