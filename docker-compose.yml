@@ -40,6 +40,10 @@ services:
       IMPORT_PRIVATE_HOST_ALLOWLIST: ${IMPORT_PRIVATE_HOST_ALLOWLIST:-[]}
       IMPORT_MAX_PAGES: ${IMPORT_MAX_PAGES:-200}
       IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
+      # OpenWebUI push: same allowlist convention as IMPORT_* -- a LAN-hosted
+      # OpenWebUI needs its host (host or host:port) listed here.
+      OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
+      OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
     volumes:
       - ./backend/storage:/app/backend/storage
     depends_on:
@@ -101,6 +105,10 @@ services:
       IMPORT_PRIVATE_HOST_ALLOWLIST: ${IMPORT_PRIVATE_HOST_ALLOWLIST:-[]}
       IMPORT_MAX_PAGES: ${IMPORT_MAX_PAGES:-200}
       IMPORT_ATTACHMENT_MAX_BYTES: ${IMPORT_ATTACHMENT_MAX_BYTES:-20971520}
+      # OpenWebUI push: the push task runs on this worker, so it needs the
+      # same OPENWEBUI_* settings as the backend (which only tests/lists).
+      OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
+      OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
     volumes:
       - ./backend/storage:/app/backend/storage
       - paddlex_models:/root/.paddlex

@@ -212,6 +212,16 @@ importer:
   # stored as BYTEA rows) -- watch DB volume/backup sizing accordingly.
   runMaxTotalBytes: 524288000
 
+openwebui:
+  # Kill-switch; when false the /openwebui API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network OpenWebUI servers
+  # pushes may reach, e.g. ["openwebui.corp.internal:8080"]. Enforced per
+  # redirect hop inside the backend's SSRF-safe fetcher; cloud-metadata IPs
+  # stay blocked unconditionally. Rendered as a JSON list into
+  # OPENWEBUI_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+
 auth:
   # SECRET_KEY signs session cookies and the OIDC state cookie, and derives
   # the key used to encrypt stored OIDC provider client secrets. Required by

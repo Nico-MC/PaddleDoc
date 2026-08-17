@@ -128,6 +128,10 @@ spec:
               value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
             - name: IMPORT_RUN_MAX_TOTAL_BYTES
               value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
+            - name: OPENWEBUI_ENABLED
+              value: {{ .Values.openwebui.enabled | quote }}
+            - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
             {{- with .Values.worker.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
