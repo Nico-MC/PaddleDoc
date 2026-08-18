@@ -5,12 +5,13 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Home, Menu, X, Cpu, FolderOpen, Gauge, Mail, Settings, Shield, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
+import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
 const links = [
   { href: '/', label: 'Home', icon: Home },
-  { href: '/processing', label: 'Processing', icon: Cpu },
-  { href: '/jobs', label: 'Jobs', icon: FolderOpen },
-  { href: '/mail', label: 'Mail', icon: Mail },
+  { href: '/processing', label: 'Processing', icon: Cpu, description: 'Upload and process documents' },
+  { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
+  { href: '/mail', label: 'Mail', icon: Mail, description: 'API-ingested messages' },
   { href: '/benchmark', label: 'Benchmark', icon: Gauge },
 ];
 
@@ -67,20 +68,19 @@ export function SidebarNav() {
         }`}
       >
         <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600">
-            <Cpu className="h-4 w-4 text-white" />
-          </div>
+          <PaddleDocLogo className="h-8 w-8" />
           <span className="text-base font-semibold text-slate-950">PaddleDoc</span>
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">
-          {links.map(({ href, label, icon: Icon }) => {
+          {links.map(({ href, label, icon: Icon, description }) => {
             const active = pathname === href || (href !== '/' && pathname.startsWith(href));
             return (
               <Link
                 key={href}
                 href={href}
                 onClick={() => setOpen(false)}
+                title={description}
                 className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
                   active
                     ? 'bg-emerald-50 text-emerald-800'
