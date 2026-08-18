@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wer macht was: der Update-Weg von Dependabot bis Merge</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f8fafc;
+      --color-ink:     #0f172a;
+      --color-muted:   #475569;
+      --color-accent:  #4f46e5;
+      --font-sans:     'Inter', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+    .frame { max-width: 900px; width: 100%; }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+    svg { width: 100%; min-width: 728px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Prozess · Update-Review</p>
+    <h1>Wer macht was: der Update-Weg von Dependabot bis Merge</h1>
+
+    <svg viewBox="0 0 728 356" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dependabot-flow-title dependabot-flow-desc">
+      <title id="dependabot-flow-title">Wer macht was: der Update-Weg von Dependabot bis Merge</title>
+      <desc id="dependabot-flow-desc">Prozessdiagramm in drei Bahnen: Dependabot prüft wöchentlich die festgeschriebenen Bezüge und öffnet pro Update einen Pull Request, die Plattform lässt automatisch den kompletten Prüflauf laufen, dann lese ich Diff und Release-Notes und merge oder schließe. Beim Merge aktualisiert die Plattform Pins und Lock-Dateien.</desc>
+      <defs>
+        <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+          <circle cx="11" cy="11" r="0.8" fill="rgba(15,23,42,0.10)"/>
+        </pattern>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#475569"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f46e5"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f8fafc"/>
+      <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+      <rect x="140" y="36" width="588" height="80" fill="rgba(15,23,42,0.018)"/>
+      <rect x="140" y="196" width="588" height="80" fill="rgba(15,23,42,0.018)"/>
+
+      <line x1="0" y1="36" x2="728" y2="36" stroke="rgba(15,23,42,0.12)" stroke-width="0.8"/>
+      <line x1="0" y1="116" x2="728" y2="116" stroke="rgba(15,23,42,0.12)" stroke-width="0.8"/>
+      <line x1="0" y1="196" x2="728" y2="196" stroke="rgba(15,23,42,0.12)" stroke-width="0.8"/>
+      <line x1="0" y1="276" x2="728" y2="276" stroke="rgba(15,23,42,0.12)" stroke-width="0.8"/>
+      <line x1="140" y1="36" x2="140" y2="276" stroke="rgba(15,23,42,0.20)" stroke-width="1"/>
+
+      <rect x="190" y="8" width="16" height="16" rx="8" fill="rgba(15,23,42,0.12)"/>
+      <text x="198" y="19" fill="#0f172a" font-size="9" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">1</text>
+      <text x="198" y="32" fill="#475569" font-size="6" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">CHECK</text>
+
+      <rect x="302" y="8" width="16" height="16" rx="8" fill="rgba(15,23,42,0.12)"/>
+      <text x="310" y="19" fill="#0f172a" font-size="9" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">2</text>
+      <text x="310" y="32" fill="#475569" font-size="6" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">PR</text>
+
+      <rect x="414" y="8" width="16" height="16" rx="8" fill="rgba(15,23,42,0.12)"/>
+      <text x="422" y="19" fill="#0f172a" font-size="9" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">3</text>
+      <text x="422" y="32" fill="#475569" font-size="6" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">TESTS</text>
+
+      <rect x="526" y="8" width="16" height="16" rx="8" fill="rgba(79,70,229,0.20)"/>
+      <text x="534" y="19" fill="#4f46e5" font-size="9" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">4</text>
+      <text x="534" y="32" fill="#4f46e5" font-size="6" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">REVIEW</text>
+
+      <rect x="638" y="8" width="16" height="16" rx="8" fill="rgba(15,23,42,0.12)"/>
+      <text x="646" y="19" fill="#0f172a" font-size="9" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">5</text>
+      <text x="646" y="32" fill="#475569" font-size="6" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">MERGE</text>
+
+      <text x="70" y="80" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DEPENDABOT</text>
+      <text x="70" y="156" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PLATTFORM</text>
+      <text x="70" y="236" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ICH</text>
+
+      <line x1="248" y1="76" x2="260" y2="76" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <path d="M360,76 H414 Q422,76 422,84 V124" fill="none" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <path d="M472,156 H526 Q534,156 534,164 V204" fill="none" stroke="#4f46e5" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <path d="M584,236 H638 Q646,236 646,228 V188" fill="none" stroke="#4f46e5" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+
+      <rect x="148" y="44" width="100" height="64" rx="6" fill="#f8fafc"/>
+      <rect x="148" y="44" width="100" height="64" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.25)" stroke-width="1"/>
+      <rect x="152" y="48" width="14" height="10" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="159" y="56" fill="#475569" font-size="6" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">BOT</text>
+      <text x="198" y="70" fill="#0f172a" font-size="9" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Pins prüfen</text>
+      <text x="198" y="84" fill="#475569" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">Actions · Locks · Images</text>
+      <text x="198" y="96" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">wöchentlich</text>
+
+      <rect x="260" y="44" width="100" height="64" rx="6" fill="#f8fafc"/>
+      <rect x="260" y="44" width="100" height="64" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.25)" stroke-width="1"/>
+      <rect x="264" y="48" width="14" height="10" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="271" y="56" fill="#475569" font-size="6" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">BOT</text>
+      <text x="310" y="70" fill="#0f172a" font-size="9" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">PR öffnen</text>
+      <text x="310" y="84" fill="#475569" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">Diff + Release-Notes</text>
+      <text x="310" y="96" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">ein PR pro Update</text>
+
+      <rect x="372" y="124" width="100" height="64" rx="6" fill="#f8fafc"/>
+      <rect x="372" y="124" width="100" height="64" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.25)" stroke-width="1"/>
+      <rect x="376" y="128" width="14" height="10" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="383" y="136" fill="#475569" font-size="6" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">CI</text>
+      <text x="422" y="150" fill="#0f172a" font-size="9" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">CI-Lauf</text>
+      <text x="422" y="164" fill="#475569" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">Tests · Lint · Builds</text>
+      <text x="422" y="176" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">automatisch am PR</text>
+
+      <rect x="484" y="204" width="100" height="64" rx="6" fill="#f8fafc"/>
+      <rect x="484" y="204" width="100" height="64" rx="6" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1.2"/>
+      <rect x="488" y="208" width="14" height="10" rx="2" fill="rgba(79,70,229,0.18)"/>
+      <text x="495" y="216" fill="#4f46e5" font-size="6" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">REV</text>
+      <text x="534" y="230" fill="#0f172a" font-size="9" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Review</text>
+      <text x="534" y="244" fill="#475569" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">Diff und Notes lesen</text>
+      <text x="534" y="256" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">mergen oder schließen</text>
+
+      <rect x="596" y="124" width="100" height="64" rx="6" fill="#f8fafc"/>
+      <rect x="596" y="124" width="100" height="64" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.25)" stroke-width="1"/>
+      <rect x="600" y="128" width="14" height="10" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="607" y="136" fill="#475569" font-size="6" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">CI</text>
+      <text x="646" y="150" fill="#0f172a" font-size="9" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Merge</text>
+      <text x="646" y="164" fill="#475569" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">Pins und Locks aktuell</text>
+      <text x="646" y="176" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace" text-anchor="middle">nächster Lauf nutzt sie</text>
+
+      <text x="144" y="296" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">SCHRITTE</text>
+      <text x="240" y="296" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace">1–2 Dependabot · 3 und 5 Plattform · 4 ich</text>
+      <text x="144" y="324" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">FLUSS</text>
+      <line x1="240" y1="320" x2="272" y2="320" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <text x="280" y="324" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace">Ablauf</text>
+      <line x1="340" y1="320" x2="372" y2="320" stroke="#4f46e5" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <text x="380" y="324" fill="#64748b" font-size="6.5" font-family="'Geist Mono', monospace">menschliches Gate: ohne Review wird nichts gemergt</text>
+    </svg>
+  </div>
+</body>
+</html>
