@@ -3,12 +3,12 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from celery.signals import worker_ready
+from celery.signals import worker_process_init, worker_ready
 from redis import Redis
 from sqlalchemy import select, update
 
 from app.core.config import settings
-from app.database.session import SessionLocal
+from app.database.session import SessionLocal, engine
 from app.models.models import ImportRun, ImportRunStatus, Job, JobStatus, Team, User, VlConnection
 from app.services.paddle_service import (
     convert_to_markdown_with_details,
@@ -26,6 +26,23 @@ from app.workers.celery_app import celery_app
 
 
 logger = logging.getLogger(__name__)
+
+
+@worker_process_init.connect
+def _reset_db_pool_after_fork(sender=None, **kwargs) -> None:  # pragma: no cover
+    """Drop inherited DB pool references in every freshly forked pool child.
+
+    The prefork master touches the database in the worker_ready recovery hook
+    below, which leaves an open (possibly TLS) connection in the module-level
+    engine's pool. Children forked afterwards (steady churn under
+    CELERY_MAX_TASKS_PER_CHILD) inherit that socket, and two processes
+    multiplexing one TLS stream corrupt it -- psycopg then fails with
+    "SSL error: decryption failed or bad record mac". dispose(close=False)
+    forgets the inherited connections without closing them (they still belong
+    to the parent), so each child lazily opens its own fresh pool.
+    """
+    engine.dispose(close=False)
+
 
 _RECOVERY_LOCK_KEY = 'worker:recovery:startup-lock'
 _STALE_RUNNING_RETRY_AFTER = timedelta(minutes=2)
