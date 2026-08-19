@@ -18,7 +18,7 @@
 [![Audit](https://img.shields.io/badge/Security%20audit-Claude%20Opus%205-D97757?logo=anthropic&logoColor=white&style=flat-square)](#security)
 [![Containers](https://img.shields.io/badge/Containers-non--root%20uid%201000-0DB7ED?logo=docker&logoColor=white&style=flat-square)](backend/Dockerfile)
 [![Dependencies](https://img.shields.io/badge/Dependencies-hash--locked-8A5A07?style=flat-square)](backend/requirements.txt)
-[![Tests](https://img.shields.io/badge/Tests-417%20backend-3F6382?logo=pytest&logoColor=white&style=flat-square)](backend/tests)
+[![Tests](https://img.shields.io/badge/Tests-445%20backend-3F6382?logo=pytest&logoColor=white&style=flat-square)](backend/tests)
 
 PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, Mails and images into structured Markdown for RAG and AI pipelines.
 

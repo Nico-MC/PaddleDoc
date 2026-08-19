@@ -714,3 +714,22 @@ def test_0010_openwebui_migration_upgrade_downgrade_round_trip(tmp_path, monkeyp
         assert expected in tables
     source_columns = {c['name'] for c in insp.get_columns('import_sources')}
     assert {'refresh_enabled', 'refresh_interval_seconds', 'last_refresh_at', 'last_refresh_error'} <= source_columns
+
+
+def test_migration_history_has_a_single_head():
+    """Two migrations added on different branches easily end up with the same
+    down_revision, which leaves alembic with two heads and makes every
+    `upgrade head` fail. Merging feat/openwebui-upload into the security-audit
+    work produced exactly that (two 0010_* revisions), so this guards the
+    shape of the chain rather than any one migration's contents.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    # Built programmatically for the same reason the other tests here do it:
+    # no dependency on the working directory alembic.ini is read from.
+    cfg = Config()
+    cfg.set_main_option('script_location', str(BACKEND_DIR / 'alembic'))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+
+    assert len(heads) == 1, f'alembic history has diverged into {len(heads)} heads: {heads}'

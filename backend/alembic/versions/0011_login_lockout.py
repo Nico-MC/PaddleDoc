@@ -1,7 +1,7 @@
 """add per-account login throttling (users.failed_login_count/locked_until)
 
-Revision ID: 0010_login_lockout
-Revises: 0009_mail_ingestion
+Revision ID: 0011_login_lockout
+Revises: 0010_openwebui
 Create Date: 2026-08-18
 
 Before this, the only brake on password guessing was the general 60/min
@@ -24,8 +24,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = '0010_login_lockout'
-down_revision = '0009_mail_ingestion'
+revision = '0011_login_lockout'
+down_revision = '0010_openwebui'
 branch_labels = None
 depends_on = None
 
