@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
-import { peekCached, setCached, useCachedResource } from '@/lib/data-cache';
+import { peekCached, useCachedResource } from '@/lib/data-cache';
 import {
   API,
   type DuplicateUploadBody,
@@ -100,11 +100,9 @@ export function ProcessingFlow() {
   const [selectedProfileId, setSelectedProfileId] = useState(
     () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY)?.default_profile ?? 'ppocrv6_tiny',
   );
-  const [settings, setSettings] = useState<PaddleSettings>(
-    () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY) ?? { default_profile: 'ppocrv6_tiny', timeout_seconds: 300 },
-  );
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [savingSettings, setSavingSettings] = useState(false);
+  // Kept as an error channel for uploadSingle() below (e.g. "no profile
+  // available yet") — the editable Paddle Settings form itself now lives in
+  // the admin area (components/admin/paddle-tab.tsx).
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
 
   const singleFileInputRef = useRef<HTMLInputElement>(null);
@@ -119,17 +117,16 @@ export function ProcessingFlow() {
     await jobsResource.revalidate();
   };
 
-  // Adopt the cached/fetched settings and jobs snapshots into local editable
-  // state as they change ("adjusting state during render" — see
+  // Adopt the cached/fetched settings and jobs snapshots into local state as
+  // they change ("adjusting state during render" — see
   // https://react.dev/learn/you-might-not-need-an-effect — rather than a
-  // useEffect mirror, since these two are the *initial* value for state the
-  // user then edits locally: the profile settings form, and folderOptions'
-  // merge of server folders with locally-created ones).
+  // useEffect mirror): the deployment default profile seeds selectedProfileId
+  // (which the user can still override in step 2), and jobs feed
+  // folderOptions' merge of server folders with locally-created ones.
   const [lastSettingsData, setLastSettingsData] = useState(settingsResource.data);
   if (settingsResource.data !== lastSettingsData) {
     setLastSettingsData(settingsResource.data);
     if (settingsResource.data) {
-      setSettings(settingsResource.data);
       setSelectedProfileId(settingsResource.data.default_profile ?? 'ppocrv6_tiny');
     }
   }
@@ -328,42 +325,6 @@ export function ProcessingFlow() {
     }
   };
 
-  const savePaddleSettings = async () => {
-    setSavingSettings(true);
-    setSettingsMessage(null);
-    const requestedProfile = settings.default_profile;
-    const response = await apiFetch(`/api/v1/paddle/settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
-    });
-
-    if (!response.ok) {
-      setSettingsMessage('Failed to save settings');
-      setSavingSettings(false);
-      return;
-    }
-
-    const payload = await response.json();
-    const nextSettings: PaddleSettings = {
-      default_profile: payload.default_profile,
-      timeout_seconds: payload.timeout_seconds,
-    };
-    setSettings(nextSettings);
-    // The PUT response is already the authoritative value — push it into
-    // the shared cache so any other mounted view (e.g. Home, if reopened)
-    // reflects the change immediately instead of showing the pre-save value
-    // until its own TTL expires.
-    setCached(PADDLE_SETTINGS_KEY, nextSettings);
-    setSelectedProfileId(payload.default_profile ?? requestedProfile);
-    if (payload.default_profile !== requestedProfile) {
-      setSettingsMessage(`Profile '${requestedProfile}' is not available. Saved as '${payload.default_profile}'.`);
-    } else {
-      setSettingsMessage('Settings saved');
-    }
-    setSavingSettings(false);
-  };
-
   const createFolder = async () => {
     const folderValue = newFolderName.trim();
     const subfolderValue = newSubfolderName.trim();
@@ -418,60 +379,6 @@ export function ProcessingFlow() {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 text-slate-950 sm:px-6 lg:px-8">
-      <section className="mb-8 rounded-lg border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Paddle Settings</h2>
-          <Button variant="outline" size="sm" onClick={() => setSettingsOpen((value) => !value)}>
-            {settingsOpen ? 'Close' : 'Open'}
-          </Button>
-        </div>
-        {settingsOpen && (
-          <>
-            <p className="mb-3 mt-2 text-sm text-slate-600">Set the default profile used when you do not override it in step 1.</p>
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="text-sm text-slate-600">
-                Default Profile
-                <select
-                  className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                  value={settings.default_profile}
-                  onChange={(event) => {
-                    setSettings((prev) => ({ ...prev, default_profile: event.target.value }));
-                    setSelectedProfileId(event.target.value);
-                  }}
-                >
-                  {capabilities.profiles.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-xs text-slate-500">
-                  {capabilities.profiles.find((option) => option.value === settings.default_profile)?.description}
-                </p>
-              </label>
-              <label className="text-sm text-slate-600">
-                Timeout (seconds)
-                <input
-                  type="number"
-                  min={1}
-                  className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                  value={settings.timeout_seconds}
-                  onChange={(event) =>
-                    setSettings((prev) => ({ ...prev, timeout_seconds: Number(event.target.value) || 1 }))
-                  }
-                />
-              </label>
-            </div>
-            <div className="mt-4 flex items-center gap-3">
-              <Button onClick={savePaddleSettings} disabled={savingSettings}>
-                {savingSettings ? 'Saving...' : 'Save Settings'}
-              </Button>
-              {settingsMessage && <span className="text-sm text-slate-600">{settingsMessage}</span>}
-            </div>
-          </>
-        )}
-      </section>
-
       <section className="mb-8">
         <h1 className="text-3xl font-semibold">Transform Documents Into Structured Markdown</h1>
         <p className="mt-2 text-slate-600">Step through mode, metadata, profile, and upload. The flow supports single files and ordered collections.</p>
@@ -516,11 +423,11 @@ export function ProcessingFlow() {
               exit={{ opacity: 0, y: -12 }}
               className="space-y-4"
             >
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
                 <button
                   type="button"
                   onClick={() => setMode('single')}
-                  className={`rounded-xl border p-4 text-left ${mode === 'single' ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+                  className={`flex h-full flex-col rounded-xl border p-4 text-left transition ${mode === 'single' ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50'}`}
                 >
                   <p className="text-sm font-semibold text-slate-950">Single file</p>
                   <p className="mt-1 text-xs text-slate-600">Upload one document and start processing immediately.</p>
@@ -528,7 +435,7 @@ export function ProcessingFlow() {
                 <button
                   type="button"
                   onClick={() => setMode('collection')}
-                  className={`rounded-xl border p-4 text-left ${mode === 'collection' ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}
+                  className={`flex h-full flex-col rounded-xl border p-4 text-left transition ${mode === 'collection' ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50'}`}
                 >
                   <p className="text-sm font-semibold text-slate-950">Multiple files</p>
                   <p className="mt-1 text-xs text-slate-600">Upload multiple files into one folder, then start together.</p>
@@ -536,7 +443,7 @@ export function ProcessingFlow() {
                 <button
                   type="button"
                   onClick={() => router.push('/imports/new')}
-                  className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
+                  className="flex h-full flex-col rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
                 >
                   <p className="text-sm font-semibold text-slate-950">Import from Confluence</p>
                   <p className="mt-1 text-xs text-slate-600">Crawl a space or page tree into markdown jobs.</p>
@@ -821,6 +728,7 @@ export function ProcessingFlow() {
                 </p>
               </div>
               {flowMessage && <p className="mt-2 text-sm text-slate-600">{flowMessage}</p>}
+              {settingsMessage && <p className="mt-2 text-sm text-red-600">{settingsMessage}</p>}
               {uploadProgress && (
                 <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
                   <div className="flex items-center justify-between gap-4">

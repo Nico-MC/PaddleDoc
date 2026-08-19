@@ -166,14 +166,18 @@ export default function SettingsPage() {
                   </Field>
                 </div>
                 <div className="w-full max-w-[180px]">
-                  <Field label="Expires in (days)" hint="Optional">
+                  {/* No `hint` here on purpose: Field renders it as a block below the
+                      input, which — combined with items-end on the row — would push
+                      this input off the baseline shared with the Name field and the
+                      submit button. The "optional" cue lives in the placeholder instead. */}
+                  <Field label="Expires in (days)">
                     <input
                       type="number"
                       min={1}
                       value={expiresInDays}
                       onChange={(event) => setExpiresInDays(event.target.value)}
                       className={inputClass}
-                      placeholder="Never"
+                      placeholder="Never (optional)"
                     />
                   </Field>
                 </div>

@@ -220,7 +220,7 @@ export function OpenWebUIPushDialog({ jobs, onClose, onPushed }: OpenWebUIPushDi
         ) : connections.length === 0 ? (
           <p className="text-sm text-slate-600">
             No OpenWebUI connections configured.{' '}
-            <Link href="/openwebui" className="text-emerald-700 hover:text-emerald-800">
+            <Link href="/connections?tab=openwebui" className="text-emerald-700 hover:text-emerald-800">
               Add one
             </Link>{' '}
             first.

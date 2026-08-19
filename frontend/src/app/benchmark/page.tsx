@@ -200,9 +200,10 @@ export default function BenchmarkPage() {
       <div className="mx-auto w-full max-w-6xl px-4 py-8 text-slate-950 sm:px-6 lg:px-8">
         <section className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-3xl font-semibold">Benchmark</h1>
+            <h1 className="text-3xl font-semibold">VL Benchmark</h1>
             <p className="mt-2 text-slate-600">
-              Run the same document through multiple VL connections and compare output quality.
+              Run one document through several vision-language models and compare their markdown output side by
+              side.
             </p>
           </div>
           <Button variant="outline" onClick={refreshRuns} disabled={runsLoading}>
