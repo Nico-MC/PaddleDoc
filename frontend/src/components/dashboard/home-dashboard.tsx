@@ -1,10 +1,7 @@
 'use client';
 
 import { memo, useCallback, useMemo } from 'react';
-import { Sparkles } from 'lucide-react';
-import Link from 'next/link';
 
-import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
 import { useCachedResource, useVisiblePolling } from '@/lib/data-cache';
 import {
@@ -59,7 +56,7 @@ const initialSnapshot: ServiceSnapshot = {
   isUnreachable: false,
 };
 
-const HeroPanel = memo(function HeroPanel({
+const StatusPanel = memo(function StatusPanel({
   uiState,
   jobsStale,
   service,
@@ -82,86 +79,80 @@ const HeroPanel = memo(function HeroPanel({
   } = service;
 
   return (
-    <section className="mb-8 overflow-hidden rounded-[2rem] border border-emerald-100 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.08)]">
-      <div className="grid gap-0 lg:grid-cols-[1.35fr_0.65fr]">
-        <div className="relative p-6 sm:p-8 lg:p-10">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(14,116,144,0.08),transparent_28%),radial-gradient(circle_at_bottom_left,rgba(249,115,22,0.08),transparent_24%)]" />
-          <div className="relative max-w-2xl">
-            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-800">
-              <Sparkles className="h-3.5 w-3.5" />
-              Document Magic
-            </div>
-            <h1 className="font-serif text-4xl font-semibold tracking-tight text-slate-950 sm:text-5xl">
-              Your documents, supercharged with PaddleOCR
-            </h1>
-            <p className="mt-4 max-w-xl text-base leading-7 text-slate-600 sm:text-lg">
-              Upload files, process them automated and access cool markdown outputs. PaddleDoc is your dashboard for document processing, powered by the open-source PaddleOCR engine.
-            </p>
-            <div className="mt-6 flex flex-wrap gap-3">
-              <Link href="/jobs">
-                <Button>Tasks</Button>
-              </Link>
-            </div>
-          </div>
+    <section className="mb-8 overflow-hidden rounded-[2rem] border border-emerald-100 bg-gradient-to-br from-emerald-700 via-emerald-800 to-slate-900 p-6 text-white shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-8 lg:p-10">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm uppercase tracking-[0.2em] text-emerald-100/80">PaddleDoc</p>
+          <h2 className="mt-1 text-2xl font-semibold">System status</h2>
         </div>
-        <div className="border-t border-slate-100 bg-gradient-to-br from-emerald-700 via-emerald-800 to-slate-900 p-6 text-white lg:border-l lg:border-t-0 lg:p-8">
-          <div className="flex h-full flex-col justify-between gap-6">
-            <div>
-              <p className="text-sm uppercase tracking-[0.2em] text-emerald-100/80">PaddleDoc</p>
-              <h2 className="mt-3 text-2xl font-semibold">Document processing</h2>
-              {isUnreachable && (
-                <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-red-400/40 bg-red-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-red-100">
-                  <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-                  Connection lost — showing last known status
-                </div>
-              )}
-              <p className="mt-3 text-sm leading-6 text-emerald-50/85">
-                Status: {uiState}
-                {jobsStale && <span className="ml-2 text-amber-200">(last known — reconnecting)</span>}
-              </p>
-              <p className="mt-2 text-sm leading-6 text-emerald-50/85">
-                Paddle Service: {isUnreachable ? 'unreachable' : paddleStatus}
-              </p>
-              <p className="mt-2 text-sm leading-6 text-emerald-50/85">
-                Queue remaining: {queueTotal} (pending {pendingJobs}, running {runningJobs})
-              </p>
-              <p className="mt-2 text-sm leading-6 text-emerald-50/85">
-                Running containers: {runningWorkers}
-              </p>
-              {containerStates.length > 0 && (
-                <div className="mt-2 space-y-1 text-xs leading-5 text-emerald-100/80">
-                  {containerStates.map((entry) => (
-                    <p key={entry.name}>
-                      {entry.name}: {entry.state}
-                      {entry.detail ? ` (${entry.detail})` : ''}
-                    </p>
-                  ))}
-                </div>
-              )}
-              {workerNodes.length > 0 && (
-                <p className="mt-1 text-xs leading-5 text-emerald-100/70">
-                  {workerNodes.join(', ')}
-                </p>
-              )}
-              {isUnreachable ? (
-                <p className="mt-2 text-xs leading-5 text-red-200">
-                  The backend did not respond to the last health check. Queue, container and worker
-                  figures above reflect the last successful check, not the current state.
-                </p>
-              ) : (
-                paddleStatusDetail && (
-                  <p className="mt-2 text-xs leading-5 text-emerald-100/70">{paddleStatusDetail}</p>
-                )
-              )}
-              <p className="mt-2 text-xs leading-5 text-emerald-100/70">
-                {runtimeCapability?.cuda_available
-                  ? 'GPU available for accelerated processing'
-                  : 'PaddleOCR runtime is configured for CPU execution in this deployment'}
-              </p>
-            </div>
+        {isUnreachable && (
+          <div className="inline-flex items-center gap-2 rounded-full border border-red-400/40 bg-red-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-red-100">
+            <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+            Connection lost — showing last known status
           </div>
-        </div>
+        )}
       </div>
+
+      <dl className="mt-6 grid gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div>
+          <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Status</dt>
+          <dd className="mt-1 text-sm leading-6 text-emerald-50/90">
+            {uiState}
+            {jobsStale && <span className="ml-2 text-amber-200">(last known — reconnecting)</span>}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Paddle service</dt>
+          <dd className="mt-1 text-sm leading-6 text-emerald-50/90">
+            {isUnreachable ? 'unreachable' : paddleStatus}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Queue remaining</dt>
+          <dd className="mt-1 text-sm leading-6 text-emerald-50/90">
+            {queueTotal} (pending {pendingJobs}, running {runningJobs})
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Running containers</dt>
+          <dd className="mt-1 text-sm leading-6 text-emerald-50/90">{runningWorkers}</dd>
+        </div>
+        {containerStates.length > 0 && (
+          <div className="sm:col-span-2 lg:col-span-1">
+            <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Containers</dt>
+            <dd className="mt-1 space-y-1 text-xs leading-5 text-emerald-100/80">
+              {containerStates.map((entry) => (
+                <p key={entry.name}>
+                  {entry.name}: {entry.state}
+                  {entry.detail ? ` (${entry.detail})` : ''}
+                </p>
+              ))}
+            </dd>
+          </div>
+        )}
+        {workerNodes.length > 0 && (
+          <div className="sm:col-span-2 lg:col-span-3">
+            <dt className="text-xs uppercase tracking-[0.16em] text-emerald-100/70">Worker nodes</dt>
+            <dd className="mt-1 text-xs leading-5 text-emerald-100/70">{workerNodes.join(', ')}</dd>
+          </div>
+        )}
+      </dl>
+
+      {isUnreachable ? (
+        <p className="mt-5 text-xs leading-5 text-red-200">
+          The backend did not respond to the last health check. Queue, container and worker figures
+          above reflect the last successful check, not the current state.
+        </p>
+      ) : (
+        paddleStatusDetail && (
+          <p className="mt-5 text-xs leading-5 text-emerald-100/70">{paddleStatusDetail}</p>
+        )
+      )}
+      <p className="mt-2 text-xs leading-5 text-emerald-100/70">
+        {runtimeCapability?.cuda_available
+          ? 'GPU available for accelerated processing'
+          : 'PaddleOCR runtime is configured for CPU execution in this deployment'}
+      </p>
     </section>
   );
 });
@@ -277,8 +268,9 @@ export function HomeDashboard() {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 text-slate-950 sm:px-6 lg:px-8">
-      <HeroPanel uiState={uiState} jobsStale={jobsStale} service={service} />
+      <h1 className="mb-6 font-serif text-3xl font-semibold tracking-tight text-slate-950">Overview</h1>
       <StatsGrid stats={stats} isStale={statsResource.isStale} />
+      <StatusPanel uiState={uiState} jobsStale={jobsStale} service={service} />
     </div>
   );
 }

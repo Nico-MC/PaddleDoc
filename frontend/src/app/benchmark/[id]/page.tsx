@@ -204,7 +204,7 @@ export default function BenchmarkRunPage() {
           <h1 className="text-2xl font-semibold">Benchmark run not found</h1>
           <p className="mt-2 text-sm text-slate-600">The run does not exist or is not visible to you.</p>
           <Link href="/benchmark" className="mt-4 inline-block text-sm text-emerald-700 hover:text-emerald-800">
-            Back to benchmarks
+            Back to VL Benchmark
           </Link>
         </div>
       </main>
@@ -245,7 +245,7 @@ export default function BenchmarkRunPage() {
       <div className="mx-auto w-full max-w-6xl px-4 py-8 text-slate-950 sm:px-6 lg:px-8">
         <p className="mb-3">
           <Link href="/benchmark" className="text-sm text-emerald-700 hover:text-emerald-800">
-            Back to benchmarks
+            Back to VL Benchmark
           </Link>
         </p>
 

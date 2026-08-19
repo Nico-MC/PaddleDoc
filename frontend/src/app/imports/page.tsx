@@ -2,34 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ChevronDown, ChevronRight, LoaderCircle, Pencil, Plus, RefreshCcw, Trash2 } from 'lucide-react';
+import { LoaderCircle, Plus, RefreshCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Toggle } from '@/components/admin/admin-shared';
 import { ApiError, apiJson } from '@/lib/api';
 import { formatBytes } from '@/components/dashboard/shared';
-import {
-  REFRESH_INTERVAL_OPTIONS,
-  formatRefreshInterval,
-  type ImportRun,
-  type ImportRunListResponse,
-  type ImportSource,
-  type ImportSourceListResponse,
-  runStatusChip,
-  runTitle,
-} from '@/lib/imports';
+import { type ImportRun, type ImportRunListResponse, runStatusChip, runTitle } from '@/lib/imports';
 
 export default function ImportsPage() {
   const [runs, setRuns] = useState<ImportRun[]>([]);
-  const [sources, setSources] = useState<ImportSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  const [sourcesMessage, setSourcesMessage] = useState<string | null>(null);
-  const [renamingSourceId, setRenamingSourceId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [busySourceId, setBusySourceId] = useState<string | null>(null);
 
   const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -37,13 +20,9 @@ export default function ImportsPage() {
     let cancelled = false;
     const load = async () => {
       try {
-        const [runsPayload, sourcesPayload] = await Promise.all([
-          apiJson<ImportRunListResponse>('/api/v1/import/runs', { cache: 'no-store' }),
-          apiJson<ImportSourceListResponse>('/api/v1/import/sources', { cache: 'no-store' }),
-        ]);
+        const runsPayload = await apiJson<ImportRunListResponse>('/api/v1/import/runs', { cache: 'no-store' });
         if (cancelled) return;
         setRuns(runsPayload.items);
-        setSources(sourcesPayload.items);
         setLoadError(null);
       } catch (error) {
         if (!cancelled) {
@@ -62,71 +41,6 @@ export default function ImportsPage() {
   const loadAll = () => {
     setLoading(true);
     setReloadNonce((nonce) => nonce + 1);
-  };
-
-  const startRename = (source: ImportSource) => {
-    setRenamingSourceId(source.id);
-    setRenameValue(source.name);
-    setSourcesMessage(null);
-  };
-
-  const saveRename = async (sourceId: string) => {
-    const name = renameValue.trim();
-    if (!name) {
-      setSourcesMessage('Name cannot be empty.');
-      return;
-    }
-    setBusySourceId(sourceId);
-    try {
-      const updated = await apiJson<ImportSource>(`/api/v1/import/sources/${sourceId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      setSources((current) => current.map((entry) => (entry.id === sourceId ? updated : entry)));
-      setRenamingSourceId(null);
-      setSourcesMessage(null);
-    } catch (error) {
-      setSourcesMessage(error instanceof ApiError ? error.detail : 'Failed to rename source.');
-    } finally {
-      setBusySourceId(null);
-    }
-  };
-
-  const updateSourceRefresh = async (
-    source: ImportSource,
-    patch: { refresh_enabled?: boolean; refresh_interval_seconds?: number },
-  ) => {
-    setBusySourceId(source.id);
-    try {
-      const updated = await apiJson<ImportSource>(`/api/v1/import/sources/${source.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      setSources((current) => current.map((entry) => (entry.id === source.id ? updated : entry)));
-      setSourcesMessage(null);
-    } catch (error) {
-      setSourcesMessage(error instanceof ApiError ? error.detail : 'Failed to update auto-refresh.');
-    } finally {
-      setBusySourceId(null);
-    }
-  };
-
-  const deleteSource = async (source: ImportSource) => {
-    if (!window.confirm(`Delete source "${source.name}"? Past runs keep their history.`)) {
-      return;
-    }
-    setBusySourceId(source.id);
-    try {
-      await apiJson<{ status: string }>(`/api/v1/import/sources/${source.id}`, { method: 'DELETE' });
-      setSources((current) => current.filter((entry) => entry.id !== source.id));
-      setSourcesMessage(null);
-    } catch (error) {
-      setSourcesMessage(error instanceof ApiError ? error.detail : 'Failed to delete source.');
-    } finally {
-      setBusySourceId(null);
-    }
   };
 
   return (
@@ -213,145 +127,13 @@ export default function ImportsPage() {
           </div>
         </section>
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
-          <button
-            type="button"
-            onClick={() => setSourcesOpen((value) => !value)}
-            aria-expanded={sourcesOpen}
-            className="flex w-full items-center justify-between text-left"
-          >
-            <span className="flex items-center gap-2 text-lg font-semibold">
-              {sourcesOpen ? <ChevronDown className="h-4 w-4 text-slate-500" /> : <ChevronRight className="h-4 w-4 text-slate-500" />}
-              Sources
-            </span>
-            <span className="text-sm text-slate-500">{sources.length} source(s)</span>
-          </button>
-
-          {sourcesOpen && (
-            <div className="mt-4 space-y-2">
-              <p className="text-sm text-slate-600">
-                Connections are private to you. Credentials are write-only and never shown; create new sources from the
-                import wizard.
-              </p>
-              {sourcesMessage && <p className="text-sm text-red-600">{sourcesMessage}</p>}
-              {sources.map((source) => (
-                <div
-                  key={source.id}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"
-                >
-                  <div className="min-w-0">
-                    {renamingSourceId === source.id ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          value={renameValue}
-                          onChange={(event) => setRenameValue(event.target.value)}
-                          aria-label="Source name"
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter') void saveRename(source.id);
-                            if (event.key === 'Escape') setRenamingSourceId(null);
-                          }}
-                          className="rounded border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-950"
-                          autoFocus
-                        />
-                        <Button size="sm" onClick={() => void saveRename(source.id)} disabled={busySourceId === source.id}>
-                          Save
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => setRenamingSourceId(null)}>
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <p className="truncate text-sm font-semibold text-slate-950">{source.name}</p>
-                    )}
-                    <p className="mt-0.5 truncate text-xs text-slate-500">
-                      {source.base_url} · {source.auth_type === 'cloud_basic' ? 'Cloud (email + API token)' : 'Personal access token'}
-                    </p>
-                    <div className="mt-2 flex flex-wrap items-center gap-3">
-                      <Toggle
-                        checked={source.refresh_enabled ?? false}
-                        onChange={(next) => void updateSourceRefresh(source, { refresh_enabled: next })}
-                        label="Auto-refresh"
-                        disabled={busySourceId === source.id}
-                      />
-                      <select
-                        value={source.refresh_interval_seconds ?? REFRESH_INTERVAL_OPTIONS[2].value}
-                        onChange={(event) =>
-                          void updateSourceRefresh(source, { refresh_interval_seconds: Number(event.target.value) })
-                        }
-                        disabled={!(source.refresh_enabled ?? false) || busySourceId === source.id}
-                        className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-950 disabled:opacity-50"
-                      >
-                        {/* Covers the server's own floor default (e.g. 900s), which the
-                            toggle-only enable path sets without going through this select --
-                            without it, `value` above would match none of the options below
-                            and the control would render blank. */}
-                        {source.refresh_interval_seconds != null &&
-                          !REFRESH_INTERVAL_OPTIONS.some((option) => option.value === source.refresh_interval_seconds) && (
-                            <option value={source.refresh_interval_seconds}>
-                              {formatRefreshInterval(source.refresh_interval_seconds)}
-                            </option>
-                          )}
-                        {REFRESH_INTERVAL_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    {(source.refresh_enabled ?? false) && (
-                      <p className="mt-1 text-xs text-slate-500">
-                        {source.last_refresh_at
-                          ? `Last refreshed ${new Date(source.last_refresh_at).toLocaleString()}`
-                          : 'Not refreshed yet.'}
-                      </p>
-                    )}
-                    {source.last_refresh_error && (
-                      <p className="mt-1 text-xs text-red-600">{source.last_refresh_error}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`rounded px-2 py-1 text-xs ${
-                        source.server_kind ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {source.server_kind === 'cloud'
-                        ? 'Cloud'
-                        : source.server_kind === 'datacenter'
-                          ? 'Server/DC'
-                          : 'untested'}
-                    </span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-8 w-8 px-0"
-                      disabled={busySourceId === source.id}
-                      onClick={() => startRename(source)}
-                      aria-label={`Rename source ${source.name}`}
-                    >
-                      <Pencil className="h-4 w-4 text-slate-700" aria-hidden="true" />
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-8 w-8 px-0"
-                      disabled={busySourceId === source.id}
-                      onClick={() => void deleteSource(source)}
-                      aria-label={`Delete source ${source.name}`}
-                    >
-                      <Trash2 className="h-4 w-4 text-red-600" aria-hidden="true" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-              {sources.length === 0 && !loading && (
-                <p className="py-2 text-sm text-slate-600">No sources yet. The import wizard creates one on first use.</p>
-              )}
-            </div>
-          )}
-        </section>
+        <p className="text-sm text-slate-500">
+          Connections are managed under{' '}
+          <Link href="/connections?tab=confluence" className="text-emerald-700 hover:text-emerald-800">
+            Connections &gt; Confluence
+          </Link>
+          .
+        </p>
       </div>
     </main>
   );

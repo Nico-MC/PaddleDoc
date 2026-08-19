@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { KeyRound, ScanEye, ShieldAlert, Terminal, Users, UsersRound } from 'lucide-react';
+import { Cpu, KeyRound, ScanEye, ShieldAlert, Terminal, Users, UsersRound } from 'lucide-react';
 
 import { useAuth } from '@/lib/auth-context';
 import { UsersTab } from '@/components/admin/users-tab';
@@ -9,8 +9,9 @@ import { TeamsTab } from '@/components/admin/teams-tab';
 import { ProvidersTab } from '@/components/admin/providers-tab';
 import { LogsTab } from '@/components/admin/logs-tab';
 import { VlConnectionsTab } from '@/components/admin/vl-connections-tab';
+import { PaddleTab } from '@/components/admin/paddle-tab';
 
-type TabId = 'users' | 'teams' | 'providers' | 'logs' | 'vl-connections';
+type TabId = 'users' | 'teams' | 'providers' | 'logs' | 'vl-connections' | 'paddle';
 
 const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: 'users', label: 'Users', icon: Users },
@@ -18,6 +19,9 @@ const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: 'providers', label: 'Identity Providers', icon: KeyRound },
   { id: 'logs', label: 'Logs', icon: Terminal },
   { id: 'vl-connections', label: 'VL Connections', icon: ScanEye },
+  // Placed after VL Connections: both are runtime/processing configuration
+  // (as opposed to Users/Teams/Providers, which are account administration).
+  { id: 'paddle', label: 'Paddle', icon: Cpu },
 ];
 
 export default function AdminPage() {
@@ -47,8 +51,8 @@ export default function AdminPage() {
         <header className="mb-6">
           <h1 className="text-2xl font-semibold text-slate-950">Administration</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Manage users, teams, single sign-on identity providers, worker logs, and VL
-            connections.
+            Manage users, teams, single sign-on identity providers, worker logs, VL connections,
+            and the Paddle runtime.
           </p>
         </header>
 
@@ -83,6 +87,7 @@ export default function AdminPage() {
         {tab === 'providers' && <ProvidersTab />}
         {tab === 'logs' && <LogsTab />}
         {tab === 'vl-connections' && <VlConnectionsTab />}
+        {tab === 'paddle' && <PaddleTab />}
       </div>
     </main>
   );

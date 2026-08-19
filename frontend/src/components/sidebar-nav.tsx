@@ -3,24 +3,71 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, Gauge, Mail, Settings, Shield, LogOut, UploadCloud } from 'lucide-react';
+import {
+  Home,
+  Menu,
+  X,
+  Cpu,
+  FolderOpen,
+  Gauge,
+  Mail,
+  FileInput,
+  PlugZap,
+  Settings,
+  Shield,
+  LogOut,
+  ChevronDown,
+  ChevronRight,
+} from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
+const processingChildren = [
+  { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
+  { href: '/mail', label: 'API Mail Extraction', icon: Mail, description: 'API-ingested messages' },
+  { href: '/imports', label: 'Confluence Import', icon: FileInput, description: 'Confluence page imports' },
+];
+
 const links = [
   { href: '/', label: 'Home', icon: Home },
-  { href: '/processing', label: 'Processing', icon: Cpu, description: 'Upload and process documents' },
-  { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
-  { href: '/mail', label: 'Mail', icon: Mail, description: 'API-ingested messages' },
-  { href: '/benchmark', label: 'Benchmark', icon: Gauge },
-  { href: '/openwebui', label: 'OpenWebUI', icon: UploadCloud },
+  {
+    href: '/processing',
+    label: 'Processing',
+    icon: Cpu,
+    description: 'Upload and process documents',
+    children: processingChildren,
+  },
+  { href: '/benchmark', label: 'VL Benchmark', icon: Gauge },
+  { href: '/connections', label: 'Connections', icon: PlugZap },
 ];
+
+// Routes that should auto-expand the Processing submenu.
+const processingRoutes = ['/processing', '/jobs', '/mail', '/imports'];
+
+function isChildActive(href: string, pathname: string) {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
 
 export function SidebarNav() {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const drawerRef = useRef<HTMLDivElement>(null);
   const { user, logout } = useAuth();
+
+  // The user's explicit collapse/expand of the Processing submenu wins while
+  // they stay on the same side of the section boundary; crossing it (in or
+  // out) hands control back to the route, so navigating to a child always
+  // reveals the submenu. OR-ing the two instead would pin it open for as long
+  // as a child route is active, leaving the chevron inert exactly where a user
+  // would reach for it. Adjusted during render rather than mirrored in an
+  // effect — https://react.dev/learn/you-might-not-need-an-effect
+  const autoProcessingOpen = processingRoutes.some((route) => isChildActive(route, pathname));
+  const [submenuOpen, setSubmenuOpen] = useState(autoProcessingOpen);
+  const [lastAutoProcessingOpen, setLastAutoProcessingOpen] = useState(autoProcessingOpen);
+  if (autoProcessingOpen !== lastAutoProcessingOpen) {
+    setLastAutoProcessingOpen(autoProcessingOpen);
+    setSubmenuOpen(autoProcessingOpen);
+  }
 
   // Close on outside click
   useEffect(() => {
@@ -74,23 +121,92 @@ export function SidebarNav() {
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">
-          {links.map(({ href, label, icon: Icon, description }) => {
-            const active = pathname === href || (href !== '/' && pathname.startsWith(href));
+          {links.map(({ href, label, icon: Icon, description, children }) => {
+            const childActive = children?.some((child) => isChildActive(child.href, pathname)) ?? false;
+            const active = !childActive && (pathname === href || (href !== '/' && pathname.startsWith(href)));
+
+            if (!children) {
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  onClick={() => setOpen(false)}
+                  title={description}
+                  className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                    active
+                      ? 'bg-emerald-50 text-emerald-800'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+                  }`}
+                >
+                  <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-emerald-700' : 'text-slate-400'}`} />
+                  {label}
+                </Link>
+              );
+            }
+
             return (
-              <Link
-                key={href}
-                href={href}
-                onClick={() => setOpen(false)}
-                title={description}
-                className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
-                  active
-                    ? 'bg-emerald-50 text-emerald-800'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
-                }`}
-              >
-                <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-emerald-700' : 'text-slate-400'}`} />
-                {label}
-              </Link>
+              <div key={href}>
+                <div
+                  className={`flex items-center gap-1 rounded-xl pr-1 text-sm font-medium transition ${
+                    active
+                      ? 'bg-emerald-50 text-emerald-800'
+                      : childActive
+                        ? 'text-emerald-700'
+                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+                  }`}
+                >
+                  <Link
+                    href={href}
+                    onClick={() => setOpen(false)}
+                    title={description}
+                    className="flex flex-1 items-center gap-3 rounded-xl px-3 py-2.5"
+                  >
+                    <Icon
+                      className={`h-4 w-4 flex-shrink-0 ${
+                        active || childActive ? 'text-emerald-700' : 'text-slate-400'
+                      }`}
+                    />
+                    {label}
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSubmenuOpen((v) => !v);
+                    }}
+                    aria-expanded={submenuOpen}
+                    aria-label={submenuOpen ? `Collapse ${label} submenu` : `Expand ${label} submenu`}
+                    className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  >
+                    {submenuOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  </button>
+                </div>
+                {submenuOpen && (
+                  <div className="mt-1 flex flex-col gap-1">
+                    {children.map((child) => {
+                      const childIsActive = isChildActive(child.href, pathname);
+                      return (
+                        <Link
+                          key={child.href}
+                          href={child.href}
+                          onClick={() => setOpen(false)}
+                          title={child.description}
+                          className={`flex items-center gap-3 rounded-xl py-2 pl-10 pr-3 text-sm font-medium transition ${
+                            childIsActive
+                              ? 'bg-emerald-50 text-emerald-800'
+                              : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+                          }`}
+                        >
+                          <child.icon
+                            className={`h-3.5 w-3.5 flex-shrink-0 ${childIsActive ? 'text-emerald-700' : 'text-slate-400'}`}
+                          />
+                          {child.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>

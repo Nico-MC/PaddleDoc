@@ -12,6 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tile — served as SVG favicon and apple-touch-icon, used as the brand mark in the
   sidebar and on the login/setup pages (shared `PaddleDocLogo` component), and shown
   in the README header
+- **Connections** is a new top-level page (`/connections`) where every user configures the
+  external systems their account talks to, in three tabs: Confluence (create, test, rename,
+  delete import sources and their auto-refresh interval — moved out of the collapsible
+  section on the imports page), OpenWebUI (the full connection CRUD and recent-push history
+  that used to live at `/openwebui`, which now redirects here), and VL connections. VL stays
+  an admin-managed, deployment-wide resource: administrators get the same CRUD panel as in
+  the admin area, everyone else a read-only list of the enabled models so they can see what a
+  benchmark can run against
+
+### Changed
+- The sidebar is now two levels deep: Processing carries Jobs, API Mail Extraction (the
+  former Mail entry) and Confluence Import (which previously had no navigation entry at all)
+  as a collapsible submenu, and Benchmark is named **VL Benchmark** to say what it compares —
+  the same document run through several vision-language models
+- Paddle runtime settings (default OCR profile, timeout) moved from the top of the Processing
+  page into a **Paddle** tab in the admin area, where they belong: `PUT /api/v1/paddle/settings`
+  has always required an admin, so non-admin users were shown a form that failed with 403 on
+  save. The Processing page still reads the deployment default to preselect a profile
+- The Processing page opens on the upload flow instead of a settings panel, and its three
+  entry points — Single file, Multiple files, Import from Confluence — are laid out as three
+  equally sized tiles (they previously sat in a four-column grid, leaving the Confluence tile
+  alone in its row)
+- The home dashboard dropped the "Document Magic" marketing hero and its Tasks shortcut —
+  navigation runs through the sidebar. The live service readout it contained (pipeline state,
+  Paddle service, queue depth, containers, worker nodes, GPU/CPU runtime) survives as a
+  standalone **System status** card, including its honest degradation to last-known values
+  when the backend health check fails
+
+### Fixed
+- The API token form under Settings put its two inputs on different baselines: the
+  "Expires in (days)" field carried a `hint`, which `Field` renders as an extra block below
+  the input and which the row's `items-end` alignment then pushed the input up against. The
+  optional-ness now lives in the placeholder
 
 ## [1.3.1] - 2026-08-15
 
