@@ -228,7 +228,14 @@ def resolve_and_pin(
         if _is_metadata_ip(ip):
             raise SafeFetchError(f'{hostname!r} resolves to a cloud metadata address ({ip_str})')
         if _is_blocked_ip(ip) and not allowlisted:
-            raise SafeFetchError(f'{hostname!r} resolves to a blocked address ({ip_str})')
+            raise SafeFetchError(
+                f'{hostname!r} resolves to a blocked address ({ip_str}): private, loopback, '
+                'link-local and reserved targets are rejected by default even when the network '
+                'route works. To allow this specific host, add it to the integration\'s '
+                'private-host allowlist (IMPORT_/OPENWEBUI_/VL_PRIVATE_HOST_ALLOWLIST, Helm: '
+                'importer.privateHostAllowlist / openwebui.privateHostAllowlist) and restart '
+                'the backend and worker.'
+            )
 
     return resolved_ips[0]
 

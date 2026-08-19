@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Expires in (days)" field carried a `hint`, which `Field` renders as an extra block below
   the input and which the row's `items-end` alignment then pushed the input up against. The
   optional-ness now lives in the placeholder
+- `VL_PRIVATE_HOST_ALLOWLIST` was documented in `.env.example` but never passed to the
+  containers: neither compose file forwarded it and the Helm chart had no value for it, so a
+  self-hosted vLLM/Ollama/LiteLLM on a private address could not be reached at all. Both
+  compose files now forward it to backend and worker, and the chart exposes
+  `vl.privateHostAllowlist` on both deployments (the test probe runs in the backend, the OCR
+  call in the worker)
+- The SSRF fetcher's "resolves to a blocked address" rejection now says what to do about it.
+  A private-address target that is perfectly reachable from inside the pod is still refused
+  by design, and the old message gave no hint that a per-host allowlist exists — it read like
+  a bug rather than a policy. Firewall docs gained a section on the same point
 
 ## [1.3.1] - 2026-08-15
 

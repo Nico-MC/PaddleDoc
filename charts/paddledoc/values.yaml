@@ -222,6 +222,18 @@ openwebui:
   # OPENWEBUI_PRIVATE_HOST_ALLOWLIST.
   privateHostAllowlist: []
 
+vl:
+  # Hostnames ("host" or "host:port") of private-network OpenAI-compatible
+  # vision endpoints (self-hosted vLLM/Ollama/LiteLLM) that the `openai_vision`
+  # profile and the admin "test VL connection" probe may reach, e.g.
+  # ["vl.corp.internal:8000"]. Self-hosted endpoints are the normal case here
+  # and live on private addresses, which the SSRF-safe fetcher blocks by
+  # default. Same enforcement as the two allowlists above (per redirect hop;
+  # cloud-metadata IPs stay blocked unconditionally). Rendered as a JSON list
+  # into VL_PRIVATE_HOST_ALLOWLIST on BOTH deployments -- the test probe runs
+  # in the backend, the OCR call itself in the worker.
+  privateHostAllowlist: []
+
 auth:
   # SECRET_KEY signs session cookies and the OIDC state cookie, and derives
   # the key used to encrypt stored OIDC provider client secrets. Required by

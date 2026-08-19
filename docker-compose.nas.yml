@@ -73,6 +73,12 @@ services:
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      # Self-hosted VL endpoints (vLLM/Ollama/LiteLLM) sit on private
+      # addresses, which the SSRF-safe fetcher blocks by default -- a working
+      # network route is not enough. List the host (host or host:port), e.g.
+      # '["vl.internal:8000"]' -- JSON list string, same convention as
+      # IMPORT_PRIVATE_HOST_ALLOWLIST.
+      VL_PRIVATE_HOST_ALLOWLIST: ${VL_PRIVATE_HOST_ALLOWLIST:-[]}
       # Confluence import. A NAS-hosted internal Confluence is the textbook
       # allowlist use case: put its hostname (host or host:port) in
       # IMPORT_PRIVATE_HOST_ALLOWLIST, e.g. '["wiki.local:8090"]' -- JSON
@@ -148,6 +154,12 @@ services:
       WORKER_LOG_RETENTION_MAX_ROWS: ${WORKER_LOG_RETENTION_MAX_ROWS:-20000}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      # Self-hosted VL endpoints (vLLM/Ollama/LiteLLM) sit on private
+      # addresses, which the SSRF-safe fetcher blocks by default -- a working
+      # network route is not enough. List the host (host or host:port), e.g.
+      # '["vl.internal:8000"]' -- JSON list string, same convention as
+      # IMPORT_PRIVATE_HOST_ALLOWLIST.
+      VL_PRIVATE_HOST_ALLOWLIST: ${VL_PRIVATE_HOST_ALLOWLIST:-[]}
       # Confluence import: the crawl runs on this worker, so it needs the
       # same IMPORT_* settings as the backend (which only validates/tests).
       IMPORT_ENABLED: ${IMPORT_ENABLED:-true}

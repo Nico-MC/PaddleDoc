@@ -419,6 +419,7 @@ PaddleDoc is built to run inside your own network. What is wired in by default:
 
 - `SECRET_KEY` is what makes the stored third-party credentials readable. Set it once via `scripts/init-env.sh` (or your secret manager) and keep it — rotating it invalidates every stored OIDC client secret, import credential and VL API key, and they have to be entered again.
 - Self-hosted VL endpoints (vLLM, Ollama, LiteLLM) live on private addresses, which `safe_fetch` blocks by default. List them in `VL_PRIVATE_HOST_ALLOWLIST` (`["vl.internal:8000"]`), the same way `IMPORT_PRIVATE_HOST_ALLOWLIST` works for an internal Confluence. Cloud-metadata addresses stay blocked either way.
+- Any private-address target needs an app-level allowlist on top of the firewall rule: an internal Confluence in `IMPORT_PRIVATE_HOST_ALLOWLIST`, a self-hosted OpenWebUI in `OPENWEBUI_PRIVATE_HOST_ALLOWLIST`. A host that is reachable from inside the pod is still rejected with `resolves to a blocked address` until it is listed. Set it on the backend *and* the worker and restart both — see [docs/firewall-requirements.md](docs/firewall-requirements.md#privateinternal-targets-need-an-app-level-allowlist-too).
 
 To report a vulnerability, please open a GitHub Security Advisory rather than a public issue.
 

@@ -132,6 +132,10 @@ spec:
               value: {{ .Values.openwebui.enabled | quote }}
             - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
               value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            # `openai_vision` profile: the outbound call to the VL endpoint is
+            # made here.
+            - name: VL_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.vl.privateHostAllowlist | toJson | quote }}
             {{- with .Values.worker.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

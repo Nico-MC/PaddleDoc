@@ -111,6 +111,11 @@ spec:
               value: {{ .Values.openwebui.enabled | quote }}
             - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
               value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            # Admin "test VL connection" probe (POST /auth/admin/vl-connections/
+            # {id}/test) runs here; the OCR call using the same endpoint runs
+            # on the worker, which sets this too.
+            - name: VL_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.vl.privateHostAllowlist | toJson | quote }}
           livenessProbe:
             httpGet:
               path: /api/v1/health
