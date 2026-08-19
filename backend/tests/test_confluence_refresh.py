@@ -165,6 +165,30 @@ def _make_refresh_run(owner_id: str, source_id: str, *, scope_value: str) -> str
         db.close()
 
 
+def _make_normal_run(owner_id: str, source_id: str, *, scope_value: str) -> str:
+    """A plain (non-refresh) run, i.e. what POST /import/runs creates."""
+    db = _db()
+    try:
+        run = ImportRun(
+            source_id=source_id,
+            owner_id=owner_id,
+            kind='confluence',
+            scope_type='page',
+            scope_value=scope_value,
+            options={
+                'max_pages': 50, 'max_depth': 10, 'include_attachments': True, 'ocr_attachments': False,
+                'ocr_profile_id': None, 'folder': '', 'subfolder': '', 'tags': [], 'email': '',
+                'is_refresh': False,
+            },
+            state={'frontier': [[scope_value, 0]], 'visited': {}, 'errors': []},
+        )
+        db.add(run)
+        db.commit()
+        return run.id
+    finally:
+        db.close()
+
+
 def _make_prior_job(owner_id: str, page_id: str, *, version: int, document_version: int = 1, import_run_id: str | None = None) -> str:
     db = _db()
     try:
@@ -456,3 +480,40 @@ def test_first_refresh_seeds_page_states_from_historical_jobs(sent, client_holde
     assert state_row is not None
     assert state_row.page_version == 2
     assert state_row.job_id == historical_job_id
+
+
+def test_normal_run_writes_page_state_referencing_its_own_new_job(sent, client_holder) -> None:
+    """A first-time import must INSERT the page-state row pointing at the job
+    it just created -- in the same transaction as that job's own INSERT.
+
+    ImportPageState has the raw jobs.id FK but no relationship() to Job, so
+    SQLAlchemy's unit of work does not know the two are ordered and writes
+    import_page_states first unless _import_one_page flushes the job. That
+    made every page of every import fail on PostgreSQL with
+    ForeignKeyViolation on import_page_states_job_id_fkey, while SQLite --
+    which ignores foreign keys unless conftest pins PRAGMA foreign_keys=ON --
+    happily stored the dangling reference.
+    """
+    owner = _make_owner()
+    source_id = _make_source(owner.id)
+    page_id = 'P1'
+    assert _get_page_state(source_id, page_id) is None
+
+    client_holder['client'] = FakeClient(_page(page_id, 'Root Page', '<p>body</p>', version=7))
+
+    run_id = _make_normal_run(owner.id, source_id, scope_value=page_id)
+    import_confluence(run_id, 0)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.state['errors'] == []
+    assert run.pages_failed == 0
+    assert run.pages_imported == 1
+
+    new_job_id = run.state['visited'][page_id]
+    state_row = _get_page_state(source_id, page_id)
+    assert state_row is not None
+    assert state_row.page_version == 7
+    # The FK actually resolves -- the referenced job row is really there.
+    assert state_row.job_id == new_job_id
+    assert _get_job(new_job_id) is not None

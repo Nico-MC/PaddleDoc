@@ -19,7 +19,7 @@ same client.
 import time
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
@@ -32,6 +32,21 @@ from app.services.security import hash_password
 TEST_DB = 'sqlite:///./test.db'
 engine = create_engine(TEST_DB, future=True)
 TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+@event.listens_for(engine, 'connect')
+def _enforce_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+    """SQLite ignores every FOREIGN KEY constraint unless this pragma is set
+    per connection; PostgreSQL -- the only database this app is deployed
+    against -- always enforces them. Without it the test suite silently
+    accepts writes that abort a real transaction, which is exactly how the
+    Confluence importer shipped an ImportPageState row referencing a jobs
+    row that SQLAlchemy had not inserted yet: green here, ForeignKeyViolation
+    on every imported page in production. Keep this on.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute('PRAGMA foreign_keys=ON')
+    cursor.close()
 
 
 Base.metadata.drop_all(bind=engine)

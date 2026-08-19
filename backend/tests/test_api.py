@@ -26,8 +26,28 @@ _TEST_ADMIN_USER = User(
 )
 
 
+def _ensure_bypass_user_row() -> None:
+    """The bypass identity above is only a detached object, but every Job
+    these tests create stores it in jobs.owner_id -- a real FOREIGN KEY.
+    SQLite only enforces it because conftest pins PRAGMA foreign_keys=ON (as
+    PostgreSQL always does), so the row has to actually exist."""
+    with TestingSessionLocal() as db:
+        if db.get(User, _TEST_ADMIN_USER.id) is None:
+            db.add(
+                User(
+                    id=_TEST_ADMIN_USER.id,
+                    username=_TEST_ADMIN_USER.username,
+                    email=_TEST_ADMIN_USER.email,
+                    role=UserRole.ADMIN,
+                    is_active=True,
+                )
+            )
+            db.commit()
+
+
 @pytest.fixture(autouse=True)
 def _bypass_auth():
+    _ensure_bypass_user_row()
     app.dependency_overrides[get_current_user] = lambda: _TEST_ADMIN_USER
     yield
     app.dependency_overrides.pop(get_current_user, None)

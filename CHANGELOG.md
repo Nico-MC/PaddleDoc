@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the backend health check fails
 
 ### Fixed
+- Every page of every Confluence import failed on PostgreSQL with
+  `ForeignKeyViolation: import_page_states_job_id_fkey`. `ImportPageState` carries the raw
+  `jobs.id` foreign key but no `relationship()` to `Job`, so SQLAlchemy's unit of work saw no
+  ordering between the two mappers and wrote `import_page_states` *before* the `jobs` INSERT
+  of the very job the row points at. The importer now flushes the job row before the
+  page-state upsert. It stayed invisible because SQLite ignores foreign keys unless
+  `PRAGMA foreign_keys=ON` is set per connection, so the test suite stored the dangling
+  reference without complaint -- the suite now pins that pragma, matching PostgreSQL, and
+  `import_page_states.job_id` was the only FK column in the schema lacking a relationship
 - The API token form under Settings put its two inputs on different baselines: the
   "Expires in (days)" field carried a `hint`, which `Field` renders as an extra block below
   the input and which the row's `items-end` alignment then pushed the input up against. The

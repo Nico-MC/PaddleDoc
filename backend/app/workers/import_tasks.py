@@ -696,6 +696,16 @@ def _import_one_page(
         },
     )
     db.add(job)
+    # Flush the job row NOW, before the ImportPageState upsert below writes
+    # its id into import_page_states.job_id. ImportPageState carries the raw
+    # FK column but no relationship() to Job, so SQLAlchemy's unit of work
+    # sees no dependency between the two mappers and orders the
+    # import_page_states write BEFORE the jobs INSERT -- which Postgres
+    # rejects with a ForeignKeyViolation on every single imported page.
+    # (SQLite silently accepts the dangling reference unless
+    # PRAGMA foreign_keys=ON, which is why the test suite pins that on; see
+    # tests/conftest.py.)
+    db.flush()
     _attach_tags(db, job, options.get('tags') or [])
 
     # Upsert ImportPageState -- spec AUFGABE 2/5: written for BOTH normal
