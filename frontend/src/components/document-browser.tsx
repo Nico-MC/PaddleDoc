@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, Mail, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import { Download, LoaderCircle, Mail, RefreshCcw, RotateCcw, Trash2, UploadCloud } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 import { peekCached, setCached, useVisiblePolling } from '@/lib/data-cache';
@@ -205,6 +206,7 @@ export function DocumentBrowser({
   const [sortKey, setSortKey] = useState<SortKey>('created');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
+  const [pushDialogJob, setPushDialogJob] = useState<Job | null>(null);
 
   const markJobsQueued = (predicate: (job: Job) => boolean) => {
     setItems((current) =>
@@ -853,6 +855,19 @@ export function DocumentBrowser({
                             {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
                           </Button>
                         )}
+                        {job.status === 'FINISHED' && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            onClick={() => setPushDialogJob(job)}
+                            aria-label={`Push ${job.original_filename} to OpenWebUI`}
+                            title="Push to OpenWebUI"
+                          >
+                            <UploadCloud className="h-4 w-4 text-emerald-700" />
+                          </Button>
+                        )}
                         {allowDelete && (
                           <Button
                             type="button"
@@ -922,6 +937,13 @@ export function DocumentBrowser({
             </div>
           </div>
         </div>
+      )}
+
+      {pushDialogJob && (
+        <OpenWebUIPushDialog
+          jobs={[{ id: pushDialogJob.id, label: pushDialogJob.original_filename }]}
+          onClose={() => setPushDialogJob(null)}
+        />
       )}
     </div>
   );

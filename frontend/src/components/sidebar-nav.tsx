@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Menu, X, Cpu, FolderOpen, Gauge, Mail, Settings, Shield, LogOut } from 'lucide-react';
+import { Home, Menu, X, Cpu, FolderOpen, Gauge, Mail, Settings, Shield, LogOut, UploadCloud } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
@@ -13,6 +13,7 @@ const links = [
   { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
   { href: '/mail', label: 'Mail', icon: Mail, description: 'API-ingested messages' },
   { href: '/benchmark', label: 'Benchmark', icon: Gauge },
+  { href: '/openwebui', label: 'OpenWebUI', icon: UploadCloud },
 ];
 
 export function SidebarNav() {

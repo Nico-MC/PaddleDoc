@@ -5,9 +5,12 @@ import Link from 'next/link';
 import { ChevronDown, ChevronRight, LoaderCircle, Pencil, Plus, RefreshCcw, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Toggle } from '@/components/admin/admin-shared';
 import { ApiError, apiJson } from '@/lib/api';
 import { formatBytes } from '@/components/dashboard/shared';
 import {
+  REFRESH_INTERVAL_OPTIONS,
+  formatRefreshInterval,
   type ImportRun,
   type ImportRunListResponse,
   type ImportSource,
@@ -85,6 +88,26 @@ export default function ImportsPage() {
       setSourcesMessage(null);
     } catch (error) {
       setSourcesMessage(error instanceof ApiError ? error.detail : 'Failed to rename source.');
+    } finally {
+      setBusySourceId(null);
+    }
+  };
+
+  const updateSourceRefresh = async (
+    source: ImportSource,
+    patch: { refresh_enabled?: boolean; refresh_interval_seconds?: number },
+  ) => {
+    setBusySourceId(source.id);
+    try {
+      const updated = await apiJson<ImportSource>(`/api/v1/import/sources/${source.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      setSources((current) => current.map((entry) => (entry.id === source.id ? updated : entry)));
+      setSourcesMessage(null);
+    } catch (error) {
+      setSourcesMessage(error instanceof ApiError ? error.detail : 'Failed to update auto-refresh.');
     } finally {
       setBusySourceId(null);
     }
@@ -243,6 +266,48 @@ export default function ImportsPage() {
                     <p className="mt-0.5 truncate text-xs text-slate-500">
                       {source.base_url} · {source.auth_type === 'cloud_basic' ? 'Cloud (email + API token)' : 'Personal access token'}
                     </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-3">
+                      <Toggle
+                        checked={source.refresh_enabled ?? false}
+                        onChange={(next) => void updateSourceRefresh(source, { refresh_enabled: next })}
+                        label="Auto-refresh"
+                        disabled={busySourceId === source.id}
+                      />
+                      <select
+                        value={source.refresh_interval_seconds ?? REFRESH_INTERVAL_OPTIONS[2].value}
+                        onChange={(event) =>
+                          void updateSourceRefresh(source, { refresh_interval_seconds: Number(event.target.value) })
+                        }
+                        disabled={!(source.refresh_enabled ?? false) || busySourceId === source.id}
+                        className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-950 disabled:opacity-50"
+                      >
+                        {/* Covers the server's own floor default (e.g. 900s), which the
+                            toggle-only enable path sets without going through this select --
+                            without it, `value` above would match none of the options below
+                            and the control would render blank. */}
+                        {source.refresh_interval_seconds != null &&
+                          !REFRESH_INTERVAL_OPTIONS.some((option) => option.value === source.refresh_interval_seconds) && (
+                            <option value={source.refresh_interval_seconds}>
+                              {formatRefreshInterval(source.refresh_interval_seconds)}
+                            </option>
+                          )}
+                        {REFRESH_INTERVAL_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {(source.refresh_enabled ?? false) && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        {source.last_refresh_at
+                          ? `Last refreshed ${new Date(source.last_refresh_at).toLocaleString()}`
+                          : 'Not refreshed yet.'}
+                      </p>
+                    )}
+                    {source.last_refresh_error && (
+                      <p className="mt-1 text-xs text-red-600">{source.last_refresh_error}</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <span

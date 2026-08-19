@@ -25,6 +25,10 @@ class ImportSourceUpdateRequest(BaseModel):
     auth_username: str | None = Field(default=None, max_length=320)
     # Write-only update: omitted or empty keeps the stored credential.
     credential: str | None = Field(default=None, max_length=4096)
+    # Periodic re-crawl toggle/cadence -- server-clamped to
+    # >= settings.confluence_refresh_min_interval_seconds, never raised.
+    refresh_enabled: bool | None = None
+    refresh_interval_seconds: int | None = Field(default=None, ge=1)
 
 
 class ImportSourceResponse(BaseModel):
@@ -38,6 +42,10 @@ class ImportSourceResponse(BaseModel):
     has_credential: bool = True
     last_validated_at: datetime | None = None
     created_at: datetime
+    refresh_enabled: bool = False
+    refresh_interval_seconds: int | None = None
+    last_refresh_at: datetime | None = None
+    last_refresh_error: str | None = None
 
     model_config = {'from_attributes': True}
 

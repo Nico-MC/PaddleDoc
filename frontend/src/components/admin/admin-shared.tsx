@@ -170,18 +170,23 @@ export function Toggle({
   checked,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label: string;
+  /** Blocks pointer AND keyboard activation (native `disabled`, not just a pointer-events CSS hack). */
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-disabled={disabled}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="flex items-center gap-2.5"
+      className="flex items-center gap-2.5 disabled:pointer-events-none disabled:opacity-50"
     >
       <span
         className={`relative inline-block h-5 w-9 flex-shrink-0 rounded-full transition ${

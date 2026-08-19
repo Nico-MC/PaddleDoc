@@ -126,6 +126,12 @@ class Job(Base):
     import_run: Mapped['ImportRun | None'] = relationship(back_populates='jobs')
     benchmark_run: Mapped['BenchmarkRun | None'] = relationship(back_populates='jobs')
     mail_message: Mapped['MailMessage | None'] = relationship(back_populates='jobs')
+    # CASCADE at the DB level (job_id FK below) + ORM cascade so a deleted
+    # job's push history disappears with it on sqlite too (no PRAGMA
+    # foreign_keys there -- same reasoning as markdown_versions/artifacts).
+    openwebui_pushes: Mapped[list['OpenWebUIPush']] = relationship(
+        back_populates='job', cascade='all, delete-orphan'
+    )
 
 
 class JobMarkdownVersion(Base):
@@ -310,6 +316,8 @@ class User(Base):
     benchmark_runs: Mapped[list['BenchmarkRun']] = relationship(back_populates='owner')
     api_tokens: Mapped[list['ApiToken']] = relationship(back_populates='user', cascade='all, delete-orphan')
     mail_messages: Mapped[list['MailMessage']] = relationship(back_populates='owner')
+    openwebui_connections: Mapped[list['OpenWebUIConnection']] = relationship(back_populates='owner')
+    openwebui_pushes: Mapped[list['OpenWebUIPush']] = relationship(back_populates='owner')
 
 
 # Case-insensitive uniqueness on email. Declared after the class body (not in
@@ -447,6 +455,16 @@ class ImportSource(Base):
     # Set by EVERY /test attempt (success or failure) -- DB-backed cooldown
     # anchor that holds even when the Redis rate limiter fails open.
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- Confluence refresh (periodic re-crawl to pick up upstream edits;
+    # the tick/dispatch logic itself lives elsewhere -- this source is only
+    # the on/off switch + cadence + last-attempt bookkeeping). Server-clamped
+    # to >= settings.confluence_refresh_min_interval_seconds by
+    # PATCH /import/sources/{id}, same clamp-never-raise discipline as
+    # max_pages/max_depth on run creation.
+    refresh_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default='0', nullable=False)
+    refresh_interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_refresh_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
@@ -454,6 +472,10 @@ class ImportSource(Base):
 
     owner: Mapped[User] = relationship(back_populates='import_sources')
     runs: Mapped[list['ImportRun']] = relationship(back_populates='source')
+    # CASCADE at the DB level (source_id FK below) + ORM cascade so a
+    # deleted source's page-state rows disappear with it on sqlite too (no
+    # PRAGMA foreign_keys there -- same reasoning as Job.markdown_versions).
+    page_states: Mapped[list['ImportPageState']] = relationship(back_populates='source', cascade='all, delete-orphan')
 
 
 class ImportRun(Base):
@@ -518,6 +540,42 @@ class ImportRun(Base):
     source: Mapped[ImportSource | None] = relationship(back_populates='runs')
     owner: Mapped[User | None] = relationship(back_populates='import_runs')
     jobs: Mapped[list[Job]] = relationship(back_populates='import_run')
+
+
+class ImportPageState(Base):
+    """Last-known state of one Confluence page under a source, kept for the
+    periodic refresh crawl (see ImportSource.refresh_enabled) to detect
+    upstream edits without re-fetching every page's body on every tick: a
+    page whose remote `version` still matches `page_version` here is
+    unchanged and can be skipped.
+
+    One row per (source_id, page_id) -- upserted by the refresh logic (not
+    built by this change; this table is schema-only here). `job_id` points
+    at the Job row the page was last imported into (SET NULL, not CASCADE:
+    losing the state row must not take an already-useful Job down with it).
+    """
+
+    __tablename__ = 'import_page_states'
+    __table_args__ = (
+        UniqueConstraint('source_id', 'page_id', name='uq_import_page_states_source_id_page_id'),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    source_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey('import_sources.id', ondelete='CASCADE'), nullable=False, index=True
+    )
+    page_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    page_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('jobs.id', ondelete='SET NULL'), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(512), default='', server_default='', nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), default='', server_default='', nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    source: Mapped[ImportSource] = relationship(back_populates='page_states')
 
 
 class BenchmarkRun(Base):
@@ -726,3 +784,96 @@ class WorkerLogEntry(Base):
     task_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     exc_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OpenWebUIConnection(Base):
+    """A saved OpenWebUI connection: base URL + write-only API key, used to
+    push a job's markdown into one of the target instance's knowledge
+    collections (see app/services/openwebui.py, app/workers/openwebui_tasks.py).
+
+    `api_key_encrypted` is Fernet-encrypted at rest with a key derived via
+    HKDF-SHA256(SECRET_KEY, info="openwebui-connection-api-key") -- see
+    app/services/security.py. The key is write-only at the API: no response
+    schema carries it (only a `has_api_key` boolean), and it is decrypted
+    only inside GET .../knowledge, POST .../test, and the push worker task.
+    Unlike ImportSource (CASCADE on owner delete -- a Confluence credential
+    must not survive its owner), this is SET NULL: pushes already made under
+    a connection stay attributable (via OpenWebUIPush.connection_name) even
+    after the connection or its owner is gone.
+    """
+
+    __tablename__ = 'openwebui_connections'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Normalized, no trailing slash, e.g. https://openwebui.internal.example.com
+    base_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    owner: Mapped[User | None] = relationship(back_populates='openwebui_connections')
+    # No cascade -- ondelete=SET NULL at the DB level, same pattern as
+    # ImportRun.jobs/BenchmarkRun.jobs/MailMessage.jobs: history outlives the
+    # connection it was made under.
+    pushes: Mapped[list['OpenWebUIPush']] = relationship(back_populates='connection')
+
+
+class OpenWebUIPush(Base):
+    """One push attempt of a job's current markdown into an OpenWebUI
+    knowledge collection: upload -> wait for processing -> attach to the
+    collection -> best-effort remove the previous push's file (see
+    app/workers/openwebui_tasks.py for the full sequence).
+
+    `connection_name`/`knowledge_name` are snapshots taken at creation time
+    so history stays readable after the connection is deleted or the
+    knowledge collection is renamed/removed upstream -- the live values (if
+    the connection still exists) are what GET .../knowledge returns.
+    `pushed_content_sha256` is set only on a finished push and is compared
+    against sha256(the job's CURRENT markdown) at read time to derive
+    content_stale (see app/schemas/openwebui.py) -- never stored as a
+    boolean, so it stays correct even if the job is edited after the push.
+    """
+
+    __tablename__ = 'openwebui_pushes'
+    __table_args__ = (
+        Index('ix_openwebui_pushes_job_id_created_at', 'job_id', 'created_at'),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('openwebui_connections.id', ondelete='SET NULL'), nullable=True
+    )
+    connection_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey('jobs.id', ondelete='CASCADE'), nullable=False, index=True
+    )
+    knowledge_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    knowledge_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 'pending' | 'running' | 'finished' | 'failed' -- plain String (not a
+    # native/CHECK enum, unlike JobStatus/ImportRunStatus) since nothing
+    # here needs DB-level validation beyond what the worker/API already do.
+    status: Mapped[str] = mapped_column(String(16), default='pending', server_default='pending', nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    openwebui_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The prior push's openwebui_file_id, once this push's success removed it
+    # from OpenWebUI (best-effort; see app/workers/openwebui_tasks.py). NULL
+    # when there was no predecessor to replace, or the replace never ran.
+    replaced_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pushed_content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    connection: Mapped[OpenWebUIConnection | None] = relationship(back_populates='pushes')
+    job: Mapped[Job] = relationship(back_populates='openwebui_pushes')
+    owner: Mapped[User | None] = relationship(back_populates='openwebui_pushes')

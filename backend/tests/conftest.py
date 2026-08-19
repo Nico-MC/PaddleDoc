@@ -48,7 +48,11 @@ Base.metadata.create_all(bind=engine)
 # `get_db` is overridden above.
 class _FakeRedis:
     def __init__(self) -> None:
-        self._counts: dict[str, int] = {}
+        # Shared by both the INCR-based rate limiter and the SET NX EX-based
+        # cooldown (see app/api/openwebui_routes.py._check_test_cooldown) --
+        # one flat key/value store, same as a real Redis instance; keys() /
+        # delete() below deliberately don't care which call created a key.
+        self._counts: dict[str, int | str] = {}
         self._expires_at: dict[str, float] = {}
 
     def _evict_if_expired(self, key: str) -> None:
@@ -65,6 +69,32 @@ class _FakeRedis:
     def expire(self, key: str, seconds: int) -> bool:
         self._expires_at[key] = time.time() + seconds
         return True
+
+    def set(self, key: str, value, nx: bool = False, ex: int | None = None):
+        """Minimal SET [NX] [EX seconds]: returns True if the key was set,
+        None if nx=True and the key already existed -- mirrors redis-py's
+        return contract closely enough for the cooldown's own truthiness
+        check."""
+        self._evict_if_expired(key)
+        if nx and key in self._counts:
+            return None
+        self._counts[key] = value
+        if ex is not None:
+            self._expires_at[key] = time.time() + ex
+        else:
+            self._expires_at.pop(key, None)
+        return True
+
+    def ttl(self, key: str) -> int:
+        """Seconds remaining before expiry; -2 if the key doesn't exist, -1
+        if it has no expiry -- mirrors redis-py's TTL contract."""
+        self._evict_if_expired(key)
+        if key not in self._counts:
+            return -2
+        expires_at = self._expires_at.get(key)
+        if expires_at is None:
+            return -1
+        return max(int(expires_at - time.time()), 0)
 
     def keys(self, pattern: str) -> list[str]:
         prefix = pattern[:-1] if pattern.endswith('*') else pattern

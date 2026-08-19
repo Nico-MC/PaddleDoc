@@ -565,3 +565,152 @@ def test_0009_mail_ingestion_migration_upgrade_downgrade_round_trip(tmp_path, mo
     tables = set(insp.get_table_names())
     assert 'mail_messages' in tables
     assert 'mail_message_id' in {c['name'] for c in insp.get_columns('jobs')}
+
+
+def test_0010_openwebui_migration_upgrade_downgrade_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0010.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade (through 0004-0009 to 0010 for real, same reasoning as the
+    # 0009 test -- openwebui_pushes/import_page_states both FK onto `jobs`
+    # and `users`, which only physically exist after the real chain runs):
+    # openwebui_connections + openwebui_pushes + import_page_states +
+    # import_sources refresh columns ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('openwebui_connections', 'openwebui_pushes', 'import_page_states'):
+        assert expected in tables, f'{expected} missing after upgrade'
+
+    conn_columns = {c['name'] for c in insp.get_columns('openwebui_connections')}
+    assert {'id', 'name', 'base_url', 'api_key_encrypted', 'owner_id', 'created_at', 'updated_at'} <= conn_columns
+
+    push_columns = {c['name'] for c in insp.get_columns('openwebui_pushes')}
+    assert {
+        'id', 'connection_id', 'connection_name', 'job_id', 'knowledge_id', 'knowledge_name', 'status',
+        'error_message', 'openwebui_file_id', 'replaced_file_id', 'pushed_content_sha256', 'owner_id',
+        'created_at', 'updated_at',
+    } <= push_columns
+
+    page_state_columns = {c['name'] for c in insp.get_columns('import_page_states')}
+    assert {'id', 'source_id', 'page_id', 'page_version', 'job_id', 'title', 'url', 'updated_at'} <= page_state_columns
+
+    source_columns = {c['name'] for c in insp.get_columns('import_sources')}
+    assert {'refresh_enabled', 'refresh_interval_seconds', 'last_refresh_at', 'last_refresh_error'} <= source_columns
+
+    conn_fks = insp.get_foreign_keys('openwebui_connections')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in conn_fks
+    ), conn_fks
+
+    push_fks = insp.get_foreign_keys('openwebui_pushes')
+    assert any(
+        fk['referred_table'] == 'openwebui_connections' and fk['constrained_columns'] == ['connection_id']
+        for fk in push_fks
+    ), push_fks
+    assert any(fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['job_id'] for fk in push_fks), push_fks
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in push_fks
+    ), push_fks
+
+    page_state_fks = insp.get_foreign_keys('import_page_states')
+    assert any(
+        fk['referred_table'] == 'import_sources' and fk['constrained_columns'] == ['source_id']
+        for fk in page_state_fks
+    ), page_state_fks
+    assert any(
+        fk['referred_table'] == 'jobs' and fk['constrained_columns'] == ['job_id'] for fk in page_state_fks
+    ), page_state_fks
+
+    push_indexes = {ix['name'] for ix in insp.get_indexes('openwebui_pushes')}
+    assert {
+        'ix_openwebui_pushes_job_id', 'ix_openwebui_pushes_owner_id', 'ix_openwebui_pushes_job_id_created_at',
+    } <= push_indexes
+    assert 'ix_import_page_states_source_id' in {ix['name'] for ix in insp.get_indexes('import_page_states')}
+
+    page_state_uniques = {uc['name'] for uc in insp.get_unique_constraints('import_page_states')}
+    assert 'uq_import_page_states_source_id_page_id' in page_state_uniques
+
+    # The batch_alter_table rebuild of import_sources must not have dropped
+    # earlier columns/FKs.
+    source_fks = insp.get_foreign_keys('import_sources')
+    assert any(
+        fk['referred_table'] == 'users' and fk['constrained_columns'] == ['owner_id'] for fk in source_fks
+    ), source_fks
+
+    # --- exercise the new columns/tables with real rows: refresh_enabled's
+    # server_default backfills to false, and UNIQUE(source_id, page_id)
+    # rejects a duplicate (same discipline as the 0004 email-uniqueness and
+    # 0009 owner_id/content_sha256 checks above) ---
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO users (id, username, email, role, is_active, created_at, updated_at) "
+            "VALUES ('u-openwebui', 'owui', 'owui@example.com', 'user', 1, '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO jobs (id, original_filename, upload_path, status, created_at, updated_at, document_version) "
+            "VALUES ('j-openwebui', 'doc.pdf', '/tmp/doc.pdf', 'FINISHED', '2026-01-01', '2026-01-01', 1)"
+        ))
+        conn.execute(text(
+            "INSERT INTO openwebui_connections (id, name, base_url, api_key_encrypted, owner_id, created_at, updated_at) "
+            "VALUES ('c-openwebui', 'OWUI', 'https://owui.example.com', 'enc', 'u-openwebui', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO openwebui_pushes "
+            "(id, connection_id, connection_name, job_id, knowledge_id, knowledge_name, status, owner_id, created_at, updated_at) "
+            "VALUES ('p-openwebui', 'c-openwebui', 'OWUI', 'j-openwebui', 'kb1', 'Docs', 'pending', 'u-openwebui', '2026-01-01', '2026-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO import_sources "
+            "(id, owner_id, name, base_url, server_kind, api_base_path, auth_type, auth_username, credential_encrypted, created_at, updated_at) "
+            "VALUES ('s-openwebui', 'u-openwebui', 'Confluence', 'https://conf.example.com', '', '', 'pat_bearer', '', 'enc', '2026-01-01', '2026-01-01')"
+        ))
+        refresh_enabled = conn.execute(
+            text("SELECT refresh_enabled FROM import_sources WHERE id = 's-openwebui'")
+        ).scalar_one()
+        assert refresh_enabled in (0, False)
+
+        conn.execute(text(
+            "INSERT INTO import_page_states (id, source_id, page_id, page_version, job_id, title, url, updated_at) "
+            "VALUES ('ps-openwebui', 's-openwebui', '123', 3, 'j-openwebui', 'A page', 'https://conf.example.com/x', '2026-01-01')"
+        ))
+        try:
+            conn.execute(text(
+                "INSERT INTO import_page_states (id, source_id, page_id, page_version, title, url, updated_at) "
+                "VALUES ('ps-openwebui-dup', 's-openwebui', '123', 4, 'dup', '', '2026-01-01')"
+            ))
+        except Exception:
+            pass
+        else:
+            raise AssertionError('duplicate (source_id, page_id) was not rejected')
+
+    # --- downgrade one revision: only the 0010 additions should disappear ---
+    command.downgrade(cfg, '0009_mail_ingestion')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for removed in ('openwebui_connections', 'openwebui_pushes', 'import_page_states'):
+        assert removed not in tables, f'{removed} still present after downgrade'
+    source_columns = {c['name'] for c in insp.get_columns('import_sources')}
+    assert not ({'refresh_enabled', 'refresh_interval_seconds', 'last_refresh_at', 'last_refresh_error'} & source_columns)
+    # 0009's schema must survive a 0010-only downgrade untouched.
+    assert 'mail_messages' in tables
+    job_columns = {c['name'] for c in insp.get_columns('jobs')}
+    assert 'mail_message_id' in job_columns
+
+    # --- re-upgrade: should cleanly re-apply from the 0009 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    for expected in ('openwebui_connections', 'openwebui_pushes', 'import_page_states'):
+        assert expected in tables
+    source_columns = {c['name'] for c in insp.get_columns('import_sources')}
+    assert {'refresh_enabled', 'refresh_interval_seconds', 'last_refresh_at', 'last_refresh_error'} <= source_columns

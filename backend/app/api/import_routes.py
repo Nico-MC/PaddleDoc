@@ -249,6 +249,26 @@ def update_import_source(
     if source.auth_type == ImportAuthType.PAT_BEARER:
         source.auth_username = ''
 
+    if payload.refresh_enabled is not None:
+        source.refresh_enabled = payload.refresh_enabled
+    if payload.refresh_interval_seconds is not None:
+        # Server-side clamp: a client-supplied value can only raise the
+        # interval, never lower it below the configured floor (same
+        # clamp-never-widen discipline as max_pages/max_depth on run
+        # creation, just in the opposite direction -- here the client-
+        # unfriendly bound is a MINIMUM, not a maximum).
+        source.refresh_interval_seconds = max(
+            payload.refresh_interval_seconds, settings.confluence_refresh_min_interval_seconds
+        )
+    if source.refresh_enabled and source.refresh_interval_seconds is None:
+        # refresh_interval_seconds=null (i.e. never supplied by any PATCH)
+        # while enabled=true defaults to the floor -- keeps the column
+        # concrete for the tick's due-source scan (refresh_tasks.py
+        # defensively re-derives this same fallback too, but there is no
+        # reason to leave it implicit in the persisted/returned value when
+        # the source is actually active).
+        source.refresh_interval_seconds = settings.confluence_refresh_min_interval_seconds
+
     if connection_changed:
         # A changed URL/auth invalidates the previous detection result until
         # the next successful /test.
