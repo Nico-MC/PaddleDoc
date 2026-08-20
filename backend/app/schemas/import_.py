@@ -139,6 +139,14 @@ class ImportRunJobSummary(BaseModel):
 
 
 class ImportRunDetailResponse(ImportRunResponse):
+    # Needed to prefill the "edit & run again" wizard; the source may since
+    # have been deleted (source_id goes NULL on delete, runs keep history).
+    source_id: str | None = None
+    # The persisted options snapshot (see ImportRun.options). Extra keys
+    # written by other run kinds -- e.g. is_refresh on auto-refresh runs --
+    # are ignored by ImportRunOptions.model_validate (Pydantic's default
+    # extra='ignore' for dict input).
+    options: ImportRunOptions = Field(default_factory=ImportRunOptions)
     current_page_title: str = ''
     error_message: str | None = None
     cancel_requested: bool = False

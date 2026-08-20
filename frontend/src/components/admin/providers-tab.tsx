@@ -92,6 +92,7 @@ export function ProvidersTab() {
                       <Badge tone={p.client_secret_set ? 'emerald' : 'amber'}>
                         {p.client_secret_set ? 'Secret set' : 'No secret'}
                       </Badge>
+                      {p.use_email_as_username && <Badge tone="slate">Email as username</Badge>}
                     </div>
                     <dl className="mt-2 space-y-1 text-xs text-slate-500">
                       <div className="flex gap-2">
@@ -253,6 +254,7 @@ function ProviderModal({
   const [clientSecret, setClientSecret] = useState('');
   const [scopes, setScopes] = useState(provider?.scopes ?? DEFAULT_SCOPES);
   const [enabled, setEnabled] = useState(provider?.enabled ?? false);
+  const [useEmailAsUsername, setUseEmailAsUsername] = useState(provider?.use_email_as_username ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -268,6 +270,7 @@ function ProviderModal({
           client_id: clientId.trim(),
           scopes: scopes.trim(),
           enabled,
+          use_email_as_username: useEmailAsUsername,
           ...(clientSecret ? { client_secret: clientSecret } : {}),
         };
         await apiJson<AdminProvider>(`/api/v1/auth/admin/providers/${provider.id}`, {
@@ -284,6 +287,7 @@ function ProviderModal({
           client_secret: clientSecret,
           scopes: scopes.trim(),
           enabled,
+          use_email_as_username: useEmailAsUsername,
         };
         await apiJson<AdminProvider>('/api/v1/auth/admin/providers', {
           method: 'POST',
@@ -364,6 +368,18 @@ function ProviderModal({
           />
         </Field>
         <Toggle checked={enabled} onChange={setEnabled} label="Enabled" />
+        <div>
+          <Toggle
+            checked={useEmailAsUsername}
+            onChange={setUseEmailAsUsername}
+            label="Use email as username"
+          />
+          <p className="mt-1.5 text-xs text-slate-500">
+            For providers like Microsoft Entra whose preferred_username is a UPN: the account&apos;s username —
+            shown in the sidebar and usable for sign-in — becomes the email address. Applies on first login and
+            renames existing accounts on their next login.
+          </p>
+        </div>
         <ErrorNotice message={error} />
         <div className="flex justify-end gap-2 pt-1">
           <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={busy}>

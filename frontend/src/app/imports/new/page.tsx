@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { AnimatePresence, motion } from 'framer-motion';
 import { CheckCircle2, LoaderCircle, XCircle } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
@@ -17,6 +17,7 @@ import {
 import {
   type ImportAuthType,
   type ImportRun,
+  type ImportRunDetail,
   type ImportSource,
   type ImportSourceListResponse,
   type ImportSourceTestResponse,
@@ -34,10 +35,41 @@ const WIZARD_STEPS = [
 const SERVER_DEFAULT_MAX_PAGES = 200;
 const SERVER_DEFAULT_MAX_DEPTH = 10;
 
+// The detail endpoint's `options` mirrors ImportRunOptions on the backend
+// (backend/app/schemas/import_.py) -- not yet part of the shared ImportRun
+// type in lib/imports.ts, so it is typed locally to this "prefill" use.
+type ImportRunOptionsPayload = {
+  max_pages: number | null;
+  max_depth: number | null;
+  include_attachments: boolean;
+  ocr_attachments: boolean;
+  ocr_profile_id: string | null;
+  folder: string;
+  subfolder: string;
+  tags: string[];
+  email: string;
+};
+
+type ImportRunDetailWithPrefill = ImportRunDetail & {
+  source_id: string | null;
+  options: ImportRunOptionsPayload;
+};
+
 export default function NewImportPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen" />}>
+      <NewImportPageInner />
+    </Suspense>
+  );
+}
+
+function NewImportPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const prefillFromRunId = searchParams.get('from');
 
   const [wizardStep, setWizardStep] = useState(1);
+  const [prefillNotice, setPrefillNotice] = useState<string | null>(null);
 
   // --- Step 1: connection ---
   const [sources, setSources] = useState<ImportSource[]>([]);
@@ -98,24 +130,63 @@ export default function NewImportPage() {
 
     const loadInitialData = async () => {
       try {
-        const [sourcesPayload, jobsPayload, capabilitiesPayload] = await Promise.all([
+        const [sourcesPayload, jobsPayload, capabilitiesPayload, prefillRun] = await Promise.all([
           apiJson<ImportSourceListResponse>('/api/v1/import/sources', { cache: 'no-store' }),
           apiJson<{ items: Job[] }>('/api/v1/jobs', { cache: 'no-store' }).catch(() => ({ items: [] as Job[] })),
           apiJson<PaddleCapabilities>('/api/v1/paddle/capabilities', { cache: 'no-store' }).catch(
             () => ({ profiles: [] }) as PaddleCapabilities,
           ),
+          prefillFromRunId
+            ? apiJson<ImportRunDetailWithPrefill>(`/api/v1/import/runs/${prefillFromRunId}`, { cache: 'no-store' }).catch(
+                () => null,
+              )
+            : Promise.resolve(null),
         ]);
         if (cancelled) return;
         setSources(sourcesPayload.items);
-        if (sourcesPayload.items.length > 0) {
+
+        const prefillSourceStillExists =
+          prefillRun?.source_id != null && sourcesPayload.items.some((entry) => entry.id === prefillRun.source_id);
+
+        if (prefillRun && prefillSourceStillExists) {
+          setSelectedSourceId(prefillRun.source_id as string);
+        } else if (sourcesPayload.items.length > 0) {
           setSelectedSourceId(sourcesPayload.items[0].id);
         } else {
           setCreatingSource(true);
         }
+
         setFolderOptions((prev) => buildFolderOptions(prev, jobsPayload.items ?? []));
-        setCapabilities({ profiles: capabilitiesPayload.profiles ?? [] });
-        if ((capabilitiesPayload.profiles ?? []).length > 0) {
-          setSelectedProfileId(capabilitiesPayload.profiles[0].value);
+        const profiles = capabilitiesPayload.profiles ?? [];
+        setCapabilities({ profiles });
+        const prefillProfileId = prefillRun?.options.ocr_profile_id ?? null;
+        if (prefillProfileId && profiles.some((profile) => profile.value === prefillProfileId)) {
+          setSelectedProfileId(prefillProfileId);
+        } else if (profiles.length > 0) {
+          setSelectedProfileId(profiles[0].value);
+        }
+
+        if (prefillRun) {
+          setScopeType(prefillRun.scope_type === 'page' ? 'page' : 'space');
+          setScopeValue(prefillRun.scope_value);
+          const options = prefillRun.options;
+          setMaxPages(options.max_pages != null ? String(options.max_pages) : '');
+          setMaxDepth(options.max_depth != null ? String(options.max_depth) : '');
+          setIncludeAttachments(options.include_attachments);
+          setOcrAttachments(options.ocr_attachments);
+          setFolder(options.folder ?? '');
+          setSubfolder(options.subfolder ?? '');
+          setTags((options.tags ?? []).join(', '));
+          setEmail(options.email ?? '');
+          if (prefillSourceStillExists) {
+            setWizardStep(3);
+            setPrefillNotice('Prefilled from a previous run — adjust anything and start.');
+          } else {
+            setConnectionMessage('The connection this run used no longer exists.');
+            setPrefillNotice('Prefilled from a previous run — adjust anything and start.');
+          }
+        } else if (prefillFromRunId) {
+          setPrefillNotice('Could not load the previous run to prefill from.');
         }
       } catch (error) {
         if (!cancelled) {
@@ -131,7 +202,7 @@ export default function NewImportPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadNonce]);
+  }, [loadNonce, prefillFromRunId]);
 
   const retryLoadSources = () => {
     setSourcesLoaded(false);
@@ -381,6 +452,12 @@ export default function NewImportPage() {
             Back to imports
           </Link>
         </section>
+
+        {prefillNotice && (
+          <p className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            {prefillNotice}
+          </p>
+        )}
 
         <section className="rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-5">
           <div className="mb-5 grid gap-3 md:grid-cols-3">

@@ -2,9 +2,10 @@
 
 import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Sparkles, UploadCloud } from 'lucide-react';
+import { Plus, Sparkles, UploadCloud } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
+import { ErrorNotice, Field, Modal, inputClass } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
 import { peekCached, useCachedResource } from '@/lib/data-cache';
@@ -50,16 +51,15 @@ export function ProcessingFlow() {
   const [wizardStep, setWizardStep] = useState(1);
   const [mode, setMode] = useState<UploadMode>('single');
 
-  const [email, setEmail] = useState('');
   const [department, setDepartment] = useState('');
   const [folder, setFolder] = useState('');
   const [subfolder, setSubfolder] = useState('');
   const [folderOptions, setFolderOptions] = useState<FolderOptions>({});
   const [newFolderName, setNewFolderName] = useState('');
   const [newSubfolderName, setNewSubfolderName] = useState('');
-  const [password, setPassword] = useState('');
   const [folderBusy, setFolderBusy] = useState(false);
-  const [tags, setTags] = useState('');
+  const [folderModalOpen, setFolderModalOpen] = useState(false);
+  const [folderModalError, setFolderModalError] = useState<string | null>(null);
 
   const [flowMessage, setFlowMessage] = useState<string | null>(null);
   const [collectionId, setCollectionId] = useState<string | null>(null);
@@ -158,11 +158,8 @@ export function ProcessingFlow() {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('profile_id', selectedProfile.value);
-      formData.append('email', email.trim());
       formData.append('folder', folder.trim());
       formData.append('subfolder', subfolder.trim());
-      formData.append('tags', tags.trim());
-      formData.append('password', password.trim());
       formData.append('mode', 'single');
       await sendFormDataWithProgress(`${API}/api/v1/upload`, formData, (loaded, total) => {
         setUploadProgress({
@@ -198,11 +195,9 @@ export function ProcessingFlow() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        email: email.trim(),
         department: department.trim(),
         folder: folder.trim(),
         subfolder: subfolder.trim(),
-        password: password.trim(),
       }),
     });
     if (!response.ok) {
@@ -239,7 +234,6 @@ export function ProcessingFlow() {
         formData.append('file', file);
         formData.append('folder', folder.trim());
         formData.append('subfolder', subfolder.trim());
-        formData.append('tags', tags.trim());
         try {
           await sendFormDataWithProgress(`${API}/api/v1/collections/${id}/upload`, formData, (loaded, total) => {
             setUploadProgress({
@@ -329,17 +323,18 @@ export function ProcessingFlow() {
     const folderValue = newFolderName.trim();
     const subfolderValue = newSubfolderName.trim();
     if (!folderValue && !subfolderValue) {
-      setFlowMessage('Please enter a folder or subfolder name first.');
+      setFolderModalError('Please enter a folder or subfolder name first.');
       return;
     }
     setFolderBusy(true);
+    setFolderModalError(null);
     const response = await apiFetch(`/api/v1/folders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ folder: folderValue, subfolder: subfolderValue }),
     });
     if (!response.ok) {
-      setFlowMessage('Failed to create folder. Check folder names.');
+      setFolderModalError('Failed to create folder. Check folder names.');
       setFolderBusy(false);
       return;
     }
@@ -358,10 +353,16 @@ export function ProcessingFlow() {
       setFolder(createdFolder);
       setSubfolder(createdSubfolder);
     }
+    setFolderBusy(false);
+    closeFolderModal();
+    setFlowMessage(`Folder created: ${payload.path}`);
+  };
+
+  const closeFolderModal = () => {
+    setFolderModalOpen(false);
     setNewFolderName('');
     setNewSubfolderName('');
-    setFlowMessage(`Folder created: ${payload.path}`);
-    setFolderBusy(false);
+    setFolderModalError(null);
   };
 
   const steps =
@@ -380,8 +381,8 @@ export function ProcessingFlow() {
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 text-slate-950 sm:px-6 lg:px-8">
       <section className="mb-8">
-        <h1 className="text-3xl font-semibold">Transform Documents Into Structured Markdown</h1>
-        <p className="mt-2 text-slate-600">Step through mode, metadata, profile, and upload. The flow supports single files and ordered collections.</p>
+        <h1 className="text-3xl font-semibold">File Task</h1>
+        <p className="mt-2 text-slate-600">Transform documents into structured markdown — step through metadata, profile, and upload.</p>
       </section>
 
       <section id="upload-flow" className="mb-8 rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-5">
@@ -423,7 +424,7 @@ export function ProcessingFlow() {
               exit={{ opacity: 0, y: -12 }}
               className="space-y-4"
             >
-              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <button
                   type="button"
                   onClick={() => setMode('single')}
@@ -440,26 +441,8 @@ export function ProcessingFlow() {
                   <p className="text-sm font-semibold text-slate-950">Multiple files</p>
                   <p className="mt-1 text-xs text-slate-600">Upload multiple files into one folder, then start together.</p>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => router.push('/imports/new')}
-                  className="flex h-full flex-col rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
-                >
-                  <p className="text-sm font-semibold text-slate-950">Import from Confluence</p>
-                  <p className="mt-1 text-xs text-slate-600">Crawl a space or page tree into markdown jobs.</p>
-                </button>
               </div>
               <div className="grid gap-3 md:grid-cols-2">
-                <label className="text-sm text-slate-600">
-                  Email (optional)
-                  <input
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    type="email"
-                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                    placeholder="name@company.com"
-                  />
-                </label>
                 {mode === 'collection' && (
                   <label className="text-sm text-slate-600">
                     Department (optional)
@@ -504,48 +487,12 @@ export function ProcessingFlow() {
                     ))}
                   </select>
                 </label>
-                <label className="text-sm text-slate-600">
-                  New folder
-                  <input
-                    value={newFolderName}
-                    onChange={(event) => setNewFolderName(event.target.value)}
-                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                    placeholder="invoices"
-                  />
-                </label>
-                <label className="text-sm text-slate-600">
-                  New subfolder
-                  <input
-                    value={newSubfolderName}
-                    onChange={(event) => setNewSubfolderName(event.target.value)}
-                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                    placeholder="2026/april"
-                  />
-                </label>
                 <div className="flex items-end md:col-span-2">
-                  <Button type="button" variant="outline" onClick={createFolder} disabled={folderBusy}>
-                    {folderBusy ? 'Adding...' : 'Add Folder'}
+                  <Button type="button" variant="outline" onClick={() => setFolderModalOpen(true)}>
+                    <Plus className="h-4 w-4" />
+                    Add folder
                   </Button>
                 </div>
-                <label className="text-sm text-slate-600 md:col-span-2">
-                  Tags, comma separated (optional)
-                  <input
-                    value={tags}
-                    onChange={(event) => setTags(event.target.value)}
-                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                    placeholder="invoice, finance, 2026"
-                  />
-                </label>
-                <label className="text-sm text-slate-600 md:col-span-2">
-                  Password (optional)
-                  <input
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
-                    type="password"
-                    placeholder="Leave empty for no protection"
-                  />
-                </label>
               </div>
               <div className="flex justify-end">
                 <Button onClick={() => setWizardStep(2)}>
@@ -727,41 +674,88 @@ export function ProcessingFlow() {
                   Selected: {selectedProfile?.label ?? 'No profile selected'}
                 </p>
               </div>
-              {flowMessage && <p className="mt-2 text-sm text-slate-600">{flowMessage}</p>}
-              {settingsMessage && <p className="mt-2 text-sm text-red-600">{settingsMessage}</p>}
-              {uploadProgress && (
-                <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <p className="font-medium text-slate-950">
-                        {uploadProgress.phase === 'single' ? 'Uploading file' : 'Uploading collection files'}
-                      </p>
-                      <p className="text-xs text-slate-500">{uploadProgress.currentFile}</p>
-                    </div>
-                    <p className="text-xs font-semibold text-slate-600">
-                      {uploadProgress.filesCompleted}/{uploadProgress.filesTotal} files
-                    </p>
-                  </div>
-                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
-                    <div
-                      className="h-full rounded-full bg-emerald-500 transition-all"
-                      style={{
-                        width: `${Math.min(100, Math.round((uploadProgress.bytesLoaded / uploadProgress.bytesTotal) * 100))}%`,
-                      }}
-                    />
-                  </div>
-                  <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-                    <span>{Math.min(100, Math.round((uploadProgress.bytesLoaded / uploadProgress.bytesTotal) * 100))}%</span>
-                    <span>
-                      {formatBytes(uploadProgress.bytesLoaded)} / {formatBytes(uploadProgress.bytesTotal)}
-                    </span>
-                  </div>
-                </div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Rendered for every wizard step (not just step 3) so upload feedback — e.g. a
+            409 duplicate-file skip during the step-2 collection upload — is never silently
+            swallowed while the user is still looking at an earlier step. */}
+        {flowMessage && (
+          <div
+            className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+              /skipped|unchanged/i.test(flowMessage)
+                ? 'border-amber-200 bg-amber-50 text-amber-800'
+                : 'border-slate-200 bg-slate-50 text-slate-700'
+            }`}
+          >
+            {flowMessage}
+          </div>
+        )}
+        {settingsMessage && <p className="mt-2 text-sm text-red-600">{settingsMessage}</p>}
+        {uploadProgress && (
+          <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-medium text-slate-950">
+                  {uploadProgress.phase === 'single' ? 'Uploading file' : 'Uploading collection files'}
+                </p>
+                <p className="text-xs text-slate-500">{uploadProgress.currentFile}</p>
+              </div>
+              <p className="text-xs font-semibold text-slate-600">
+                {uploadProgress.filesCompleted}/{uploadProgress.filesTotal} files
+              </p>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full rounded-full bg-emerald-500 transition-all"
+                style={{
+                  width: `${Math.min(100, Math.round((uploadProgress.bytesLoaded / uploadProgress.bytesTotal) * 100))}%`,
+                }}
+              />
+            </div>
+            <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+              <span>{Math.min(100, Math.round((uploadProgress.bytesLoaded / uploadProgress.bytesTotal) * 100))}%</span>
+              <span>
+                {formatBytes(uploadProgress.bytesLoaded)} / {formatBytes(uploadProgress.bytesTotal)}
+              </span>
+            </div>
+          </div>
+        )}
       </section>
+
+      {folderModalOpen && (
+        <Modal title="Add folder" onClose={closeFolderModal}>
+          <div className="space-y-4">
+            <Field label="New folder">
+              <input
+                value={newFolderName}
+                onChange={(event) => setNewFolderName(event.target.value)}
+                className={inputClass}
+                placeholder="invoices"
+                autoFocus
+              />
+            </Field>
+            <Field label="New subfolder">
+              <input
+                value={newSubfolderName}
+                onChange={(event) => setNewSubfolderName(event.target.value)}
+                className={inputClass}
+                placeholder="2026/april"
+              />
+            </Field>
+            <ErrorNotice message={folderModalError} />
+            <div className="flex justify-end gap-2 pt-1">
+              <Button type="button" variant="outline" size="sm" onClick={closeFolderModal} disabled={folderBusy}>
+                Cancel
+              </Button>
+              <Button type="button" size="sm" onClick={createFolder} disabled={folderBusy}>
+                {folderBusy ? 'Adding...' : 'Create folder'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

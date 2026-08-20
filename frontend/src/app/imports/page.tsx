@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { LoaderCircle, Plus, RefreshCcw } from 'lucide-react';
+import { LoaderCircle, Plus, RefreshCcw, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
 import { formatBytes } from '@/components/dashboard/shared';
-import { type ImportRun, type ImportRunListResponse, runStatusChip, runTitle } from '@/lib/imports';
+import { type ImportRun, type ImportRunListResponse, isRunActive, runStatusChip, runTitle } from '@/lib/imports';
 
 export default function ImportsPage() {
   const [runs, setRuns] = useState<ImportRun[]>([]);
@@ -84,6 +84,7 @@ export default function ImportsPage() {
                   <th className="hidden pb-2 font-medium sm:table-cell">Attachments</th>
                   <th className="hidden pb-2 font-medium md:table-cell">Size</th>
                   <th className="hidden pb-2 font-medium md:table-cell">Created</th>
+                  <th className="pb-2 font-medium" aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
@@ -110,6 +111,18 @@ export default function ImportsPage() {
                       {formatBytes(run.artifact_bytes + run.content_bytes)}
                     </td>
                     <td className="hidden py-3 text-slate-700 md:table-cell">{new Date(run.created_at).toLocaleString()}</td>
+                    <td className="py-3 text-right">
+                      {!isRunActive(run.status) && (
+                        <Link
+                          href={`/imports/new?from=${run.id}`}
+                          title="Edit & run again"
+                          aria-label="Edit & run again"
+                          className="inline-flex items-center rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-emerald-700"
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                        </Link>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

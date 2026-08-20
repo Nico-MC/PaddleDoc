@@ -1,18 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
-import { useParams } from 'next/navigation';
-import { Mail, UploadCloud } from 'lucide-react';
+import { useParams, useSearchParams } from 'next/navigation';
+import { Mail, Pencil, Settings2, UploadCloud } from 'lucide-react';
 
+import { ErrorNotice, Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
+import type { PaddleCapabilities } from '@/components/dashboard/shared';
 import type { JobArtifact } from '@/components/markdown/markdown-view';
 import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
 import { apiFetch, redirectIfSessionExpired, type JobVersionEntry, type JobVersionsResponse } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 import { peekCached, setCached } from '@/lib/data-cache';
 import { type OpenWebUIPush, listOpenWebUIPushes, pushStatusChip } from '@/lib/openwebui';
+
+const CAPABILITIES_PATH = '/api/v1/paddle/capabilities';
 
 // react-markdown + remark-gfm + rehype-sanitize are only needed for the
 // "Rendered" tab (the default tab is "Raw" for everything but Confluence
@@ -77,18 +81,31 @@ type Job = {
 const API = API_BASE_URL;
 
 export default function JobDetailsPage() {
+  // useSearchParams (used below to read ?edit=1) requires a Suspense
+  // boundary around it, same as app/connections/page.tsx — omitting this
+  // breaks `next build`.
+  return (
+    <Suspense fallback={<main className="min-h-screen bg-white" />}>
+      <JobDetailsPageInner />
+    </Suspense>
+  );
+}
+
+function JobDetailsPageInner() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   if (!params.id) {
     return null;
   }
+  const openEditOnLoad = searchParams.get('edit') === '1';
   // The Versions table links between jobs on this same dynamic route. Keying
   // the details component by id remounts it on every id change, so all
   // per-job state (markdown, artifacts, password gate, edit mode) starts
   // fresh instead of leaking from the previously viewed version.
-  return <JobDetails key={params.id} jobId={params.id} />;
+  return <JobDetails key={params.id} jobId={params.id} openEditOnLoad={openEditOnLoad} />;
 }
 
-function JobDetails({ jobId }: { jobId: string }) {
+function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: boolean }) {
   // Job metadata (unlike the markdown preview) isn't gated behind the
   // document password, so it's safe to reuse: re-opening a job you already
   // viewed this session (e.g. the browser back button) paints its header
@@ -116,6 +133,8 @@ function JobDetails({ jobId }: { jobId: string }) {
   // endpoint yet (404) — the last-push line stays hidden in all three cases.
   const [lastPush, setLastPush] = useState<OpenWebUIPush | null>(null);
   const [pushDialogOpen, setPushDialogOpen] = useState(false);
+  const [restartProfileDialogOpen, setRestartProfileDialogOpen] = useState(false);
+  const markdownSectionRef = useRef<HTMLElement>(null);
 
   // `isActive` lets the load effect discard results that finish after the
   // user has navigated to another job id on this same dynamic route (the
@@ -240,6 +259,9 @@ function JobDetails({ jobId }: { jobId: string }) {
           }
           setMarkdown(text);
           setDraftMarkdown(text);
+          if (openEditOnLoad) {
+            setIsEditing(true);
+          }
           void loadArtifacts(id, '', () => active);
         }
       }
@@ -248,7 +270,7 @@ function JobDetails({ jobId }: { jobId: string }) {
     return () => {
       active = false;
     };
-  }, [jobId]);
+  }, [jobId, openEditOnLoad]);
 
   const loadMarkdownWithPassword = async () => {
     const id = jobId;
@@ -272,6 +294,9 @@ function JobDetails({ jobId }: { jobId: string }) {
       setDraftMarkdown(text);
       setRequirePassword(false);
       setLoadError(null);
+      if (openEditOnLoad) {
+        setIsEditing(true);
+      }
       void loadArtifacts(id, password);
     }
   };
@@ -346,6 +371,10 @@ function JobDetails({ jobId }: { jobId: string }) {
   const suggestedLowerProfile =
     (typeof execution?.suggested_profile_id === 'string' ? execution.suggested_profile_id : null) ||
     (typeof settings?.profile_id === 'string' ? LOWER_PROFILE_RETRY_MAP[settings.profile_id] ?? null : null);
+  // Same derivation as document-browser.tsx's isImportJob (not imported —
+  // that component owns its own copy of this check).
+  const isImportJob = settings?.mode === 'import';
+  const canRestartWithProfile = !isImportJob && (job.status === 'FINISHED' || job.status === 'FAILED');
 
   const retryWithLowerProfile = async () => {
     if (!job?.id) {
@@ -471,11 +500,19 @@ function JobDetails({ jobId }: { jobId: string }) {
             <p className="text-sm">
               {warning || 'Processing stopped for this document. Retry manually with a lower profile.'}
             </p>
-            {suggestedLowerProfile && (
-              <div className="mt-2">
-                <Button size="sm" variant="outline" disabled={isRetryingLower} onClick={retryWithLowerProfile}>
-                  {isRetryingLower ? 'Retrying...' : `Retry with ${suggestedLowerProfile}`}
-                </Button>
+            {(suggestedLowerProfile || canRestartWithProfile) && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {suggestedLowerProfile && (
+                  <Button size="sm" variant="outline" disabled={isRetryingLower} onClick={retryWithLowerProfile}>
+                    {isRetryingLower ? 'Retrying...' : `Retry with ${suggestedLowerProfile}`}
+                  </Button>
+                )}
+                {canRestartWithProfile && (
+                  <Button size="sm" variant="outline" onClick={() => setRestartProfileDialogOpen(true)}>
+                    <Settings2 className="h-4 w-4" />
+                    Re-run with profile…
+                  </Button>
+                )}
               </div>
             )}
           </div>
@@ -549,6 +586,22 @@ function JobDetails({ jobId }: { jobId: string }) {
               <UploadCloud className="h-4 w-4" />
               Push to OpenWebUI
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsEditing(true);
+                markdownSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+            >
+              <Pencil className="h-4 w-4" />
+              Edit markdown
+            </Button>
+            {canRestartWithProfile && (
+              <Button variant="outline" onClick={() => setRestartProfileDialogOpen(true)}>
+                <Settings2 className="h-4 w-4" />
+                Re-run with profile…
+              </Button>
+            )}
           </div>
         )}
         {job.status === 'FINISHED' && lastPush && (
@@ -566,7 +619,7 @@ function JobDetails({ jobId }: { jobId: string }) {
             )}
           </div>
         )}
-        <section>
+        <section ref={markdownSectionRef}>
           <h2 className="mb-2 text-lg font-semibold">Markdown Preview</h2>
           <div className="mb-2 flex items-center gap-2">
             <Button size="sm" variant={isEditing ? 'outline' : 'default'} onClick={() => setIsEditing(false)}>
@@ -639,6 +692,132 @@ function JobDetails({ jobId }: { jobId: string }) {
           onPushed={() => void loadLastPush(job.id)}
         />
       )}
+      {restartProfileDialogOpen && (
+        <RestartWithProfileDialog
+          jobId={job.id}
+          jobLabel={job.original_filename}
+          onClose={() => setRestartProfileDialogOpen(false)}
+          onRestarted={async () => {
+            const refreshed = await apiFetch(`/api/v1/jobs/${job.id}`, { cache: 'no-store' });
+            if (refreshed.ok) {
+              const jobData = await refreshed.json();
+              setJob(jobData);
+              setCached(`/api/v1/jobs/${job.id}`, jobData);
+            }
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+/**
+ * Profile picker for the "Re-run with profile…" action, mirroring
+ * document-browser.tsx's dialog of the same name (duplicated rather than
+ * imported — that component owns its own copy of this UI, and this page
+ * shows inline errors instead of alert() to match its existing patterns
+ * like retryWithLowerProfile above).
+ */
+function RestartWithProfileDialog({
+  jobId,
+  jobLabel,
+  onClose,
+  onRestarted,
+}: {
+  jobId: string;
+  jobLabel: string;
+  onClose: () => void;
+  onRestarted: () => void;
+}) {
+  const [capabilities, setCapabilities] = useState<PaddleCapabilities | null>(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH) ?? null
+  );
+  const [profileId, setProfileId] = useState(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH)?.profiles[0]?.value ?? ''
+  );
+  const [loading, setLoading] = useState(!capabilities);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (capabilities) {
+      return;
+    }
+    let active = true;
+    (async () => {
+      const response = await apiFetch(CAPABILITIES_PATH, { cache: 'no-store' });
+      if (!active) {
+        return;
+      }
+      if (response.ok) {
+        const data = (await response.json()) as PaddleCapabilities;
+        if (!active) {
+          return;
+        }
+        setCapabilities(data);
+        setCached(CAPABILITIES_PATH, data);
+        setProfileId((current) => current || data.profiles[0]?.value || '');
+      }
+      setLoading(false);
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selectedDescription = capabilities?.profiles.find((option) => option.value === profileId)?.description;
+
+  const handleStart = async () => {
+    setStarting(true);
+    setError(null);
+    const response = await apiFetch(`/api/v1/jobs/${jobId}/restart`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart job.';
+      setError(detail);
+      setStarting(false);
+      return;
+    }
+    onRestarted();
+    onClose();
+  };
+
+  return (
+    <Modal title={`Re-run "${jobLabel}" with a different profile`} onClose={onClose}>
+      <div className="space-y-4">
+        {loading && <LoadingState label="Loading profiles..." />}
+        {!loading && capabilities && capabilities.profiles.length > 0 && (
+          <Field label="Profile">
+            <select className={inputClass} value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+              {capabilities.profiles.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {selectedDescription && (
+              <span className="mt-1 block text-xs font-normal text-slate-400">{selectedDescription}</span>
+            )}
+          </Field>
+        )}
+        {!loading && (!capabilities || capabilities.profiles.length === 0) && (
+          <p className="text-sm text-slate-600">No profiles available.</p>
+        )}
+        <ErrorNotice message={error} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={starting}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" disabled={starting || !profileId} onClick={() => void handleStart()}>
+            {starting ? 'Starting...' : 'Start'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

@@ -220,6 +220,12 @@ class AuthProvider(Base):
     client_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     scopes: Mapped[str] = mapped_column(String(255), default='openid profile email', nullable=False)
+    # When true, the claimed email address becomes the user's username (both
+    # at provisioning and, retroactively, at login for existing users)
+    # instead of the preferred_username claim -- for IdPs (e.g. Microsoft
+    # Entra) whose preferred_username is a UPN rather than something
+    # human-readable.
+    use_email_as_username: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)

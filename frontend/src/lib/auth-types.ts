@@ -41,6 +41,7 @@ export interface AdminProvider {
   client_secret_set: boolean;
   enabled: boolean;
   scopes: string;
+  use_email_as_username: boolean;
   created_at: string;
 }
 
@@ -103,6 +104,7 @@ export interface ProviderCreateRequest {
   client_secret: string;
   enabled?: boolean;
   scopes?: string;
+  use_email_as_username?: boolean;
 }
 
 /** PATCH /api/v1/auth/admin/providers/{id} — client_secret is write-only; omit to keep the stored secret. */
@@ -114,6 +116,7 @@ export interface ProviderUpdateRequest {
   client_secret?: string;
   enabled?: boolean;
   scopes?: string;
+  use_email_as_username?: boolean;
 }
 
 /** POST /api/v1/auth/admin/providers/{id}/test */

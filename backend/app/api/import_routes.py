@@ -39,6 +39,7 @@ from app.schemas.import_ import (
     ImportRunError,
     ImportRunJobSummary,
     ImportRunListResponse,
+    ImportRunOptions,
     ImportRunResponse,
     ImportSourceCreateRequest,
     ImportSourceListResponse,
@@ -531,8 +532,12 @@ def get_import_run(
     ]
 
     base = ImportRunResponse.model_validate(run)
+    stored_options = run.options if isinstance(run.options, dict) else {}
     return ImportRunDetailResponse(
         **base.model_dump(),
+        source_id=run.source_id,
+        # Extra keys in the stored dict (e.g. is_refresh) are ignored here.
+        options=ImportRunOptions.model_validate(stored_options),
         current_page_title=run.current_page_title,
         error_message=run.error_message,
         cancel_requested=run.cancel_requested,

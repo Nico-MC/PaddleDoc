@@ -42,6 +42,10 @@ class JobSaveRequest(BaseModel):
     markdown: str = Field(min_length=1)
 
 
+class JobRestartRequest(BaseModel):
+    profile_id: str | None = None
+
+
 class JobSaveResponse(BaseModel):
     job_id: str
     version: int
