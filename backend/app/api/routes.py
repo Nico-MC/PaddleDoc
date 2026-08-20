@@ -31,6 +31,7 @@ from app.schemas.jobs import (
     MarkdownBrowserResponse,
     MarkdownFileEntry,
     JobListResponse,
+    JobRestartRequest,
     JobResponse,
     JobSaveRequest,
     JobSaveResponse,
@@ -1141,8 +1142,16 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db), user: 
 
 
 @router.post('/jobs/{job_id}/restart')
-def restart_job(job_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, str]:
+def restart_job(
+    job_id: str,
+    request: Request,
+    payload: JobRestartRequest | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, str]:
     enforce_rate_limit(request)
+
+    requested_profile_id = payload.profile_id if payload is not None else None
 
     job = db.get(Job, job_id)
     if job is None:
@@ -1157,25 +1166,51 @@ def restart_job(job_id: str, request: Request, db: Session = Depends(get_db), us
     if job.status == JobStatus.RUNNING and job.id in active_job_ids:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job is currently running')
 
+    if requested_profile_id is not None:
+        known_profile_ids = {p['value'] for p in get_paddle_capabilities()['profiles']}
+        if requested_profile_id not in known_profile_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown profile '{requested_profile_id}'",
+            )
+
     info = job.processing_info if isinstance(job.processing_info, dict) else {}
     settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
 
-    profile_id = settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    current_profile = settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    profile_id = requested_profile_id or current_profile
     mode = settings_info.get('mode') if isinstance(settings_info.get('mode'), str) else None
     email = settings_info.get('email') if isinstance(settings_info.get('email'), str) else None
     department = settings_info.get('department') if isinstance(settings_info.get('department'), str) else None
 
     _delete_job_outputs(job)
     info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_payload = info.get('settings') if isinstance(info.get('settings'), dict) else {}
     execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
-    job.processing_info = {
-        **info,
-        'execution': {
-            **execution,
-            'status': 'requeued',
-            'detail': 'Job was manually restarted from the jobs list.',
-        },
-    }
+    if requested_profile_id:
+        job.processing_info = {
+            **info,
+            'settings': {
+                **settings_payload,
+                'previous_profile_id': current_profile,
+                'requested_profile_id': requested_profile_id,
+                'profile_id': requested_profile_id,
+            },
+            'execution': {
+                **execution,
+                'status': 'requeued',
+                'detail': f'Job was manually restarted with profile {requested_profile_id} (previous: {current_profile}).',
+            },
+        }
+    else:
+        job.processing_info = {
+            **info,
+            'execution': {
+                **execution,
+                'status': 'requeued',
+                'detail': 'Job was manually restarted from the jobs list.',
+            },
+        }
     job.status = JobStatus.PENDING
     job.error_message = None
     db.commit()
@@ -1185,6 +1220,7 @@ def restart_job(job_id: str, request: Request, db: Session = Depends(get_db), us
     return {
         'job_id': job.id,
         'status': 'queued',
+        'profile_id': profile_id,
     }
 
 

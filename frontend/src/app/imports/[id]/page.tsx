@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react';
+import { ChevronDown, ChevronRight, LoaderCircle, RotateCcw } from 'lucide-react';
 import { useParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
@@ -170,6 +170,13 @@ export default function ImportRunPage() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <span className={`rounded px-2 py-1 text-xs ${runStatusChip[run.status]}`}>{run.status}</span>
+            {!active && (
+              <Link href={`/imports/new?from=${run.id}`}>
+                <Button variant="outline" size="sm">
+                  <RotateCcw className="mr-2 h-4 w-4" /> Edit & run again
+                </Button>
+              </Link>
+            )}
             {active && (
               <Button variant="outline" size="sm" onClick={() => void cancelRun()} disabled={cancelBusy || run.cancel_requested}>
                 {cancelBusy ? 'Cancelling...' : run.cancel_requested ? 'Cancelling' : 'Cancel'}

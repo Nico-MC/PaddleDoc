@@ -102,6 +102,8 @@ class ProviderCreateRequest(BaseModel):
     client_secret: str = Field(min_length=1)
     enabled: bool = False
     scopes: str = 'openid profile email'
+    # See AuthProvider.use_email_as_username.
+    use_email_as_username: bool = False
 
 
 class ProviderUpdateRequest(BaseModel):
@@ -112,6 +114,7 @@ class ProviderUpdateRequest(BaseModel):
     client_secret: str | None = None
     enabled: bool | None = None
     scopes: str | None = None
+    use_email_as_username: bool | None = None
 
 
 class ProviderAdminResponse(BaseModel):
@@ -124,6 +127,7 @@ class ProviderAdminResponse(BaseModel):
     client_secret_set: bool
     enabled: bool
     scopes: str
+    use_email_as_username: bool
     created_at: datetime
     updated_at: datetime
 

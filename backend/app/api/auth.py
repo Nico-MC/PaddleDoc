@@ -216,6 +216,7 @@ def _provider_response(provider: AuthProvider) -> ProviderAdminResponse:
         client_secret_set=bool(provider.client_secret_encrypted),
         enabled=provider.enabled,
         scopes=provider.scopes,
+        use_email_as_username=provider.use_email_as_username,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
     )
@@ -229,7 +230,10 @@ def _count_active_admins(db: Session, *, exclude_user_id: str | None = None) -> 
 
 
 def _generate_unique_username(db: Session, base: str) -> str:
-    cleaned = ''.join(ch for ch in (base or '').lower() if ch.isalnum() or ch in ('.', '-', '_')) or 'user'
+    # '@' is allowed alongside the usual username punctuation so a full
+    # email address (see AuthProvider.use_email_as_username) survives intact
+    # instead of losing its separator between localpart and domain.
+    cleaned = ''.join(ch for ch in (base or '').lower() if ch.isalnum() or ch in ('.', '-', '_', '@')) or 'user'
     candidate = cleaned
     suffix = 1
     while db.scalar(select(User.id).where(User.username == candidate)) is not None:
@@ -624,6 +628,18 @@ def oidc_callback(
     if user is not None:
         if not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Account is inactive')
+        if provider.use_email_as_username:
+            claim_email = claims.get('email')
+            if claim_email and claim_email != user.username:
+                # Never clobber a different, already-existing user's
+                # username -- silently skip the rename and let login proceed
+                # rather than failing an otherwise-successful login over a
+                # cosmetic username sync.
+                username_taken = (
+                    db.scalar(select(User.id).where(User.username == claim_email, User.id != user.id)) is not None
+                )
+                if not username_taken:
+                    user.username = claim_email
     else:
         # No silent email auto-link: a brand-new local user is always
         # created for an unrecognized (provider, sub) pair, even if the
@@ -633,7 +649,13 @@ def oidc_callback(
         # anyone who controls that email address at the IdP could hijack a
         # pre-existing local account).
         email = claims.get('email') or f'{subject}@{slug}.oidc.invalid'
-        username_base = claims.get('preferred_username') or (email.split('@')[0] if '@' in email else subject)
+        if provider.use_email_as_username and claims.get('email'):
+            # Full address, not just the localpart -- the whole point is a
+            # readable, stable identifier for IdPs whose preferred_username
+            # is a UPN (e.g. Microsoft Entra).
+            username_base = email
+        else:
+            username_base = claims.get('preferred_username') or (email.split('@')[0] if '@' in email else subject)
         user = User(
             username=_generate_unique_username(db, username_base),
             email=email,
@@ -815,6 +837,7 @@ def admin_create_provider(payload: ProviderCreateRequest, db: Session = Depends(
         client_secret_encrypted=encrypt_client_secret(payload.client_secret),
         enabled=payload.enabled,
         scopes=payload.scopes.strip() or 'openid profile email',
+        use_email_as_username=payload.use_email_as_username,
     )
     db.add(provider)
     db.commit()
@@ -840,6 +863,8 @@ def admin_update_provider(
         provider.enabled = payload.enabled
     if payload.scopes is not None:
         provider.scopes = payload.scopes.strip() or 'openid profile email'
+    if payload.use_email_as_username is not None:
+        provider.use_email_as_username = payload.use_email_as_username
     db.commit()
     return _provider_response(provider)
 

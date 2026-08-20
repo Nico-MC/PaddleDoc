@@ -2,13 +2,17 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, Mail, RefreshCcw, RotateCcw, Trash2, UploadCloud } from 'lucide-react';
+import { Download, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, Settings2, Trash2, UploadCloud } from 'lucide-react';
 
+import { Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
 import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
+import type { PaddleCapabilities } from '@/components/dashboard/shared';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 import { peekCached, setCached, useVisiblePolling } from '@/lib/data-cache';
+
+const CAPABILITIES_PATH = '/api/v1/paddle/capabilities';
 
 type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
 
@@ -32,13 +36,9 @@ type SortKey = 'document' | 'status' | 'profile' | 'pages' | 'created';
 type SortDirection = 'asc' | 'desc';
 
 type DocumentBrowserProps = {
-  title: string;
-  description: string;
   endpoint: 'jobs' | 'search';
   allowDelete?: boolean;
   includeDateFilters?: boolean;
-  compact?: boolean;
-  hideHeader?: boolean;
   /**
    * Preselects the folder filter (e.g. from a ?folder= deep link). Read only
    * by the state initializer — pass a `key` derived from it (see
@@ -171,13 +171,9 @@ function qualityForJob(job: Job): { grade: string; score: number | null } | null
 }
 
 export function DocumentBrowser({
-  title,
-  description,
   endpoint,
   allowDelete = false,
   includeDateFilters = true,
-  compact = false,
-  hideHeader = false,
   initialFolder,
 }: DocumentBrowserProps) {
   const pageSize = 50;
@@ -202,11 +198,11 @@ export function DocumentBrowser({
   const [retryingLowerJobId, setRetryingLowerJobId] = useState<string | null>(null);
   const [protectedJobId, setProtectedJobId] = useState<string | null>(null);
   const [protectedJobPassword, setProtectedJobPassword] = useState('');
-  const [passwordAttempt, setPasswordAttempt] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('created');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [pushDialogJob, setPushDialogJob] = useState<Job | null>(null);
+  const [restartProfileJob, setRestartProfileJob] = useState<Job | null>(null);
 
   const markJobsQueued = (predicate: (job: Job) => boolean) => {
     setItems((current) =>
@@ -429,6 +425,32 @@ export function DocumentBrowser({
       }
       markJobsQueued((job) => job.id === jobId);
       await loadItems();
+    } finally {
+      setRestartingJobId(null);
+    }
+  };
+
+  /** Same requeue + refresh flow as {@link restartJob}, but pins a specific profile via the request body. */
+  const restartJobWithProfile = async (jobId: string, profileId: string): Promise<boolean> => {
+    if (endpoint !== 'jobs') {
+      return false;
+    }
+    setRestartingJobId(jobId);
+    try {
+      const response = await apiFetch(`/api/v1/jobs/${jobId}/restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileId }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart job.';
+        alert(detail);
+        return false;
+      }
+      markJobsQueued((job) => job.id === jobId);
+      await loadItems();
+      return true;
     } finally {
       setRestartingJobId(null);
     }
@@ -741,28 +763,28 @@ export function DocumentBrowser({
           <table className="w-full table-auto text-left text-xs sm:text-sm">
             <thead className="text-slate-500">
               <tr>
-                <th className="pb-2">
+                <th className="pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('document')}>
                     Document{sortIndicator('document')}
                   </button>
                 </th>
-                <th className="pb-2">
+                <th className="pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('status')}>
                     Status{sortIndicator('status')}
                   </button>
                 </th>
-                <th className="hidden pb-2 lg:table-cell">
+                <th className="hidden pb-2 pr-4 lg:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('profile')}>
                     Used Profile{sortIndicator('profile')}
                   </button>
                 </th>
-                <th className="pb-2">
+                <th className="pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('pages')}>
                     Pages{sortIndicator('pages')}
                   </button>
                 </th>
-                <th className="hidden pb-2 sm:table-cell">Quality</th>
-                <th className="hidden pb-2 md:table-cell">
+                <th className="hidden pb-2 pr-4 sm:table-cell">Quality</th>
+                <th className="hidden pb-2 pr-4 md:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('created')}>
                     Created{sortIndicator('created')}
                   </button>
@@ -773,7 +795,7 @@ export function DocumentBrowser({
             <tbody>
               {paginatedItems.map((job) => (
                 <tr key={job.id} className="border-t border-slate-100">
-                  <td className="py-3">
+                  <td className="py-3.5 pr-4">
                     <div className="flex items-center gap-2">
                       <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
                         {job.original_filename}
@@ -805,18 +827,18 @@ export function DocumentBrowser({
                       </p>
                     )}
                   </td>
-                  <td className="py-3">
+                  <td className="whitespace-nowrap py-3.5 pr-4">
                     <span className={`rounded px-2 py-1 text-xs ${statusBadge[job.status]}`}>{job.status}</span>
                   </td>
-                  <td className="hidden py-3 lg:table-cell">
+                  <td className="hidden whitespace-nowrap py-3.5 pr-4 lg:table-cell">
                     {usedFallbackForJob(job) ? (
                       <span className="text-red-700">fallback (no OCR)</span>
                     ) : (
                       <span className="text-slate-700">{profileForJob(job)}</span>
                     )}
                   </td>
-                  <td className="py-3 text-slate-700">{pageCountForJob(job)}</td>
-                  <td className="hidden py-3 text-slate-700 sm:table-cell">
+                  <td className="whitespace-nowrap py-3.5 pr-4 text-slate-700">{pageCountForJob(job)}</td>
+                  <td className="hidden whitespace-nowrap py-3.5 pr-4 text-slate-700 sm:table-cell">
                     {(() => {
                       const quality = qualityForJob(job);
                       if (!quality) {
@@ -827,8 +849,8 @@ export function DocumentBrowser({
                         : quality.grade;
                     })()}
                   </td>
-                  <td className="hidden py-3 text-slate-700 md:table-cell">{new Date(job.created_at).toLocaleString()}</td>
-                  <td className="py-3 text-right">
+                  <td className="hidden whitespace-nowrap py-3.5 pr-4 text-slate-700 md:table-cell">{new Date(job.created_at).toLocaleString()}</td>
+                  <td className="py-3.5 pl-2 text-right">
                     {endpoint === 'jobs' && (
                       <div className="flex flex-wrap justify-end gap-2">
                         {job.status === 'FAILED' && suggestedLowerProfile(job) && (
@@ -854,6 +876,32 @@ export function DocumentBrowser({
                             <RotateCcw className="mr-2 h-4 w-4" />
                             {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
                           </Button>
+                        )}
+                        {!isImportJob(job) && (job.status === 'FINISHED' || job.status === 'FAILED') && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={restartingJobId === job.id}
+                            onClick={() => setRestartProfileJob(job)}
+                          >
+                            <Settings2 className="mr-2 h-4 w-4" />
+                            Re-run with profile…
+                          </Button>
+                        )}
+                        {job.status === 'FINISHED' && (
+                          <Link href={`/jobs/${job.id}?edit=1`}>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 px-0"
+                              aria-label="Edit markdown"
+                              title="Edit markdown"
+                            >
+                              <Pencil className="h-4 w-4 text-slate-700" />
+                            </Button>
+                          </Link>
                         )}
                         {job.status === 'FINISHED' && (
                           <Button
@@ -945,6 +993,111 @@ export function DocumentBrowser({
           onClose={() => setPushDialogJob(null)}
         />
       )}
+
+      {restartProfileJob && (
+        <RestartWithProfileDialog
+          job={restartProfileJob}
+          busy={restartingJobId === restartProfileJob.id}
+          onClose={() => setRestartProfileJob(null)}
+          onStart={(profileId) => restartJobWithProfile(restartProfileJob.id, profileId)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Profile picker for the "Re-run with profile…" row action. Capabilities are
+ * lazy-loaded on first open (this browser doesn't otherwise fetch them) and
+ * shared via the same module-level cache key other pages use, so a dialog
+ * opened after visiting e.g. the Paddle admin tab paints instantly.
+ */
+function RestartWithProfileDialog({
+  job,
+  busy,
+  onClose,
+  onStart,
+}: {
+  job: Job;
+  busy: boolean;
+  onClose: () => void;
+  onStart: (profileId: string) => Promise<boolean>;
+}) {
+  const [capabilities, setCapabilities] = useState<PaddleCapabilities | null>(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH) ?? null
+  );
+  const [profileId, setProfileId] = useState(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH)?.profiles[0]?.value ?? ''
+  );
+  const [loading, setLoading] = useState(!capabilities);
+
+  useEffect(() => {
+    if (capabilities) {
+      return;
+    }
+    let active = true;
+    (async () => {
+      const response = await apiFetch(CAPABILITIES_PATH, { cache: 'no-store' });
+      if (!active) {
+        return;
+      }
+      if (response.ok) {
+        const data = (await response.json()) as PaddleCapabilities;
+        if (!active) {
+          return;
+        }
+        setCapabilities(data);
+        setCached(CAPABILITIES_PATH, data);
+        setProfileId((current) => current || data.profiles[0]?.value || '');
+      }
+      setLoading(false);
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selectedDescription = capabilities?.profiles.find((option) => option.value === profileId)?.description;
+
+  const handleStart = () => {
+    void onStart(profileId).then((ok) => {
+      if (ok) {
+        onClose();
+      }
+    });
+  };
+
+  return (
+    <Modal title={`Re-run "${job.original_filename}" with a different profile`} onClose={onClose}>
+      <div className="space-y-4">
+        {loading && <LoadingState label="Loading profiles..." />}
+        {!loading && capabilities && capabilities.profiles.length > 0 && (
+          <Field label="Profile">
+            <select className={inputClass} value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+              {capabilities.profiles.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {selectedDescription && (
+              <span className="mt-1 block text-xs font-normal text-slate-400">{selectedDescription}</span>
+            )}
+          </Field>
+        )}
+        {!loading && (!capabilities || capabilities.profiles.length === 0) && (
+          <p className="text-sm text-slate-600">No profiles available.</p>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" disabled={busy || !profileId} onClick={handleStart}>
+            {busy ? 'Starting...' : 'Start'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

@@ -733,3 +733,52 @@ def test_migration_history_has_a_single_head():
     heads = ScriptDirectory.from_config(cfg).get_heads()
 
     assert len(heads) == 1, f'alembic history has diverged into {len(heads)} heads: {heads}'
+
+
+def test_0012_provider_use_email_as_username_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0012.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade through the real 0004..0012 chain (auth_providers itself
+    # only physically exists once 0004 has run) ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    provider_columns = {c['name'] for c in insp.get_columns('auth_providers')}
+    assert 'use_email_as_username' in provider_columns
+
+    # The server_default must make the flag land as false for pre-existing
+    # rows -- insert without the column and read it back.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO auth_providers "
+            "(id, slug, display_name, issuer_url, client_id, client_secret_encrypted, scopes, enabled, created_at, updated_at) "
+            "VALUES ('p1', 'entra', 'Entra', 'https://issuer.example', 'cid', 'not-a-real-secret', 'openid profile email', 1, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+        stored = conn.execute(
+            text("SELECT use_email_as_username FROM auth_providers WHERE id = 'p1'")
+        ).scalar_one()
+    assert stored in (0, False)
+
+    # --- downgrade one revision: only the 0012 column disappears ---
+    command.downgrade(cfg, '0011_login_lockout')
+    insp = inspect(engine)
+    provider_columns = {c['name'] for c in insp.get_columns('auth_providers')}
+    assert 'use_email_as_username' not in provider_columns
+    # 0011's schema must survive a 0012-only downgrade untouched.
+    user_columns = {c['name'] for c in insp.get_columns('users')}
+    assert {'failed_login_count', 'last_failed_login_at', 'locked_until'} <= user_columns
+
+    # --- re-upgrade: cleanly re-applies from the 0011 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    provider_columns = {c['name'] for c in insp.get_columns('auth_providers')}
+    assert 'use_email_as_username' in provider_columns

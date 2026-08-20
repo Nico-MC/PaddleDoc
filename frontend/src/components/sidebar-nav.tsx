@@ -8,6 +8,7 @@ import {
   Menu,
   X,
   Cpu,
+  FilePlus,
   FolderOpen,
   Gauge,
   Mail,
@@ -23,6 +24,7 @@ import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
 
 const processingChildren = [
+  { href: '/processing/new', label: 'File Task', icon: FilePlus, description: 'Upload files for processing' },
   { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
   { href: '/mail', label: 'API Mail Extraction', icon: Mail, description: 'API-ingested messages' },
   { href: '/imports', label: 'Confluence Import', icon: FileInput, description: 'Confluence page imports' },
@@ -123,7 +125,13 @@ export function SidebarNav() {
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-3 py-4">
           {links.map(({ href, label, icon: Icon, description, children }) => {
             const childActive = children?.some((child) => isChildActive(child.href, pathname)) ?? false;
-            const active = !childActive && (pathname === href || (href !== '/' && pathname.startsWith(href)));
+            // An entry with children (e.g. Processing) must only read as
+            // active on an exact pathname match — startsWith(href) would
+            // also fire for every child route (e.g. /processing/new),
+            // double-highlighting parent and child at once.
+            const active = children
+              ? pathname === href
+              : pathname === href || (href !== '/' && pathname.startsWith(href));
 
             if (!children) {
               return (

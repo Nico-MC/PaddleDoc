@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Jobs can be re-run with a different OCR profile: `POST /api/v1/jobs/{id}/restart` now
+  accepts an optional `{"profile_id": ...}` body (validated against the profile registry,
+  persisted as previous/requested/effective profile like the existing lower-profile retry),
+  and both the jobs table and the job detail page grew a "Re-run with profile…" dialog for
+  finished and failed jobs. Confluence-imported pages stay excluded, as with Restart
+- Confluence import runs are re-runnable with edits: the run detail API now exposes
+  `source_id` and the stored options snapshot, and an "Edit & run again" action on the
+  imports list and run detail opens the import wizard prefilled with that run's connection,
+  scope, and options (`/imports/new?from=<run>`) — starting it creates a new run, so history
+  and page-version chaining stay intact
+- The markdown editor is reachable from the jobs table: an Edit action per finished job
+  opens the job detail page straight in edit mode (`?edit=1`), and the detail page's
+  toolbar gained an "Edit markdown" button that jumps to the editor
+- Identity providers have a "Use email as username" switch (for IdPs like Microsoft Entra
+  whose `preferred_username` is a UPN): when enabled, the claimed email becomes the
+  account's username at provisioning, and existing accounts are renamed on their next
+  login — skipped safely when another account already holds that name or the IdP sent no
+  real email claim (migration 0012)
+- The Processing page is now an overview: per-user stat tiles (running/finished/failed,
+  pages processed), a breakdown by job type (single, multiple files, Confluence import,
+  mail), and the most recent jobs — the upload wizard moved to its own **File Task** entry
+  under Processing in the sidebar (`/processing/new`)
 - PaddleDoc has an app icon: two crossed paddles behind a document page on the emerald
   tile — served as SVG favicon and apple-touch-icon, used as the brand mark in the
   sidebar and on the login/setup pages (shared `PaddleDocLogo` component), and shown
@@ -22,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark can run against
 
 ### Changed
+- The File Task wizard sheds its email, tags, and password fields; folder creation
+  (folder + subfolder) moved into an "Add folder" dialog. The department field remains for
+  multi-file batches
+- The jobs table breathes again: real column gaps and no-wrap cells (profile, pages, and
+  quality no longer run together into one string) and a wider page container. The New Task
+  button left the Jobs page — starting tasks lives in the sidebar now
 - The sidebar is now two levels deep: Processing carries Jobs, API Mail Extraction (the
   former Mail entry) and Confluence Import (which previously had no navigation entry at all)
   as a collapsible submenu, and Benchmark is named **VL Benchmark** to say what it compares —
@@ -30,10 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page into a **Paddle** tab in the admin area, where they belong: `PUT /api/v1/paddle/settings`
   has always required an admin, so non-admin users were shown a form that failed with 403 on
   save. The Processing page still reads the deployment default to preselect a profile
-- The Processing page opens on the upload flow instead of a settings panel, and its three
-  entry points — Single file, Multiple files, Import from Confluence — are laid out as three
-  equally sized tiles (they previously sat in a four-column grid, leaving the Confluence tile
-  alone in its row)
+- Confluence importing has exactly one entry point: the wizard's "Import from Confluence"
+  tile is gone, and everything import-related lives under Processing > Confluence Import.
+  The File Task wizard keeps two equally sized tiles, Single file and Multiple files
+- One naming scheme throughout: the processed items are **Jobs** everywhere (the jobs page
+  was still headlined "Tasks"), and **File Task** is deliberately the only "task" — the flow
+  that creates jobs from uploads. Alongside, the jobs table dropped its never-rendered
+  title/description/compact/hideHeader props and dead password state, and the orphaned
+  documents-center component was deleted — the frontend lints with zero warnings again
 - The home dashboard dropped the "Document Magic" marketing hero and its Tasks shortcut —
   navigation runs through the sidebar. The live service readout it contained (pipeline state,
   Paddle service, queue depth, containers, worker nodes, GPU/CPU runtime) survives as a
@@ -41,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the backend health check fails
 
 ### Fixed
+- Uploading files that already exist as identical versions during a multi-file batch
+  looked like nothing happened: the "N unchanged file(s) skipped" notice (and the upload
+  progress panel) rendered only on the wizard's last step, while collection uploads happen
+  on step 2. The feedback now shows on every step, in a visible notice box
 - Every page of every Confluence import failed on PostgreSQL with
   `ForeignKeyViolation: import_page_states_job_id_fkey`. `ImportPageState` carries the raw
   `jobs.id` foreign key but no `relationship()` to `Job`, so SQLAlchemy's unit of work saw no

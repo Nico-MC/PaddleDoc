@@ -689,6 +689,84 @@ def test_run_detail_exposes_progress_errors_and_jobs():
     assert 'current_page_title' in body
 
 
+def test_run_detail_exposes_source_id_and_options_ignoring_extra_keys():
+    user = _user('imp-run-detail-opts')
+    source = _make_source(user.id)
+    db = _db()
+    try:
+        run = ImportRun(
+            owner_id=user.id,
+            source_id=source.id,
+            scope_type='space',
+            scope_value='DOC',
+            status=ImportRunStatus.FINISHED,
+            # is_refresh is written by the auto-refresh worker path and is
+            # not a field on ImportRunOptions -- must be ignored, not 422.
+            options={
+                'max_pages': 50,
+                'max_depth': 3,
+                'include_attachments': False,
+                'ocr_attachments': True,
+                'ocr_profile_id': 'ppocrv6_medium',
+                'folder': 'docs',
+                'subfolder': 'confluence',
+                'tags': ['a', 'b'],
+                'email': 'me@example.com',
+                'is_refresh': True,
+            },
+            state={'frontier': [], 'visited': {}, 'errors': []},
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        run_id = run.id
+        db.expunge(run)
+    finally:
+        db.close()
+
+    client = login_as(user.username)
+    resp = client.get(f'/api/v1/import/runs/{run_id}')
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body['source_id'] == source.id
+    assert 'is_refresh' not in body['options']
+    assert body['options'] == {
+        'max_pages': 50,
+        'max_depth': 3,
+        'include_attachments': False,
+        'ocr_attachments': True,
+        'ocr_profile_id': 'ppocrv6_medium',
+        'folder': 'docs',
+        'subfolder': 'confluence',
+        'tags': ['a', 'b'],
+        'email': 'me@example.com',
+    }
+
+    # Deleted source -> source_id goes NULL, run keeps its history.
+    del_client = client
+    assert del_client.delete(f'/api/v1/import/sources/{source.id}').status_code == 200
+    resp2 = client.get(f'/api/v1/import/runs/{run_id}')
+    assert resp2.status_code == 200
+    assert resp2.json()['source_id'] is None
+
+
+def test_run_detail_options_default_for_minimal_stored_options():
+    # _make_run stores only {'max_pages': 10}; the rest of ImportRunOptions
+    # must fall back to its schema defaults rather than 422ing.
+    user = _user('imp-run-detail-opts-min')
+    run = _make_run(user.id, status=ImportRunStatus.PENDING)
+    client = login_as(user.username)
+
+    resp = client.get(f'/api/v1/import/runs/{run.id}')
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body['source_id'] is None
+    assert body['options']['max_pages'] == 10
+    assert body['options']['max_depth'] is None
+    assert body['options']['include_attachments'] is True
+    assert body['options']['tags'] == []
+
+
 def test_cancel_semantics_pending_running_stale_finished():
     user = _user('imp-run-cancel')
     client = login_as(user.username)

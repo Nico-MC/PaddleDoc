@@ -400,7 +400,7 @@ def _sign_id_token(key: RSAKey, **claim_overrides) -> str:
     return joserfc_jwt.encode({'alg': 'RS256', 'kid': 'test-kid'}, claims, key)
 
 
-def _make_oidc_provider(slug: str = 'test-oidc') -> AuthProvider:
+def _make_oidc_provider(slug: str = 'test-oidc', *, use_email_as_username: bool = False) -> AuthProvider:
     db = _db()
     try:
         provider = AuthProvider(
@@ -410,6 +410,7 @@ def _make_oidc_provider(slug: str = 'test-oidc') -> AuthProvider:
             client_id='test-client-id',
             client_secret_encrypted=encrypt_client_secret('idp-client-secret'),
             enabled=True,
+            use_email_as_username=use_email_as_username,
         )
         db.add(provider)
         db.commit()
@@ -418,6 +419,31 @@ def _make_oidc_provider(slug: str = 'test-oidc') -> AuthProvider:
         return provider
     finally:
         db.close()
+
+
+def _oidc_login(client: TestClient, monkeypatch: pytest.MonkeyPatch, slug: str, **claim_overrides):
+    """Drives the full authorize -> callback dance for `slug` and returns the
+    callback response. `claim_overrides` go straight into the signed ID
+    token (see `_sign_id_token`) -- e.g. sub=..., email=..., preferred_username=...
+    """
+    signing_key, key_set = _rsa_keypair_and_jwks()
+    monkeypatch.setattr(auth_module, 'generate_token', lambda length=30: 'fixed-oidc-test-token')
+    monkeypatch.setattr(auth_module, 'get_discovery_document', lambda issuer_url: _DISCOVERY_DOCUMENT)
+
+    authorize_resp = client.get(f'/api/v1/auth/oidc/{slug}/authorize', follow_redirects=False)
+    assert authorize_resp.status_code == 302
+
+    id_token = _sign_id_token(signing_key, nonce='fixed-oidc-test-token', **claim_overrides)
+    monkeypatch.setattr(
+        auth_module, 'exchange_code_for_tokens', lambda token_endpoint, **kw: {'id_token': id_token, 'access_token': 'at'}
+    )
+    monkeypatch.setattr(auth_module, 'fetch_jwks', lambda jwks_uri: key_set)
+
+    return client.get(
+        f'/api/v1/auth/oidc/{slug}/callback',
+        params={'code': 'auth-code-123', 'state': 'fixed-oidc-test-token'},
+        follow_redirects=False,
+    )
 
 
 _DISCOVERY_DOCUMENT = {
@@ -489,6 +515,190 @@ def test_oidc_callback_rejects_idp_initiated_login(client: TestClient) -> None:
 def test_oidc_authorize_unknown_provider_404(client: TestClient) -> None:
     resp = client.get('/api/v1/auth/oidc/does-not-exist/authorize', follow_redirects=False)
     assert resp.status_code == 404
+
+
+# --- OIDC: use_email_as_username -----------------------------------------------------
+
+def test_oidc_callback_use_email_as_username_provisions_with_email(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switch on + a real email claim: the new user's username is the full
+    email address, not the (UPN-shaped) preferred_username."""
+    _make_oidc_provider('test-oidc-email-username', use_email_as_username=True)
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-email-username',
+        sub='idp-subject-email-username',
+        email='entrauser@example.com',
+        preferred_username='entrauser-upn-garbage',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-email-username'))
+        assert created is not None
+        assert created.email == 'entrauser@example.com'
+        assert created.username == 'entrauser@example.com'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_use_email_as_username_off_keeps_preferred_username(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: switch off (the default) keeps the pre-existing
+    preferred_username-based derivation untouched."""
+    _make_oidc_provider('test-oidc-username-off', use_email_as_username=False)
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-username-off',
+        sub='idp-subject-username-off',
+        email='someone@example.com',
+        preferred_username='someoneupn',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-username-off'))
+        assert created is not None
+        assert created.username == 'someoneupn'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_use_email_as_username_renames_existing_user_on_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switch on: an existing user's username is nudged to their current
+    email claim on login, not just at first provisioning."""
+    provider = _make_oidc_provider('test-oidc-rename', use_email_as_username=True)
+    _create_user(
+        username='old-upn-username',
+        email='renameuser@example.com',
+        password=None,
+        oidc_provider_id=provider.id,
+        oidc_subject='idp-subject-rename',
+    )
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-rename',
+        sub='idp-subject-rename',
+        email='renameuser@example.com',
+        preferred_username='old-upn-username',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        user = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-rename'))
+        assert user is not None
+        assert user.username == 'renameuser@example.com'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_use_email_as_username_skips_rename_on_collision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different, unrelated user already owns the email-shaped username:
+    the rename must be skipped silently and login must still succeed."""
+    provider = _make_oidc_provider('test-oidc-collision', use_email_as_username=True)
+    other_user = _create_user(username='collideuser@example.com', email='someoneelse@example.com', password=None)
+    renaming_user = _create_user(
+        username='old-username',
+        email='collideuser@example.com',
+        password=None,
+        oidc_provider_id=provider.id,
+        oidc_subject='idp-subject-collision',
+    )
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-collision',
+        sub='idp-subject-collision',
+        email='collideuser@example.com',
+        preferred_username='old-username',
+    )
+    assert resp.status_code == 302
+    assert 'paddledoc_session' in client.cookies
+
+    db = _db()
+    try:
+        renamed = db.get(User, renaming_user.id)
+        assert renamed is not None
+        assert renamed.username == 'old-username'
+        unaffected = db.get(User, other_user.id)
+        assert unaffected is not None
+        assert unaffected.username == 'collideuser@example.com'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_use_email_as_username_ignores_synthetic_fallback_email_on_provisioning(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `email` claim at all: provisioning still synthesizes
+    `sub@slug.oidc.invalid` as the user's *email* (existing behavior), but
+    must never use that synthetic address as the username -- even with the
+    switch on it falls back to preferred_username, same as the switch-off
+    case."""
+    _make_oidc_provider('test-oidc-synthetic-email', use_email_as_username=True)
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-synthetic-email',
+        sub='idp-subject-synthetic-email',
+        email=None,
+        preferred_username='realupnuser',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-synthetic-email'))
+        assert created is not None
+        assert created.email == 'idp-subject-synthetic-email@test-oidc-synthetic-email.oidc.invalid'
+        assert created.username == 'realupnuser'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_use_email_as_username_no_email_claim_skips_rename_on_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing user, switch on, but this login's ID token carries no email
+    claim: must not rename onto a synthesized address, must not rename at
+    all."""
+    provider = _make_oidc_provider('test-oidc-no-email-claim', use_email_as_username=True)
+    _create_user(
+        username='kept-username',
+        email='keptuser@example.com',
+        password=None,
+        oidc_provider_id=provider.id,
+        oidc_subject='idp-subject-no-email-claim',
+    )
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-no-email-claim',
+        sub='idp-subject-no-email-claim',
+        email=None,
+        preferred_username='old-username',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        user = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-no-email-claim'))
+        assert user is not None
+        assert user.username == 'kept-username'
+    finally:
+        db.close()
 
 
 # --- admin: worker logs -------------------------------------------------------
