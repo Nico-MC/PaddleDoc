@@ -129,6 +129,14 @@ function mailMessageIdForJob(job: Job): string | null {
 function profileForJob(job: Job): string {
   const settings = job.processing_info?.settings;
   const execution = job.processing_info?.execution;
+  // A 'vl:<connection-id>' selection wins over the execution record: the
+  // execution always carries the real pipeline id (e.g. openai_vision), but
+  // the user-facing identity of such a job is the VL connection it ran
+  // against.
+  const configuredVlProfile = typeof settings?.profile_id === 'string' ? settings.profile_id : '';
+  if (configuredVlProfile.startsWith('vl:')) {
+    return configuredVlProfile;
+  }
   const executionProfile = typeof execution?.profile_id === 'string' ? execution.profile_id : '';
   if (executionProfile) {
     return executionProfile;
@@ -168,8 +176,35 @@ const PROFILE_ABBREVIATIONS: Record<string, { short: string; label: string }> = 
   openai_vision: { short: 'oai', label: 'OpenAI-compatible Vision API' },
 };
 
-/** Falls back to the raw id (as both short label and tooltip) for unknown profiles. */
-function profileAbbreviation(profileId: string): { short: string; label: string } {
+/**
+ * Regular (non-benchmark) jobs run through a `vl:<connection-id>` profile
+ * stamp the same `variant_label` companion field that benchmark variant
+ * jobs use for the VL connection's display name (see
+ * backend/app/api/benchmarks.py's variant_specs/extra_settings -- 'label'
+ * becomes 'variant_label'). Older jobs, or a job whose settings predate
+ * this field, simply have no variant_label -- callers fall back to the raw
+ * connection id in that case.
+ */
+function vlConnectionNameFromSettings(settings: Record<string, unknown> | undefined): string | null {
+  const label = settings?.variant_label;
+  return typeof label === 'string' && label.trim() ? label.trim() : null;
+}
+
+/**
+ * Falls back to the raw id (as both short label and tooltip) for unknown
+ * static profiles. `vl:<connection-id>` profiles (dynamic VL connections,
+ * see GET /api/v1/paddle/capabilities) get a dedicated 'vl' chip instead of
+ * the raw uuid -- with the connection's name appended when settings carry
+ * one, else the raw id is still available via the tooltip.
+ */
+function profileAbbreviation(profileId: string, settings?: Record<string, unknown>): { short: string; label: string } {
+  if (profileId.startsWith('vl:')) {
+    const connectionId = profileId.slice('vl:'.length);
+    const name = vlConnectionNameFromSettings(settings);
+    return name
+      ? { short: `vl:${name}`, label: `VL connection "${name}" (${connectionId})` }
+      : { short: 'vl', label: `VL connection ${connectionId}` };
+  }
   return PROFILE_ABBREVIATIONS[profileId] ?? { short: profileId, label: profileId };
 }
 
@@ -860,10 +895,10 @@ export function DocumentBrowser({
                         if (rawProfile === '-') {
                           return <span className="text-slate-700">-</span>;
                         }
-                        const { short, label } = profileAbbreviation(rawProfile);
+                        const { short, label } = profileAbbreviation(rawProfile, job.processing_info?.settings);
                         return (
                           <span
-                            className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700"
+                            className="inline-block max-w-[10rem] truncate rounded bg-slate-100 px-1.5 py-0.5 align-bottom font-mono text-xs text-slate-700"
                             title={label}
                           >
                             {short}

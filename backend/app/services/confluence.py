@@ -75,6 +75,17 @@ class Page:
     url: str  # human-facing page URL on the source
 
 
+@dataclass(frozen=True)
+class PageContext:
+    """Where a page sits in its space: the space key (None when the
+    response carries no space) and the titles of its ancestors, ordered
+    from the space root down to the page's direct parent (the page itself
+    is never included)."""
+
+    space_key: str | None
+    ancestor_titles: list[str]
+
+
 @dataclass
 class AttachmentMeta:
     id: str
@@ -101,6 +112,8 @@ class PageSource(Protocol):
     protocol."""
 
     def fetch_page(self, page_id: str) -> Page: ...
+
+    def fetch_context(self, page_id: str) -> PageContext: ...
 
     def iter_children(self, page_id: str) -> Iterator[str]: ...
 
@@ -282,6 +295,23 @@ class _ConfluenceClientBase:
     def _attachment_size(self, item: dict):
         raise NotImplementedError
 
+    def _parse_context(self, data: dict) -> PageContext:
+        # `ancestors` comes back root-first (Confluence's own order), so no
+        # reordering is needed -- the direct parent is simply the last one.
+        space = data.get('space')
+        space_key = space.get('key') if isinstance(space, dict) else None
+        ancestor_titles: list[str] = []
+        ancestors = data.get('ancestors')
+        if isinstance(ancestors, list):
+            for ancestor in ancestors:
+                title = ancestor.get('title') if isinstance(ancestor, dict) else None
+                if isinstance(title, str):
+                    ancestor_titles.append(title)
+        return PageContext(
+            space_key=str(space_key) if space_key else None,
+            ancestor_titles=ancestor_titles,
+        )
+
 
 class ConfluenceV2Client(_ConfluenceClientBase):
     """Confluence Cloud, v2 REST (`/wiki/api/v2`), cursor pagination via
@@ -318,6 +348,10 @@ class ConfluenceV2Client(_ConfluenceClientBase):
             html=html,
             url=url,
         )
+
+    def fetch_context(self, page_id: str) -> PageContext:
+        data = self._get_json(f'{self._api}/pages/{quote(str(page_id), safe="")}?expand=ancestors,space')
+        return self._parse_context(data)
 
     def iter_children(self, page_id: str) -> Iterator[str]:
         first = f'{self._api}/pages/{quote(str(page_id), safe="")}/children?limit={_LIST_PAGE_LIMIT}'
@@ -408,6 +442,10 @@ class ConfluenceV1Client(_ConfluenceClientBase):
             html=html,
             url=url,
         )
+
+    def fetch_context(self, page_id: str) -> PageContext:
+        data = self._get_json(f'{self._api}/content/{quote(str(page_id), safe="")}?expand=ancestors,space')
+        return self._parse_context(data)
 
     def iter_children(self, page_id: str) -> Iterator[str]:
         first = f'{self._api}/content/{quote(str(page_id), safe="")}/child/page?start=0&limit={_LIST_PAGE_LIMIT}'

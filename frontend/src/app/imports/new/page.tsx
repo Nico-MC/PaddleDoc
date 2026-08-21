@@ -7,6 +7,7 @@ import { CheckCircle2, LoaderCircle, XCircle } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
+import { Toggle } from '@/components/admin/admin-shared';
 import { ApiError, apiJson } from '@/lib/api';
 import {
   type FolderOptions,
@@ -48,6 +49,9 @@ type ImportRunOptionsPayload = {
   subfolder: string;
   tags: string[];
   email: string;
+  // Optional: an older backend may not send this yet, so read it
+  // defensively (?? false) rather than assuming presence.
+  path_tags?: boolean;
 };
 
 type ImportRunDetailWithPrefill = ImportRunDetail & {
@@ -107,6 +111,7 @@ function NewImportPageInner() {
   const [maxDepth, setMaxDepth] = useState('');
   const [includeAttachments, setIncludeAttachments] = useState(true);
   const [ocrAttachments, setOcrAttachments] = useState(false);
+  const [pathTags, setPathTags] = useState(false);
   const [capabilities, setCapabilities] = useState<PaddleCapabilities>({ profiles: [] });
   const [selectedProfileId, setSelectedProfileId] = useState('');
 
@@ -174,6 +179,7 @@ function NewImportPageInner() {
           setMaxDepth(options.max_depth != null ? String(options.max_depth) : '');
           setIncludeAttachments(options.include_attachments);
           setOcrAttachments(options.ocr_attachments);
+          setPathTags(options.path_tags ?? false);
           setFolder(options.folder ?? '');
           setSubfolder(options.subfolder ?? '');
           setTags((options.tags ?? []).join(', '));
@@ -403,6 +409,7 @@ function NewImportPageInner() {
             max_depth: parsedMaxDepth,
             include_attachments: includeAttachments,
             ocr_attachments: includeAttachments && ocrAttachments,
+            path_tags: pathTags,
             ocr_profile_id:
               includeAttachments && ocrAttachments && selectedProfileId ? selectedProfileId : null,
             folder: folder.trim(),
@@ -848,6 +855,13 @@ function NewImportPageInner() {
                       </p>
                     </label>
                   )}
+                  <div>
+                    <Toggle checked={pathTags} onChange={setPathTags} label="Use hierarchy as tags" />
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      Each page&apos;s Confluence breadcrumb (space &gt; parent pages) is added to its job tags, so
+                      the jobs list can filter by section.
+                    </p>
+                  </div>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">

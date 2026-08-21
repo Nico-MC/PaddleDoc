@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select, update
 
@@ -23,9 +24,10 @@ from app.models.models import (
     Job,
     JobArtifact,
     JobStatus,
+    VlConnection,
 )
 from app.services import security
-from app.services.confluence import AttachmentMeta, ConfluenceError, Page
+from app.services.confluence import AttachmentMeta, ConfluenceError, Page, PageContext
 from app.workers import import_tasks
 from app.workers import tasks as worker_tasks
 from app.workers.celery_app import celery_app
@@ -61,16 +63,29 @@ def _attachment(page_id: str, filename: str, data: bytes, *, size_bytes: int | N
     )
 
 
+_EMPTY_CONTEXT = PageContext(space_key=None, ancestor_titles=[])
+
+
 class FakeClient:
     """In-memory PageSource over a small page tree."""
 
-    def __init__(self, pages: dict[str, Page], children: dict[str, list[str]], attachments=None, root_id: str = '100'):
+    def __init__(
+        self,
+        pages: dict[str, Page],
+        children: dict[str, list[str]],
+        attachments=None,
+        root_id: str = '100',
+        contexts: dict[str, PageContext] | None = None,
+    ):
         self.pages = pages
         self.children = children
         self.attachments = attachments or {}
         self.root_id = root_id
+        self.contexts = contexts or {}
         self.fetched: list[str] = []
+        self.context_fetched: list[str] = []
         self.on_fetch = None  # optional hook(page_id), for mid-run side effects
+        self.fetch_context_error: ConfluenceError | None = None
 
     def fetch_page(self, page_id: str) -> Page:
         self.fetched.append(page_id)
@@ -79,6 +94,12 @@ class FakeClient:
         if page_id not in self.pages:
             raise ConfluenceError(f'Confluence API request returned HTTP 404 for page {page_id}', status_code=404)
         return self.pages[page_id]
+
+    def fetch_context(self, page_id: str) -> PageContext:
+        self.context_fetched.append(page_id)
+        if self.fetch_context_error is not None:
+            raise self.fetch_context_error
+        return self.contexts.get(page_id, _EMPTY_CONTEXT)
 
     def iter_children(self, page_id: str):
         return iter(self.children.get(page_id, []))
@@ -205,6 +226,20 @@ def _get_run(run_id: str) -> ImportRun:
         db.refresh(run)
         db.expunge(run)
         return run
+    finally:
+        db.close()
+
+
+def _frontmatter(markdown: str) -> dict:
+    end = markdown.find('\n---\n', 4)
+    return yaml.safe_load(markdown[4:end + 1])
+
+
+def _job_tag_names(job_id: str) -> set[str]:
+    db = _db()
+    try:
+        job = db.get(Job, job_id)
+        return {tag.name for tag in job.tags}
     finally:
         db.close()
 
@@ -492,8 +527,9 @@ def test_soft_time_limit_requeues_and_reimports_in_flight_page(sent, client_hold
     assert run.status == ImportRunStatus.RUNNING
     assert run.pages_imported == 1
     # The in-flight page is back at the head of the persisted frontier and
-    # not falsely marked visited.
-    assert run.state['frontier'][0] == ['101', 1]
+    # not falsely marked visited -- with its discovered path/parent context
+    # intact (spec AUFGABE 1), not silently dropped by the re-insert.
+    assert run.state['frontier'][0] == ['101', 1, ['Root Page'], '100']
     assert '101' not in run.state['visited']
     assert sent == [('import_confluence', [run_id, 1])]
 
@@ -669,6 +705,55 @@ def test_ocr_attachment_spawns_child_job(sent, client_holder) -> None:
         db.close()
 
 
+def _make_vl_connection(*, name: str = 'Attach VL', enabled: bool = True) -> VlConnection:
+    db = _db()
+    try:
+        connection = VlConnection(
+            name=name,
+            base_url='https://vl.example.com',
+            model='vl-model',
+            api_key_encrypted=security.encrypt_vl_api_key('secret-key'),
+            system_prompt='',
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def test_ocr_attachment_with_vl_profile_gets_vl_settings_and_dispatches_openai_vision(sent, client_holder) -> None:
+    client = _three_page_tree()
+    client_holder['client'] = client
+    owner = _make_owner()
+    connection = _make_vl_connection(name='Attach Vision')
+    run_id = _make_run(
+        owner.id,
+        _make_source(owner.id),
+        options={'ocr_attachments': True, 'ocr_profile_id': f'vl:{connection.id}'},
+    )
+
+    import_confluence(run_id, 0)
+    others = _drain_continuations(sent)
+
+    jobs = _run_jobs(run_id)
+    children = [j for j in jobs if j.processing_info['settings']['mode'] == 'import_attachment']
+    assert len(children) == 1
+    child = children[0]
+    child_settings = child.processing_info['settings']
+    # Display value stays 'vl:<connection_id>' -- see resolve_profile_selection.
+    assert child_settings['profile_id'] == f'vl:{connection.id}'
+    assert child_settings['vl_connection_id'] == connection.id
+    assert child_settings['variant_label'] == 'Attach Vision'
+    # Dispatched with the real pipeline id (both the page-commit send and the
+    # finalize backstop sweep), never the raw 'vl:<connection_id>' display
+    # value -- see effective_pipeline_profile_id.
+    assert others == [('process_job', [child.id, 'openai_vision', 'import_attachment', '', None])] * 2
+
+
 def test_attachment_rules_svg_never_image_and_magic_bytes_enforced(sent, client_holder) -> None:
     pages = {'200': _page('200', 'Attachment Rules', '<p>body</p>')}
     attachments = {
@@ -796,6 +881,168 @@ def test_missing_page_fails_that_page_only(sent, client_holder) -> None:
     assert run.pages_failed == 1
     assert any(e['page_id'] == '102' for e in run.state['errors'])
     assert run.state['visited']['102'] is None  # not retried on resume
+
+
+# --- Confluence path/space context (spec AUFGABE 1/2/3) ------------------------
+
+def test_path_context_threaded_from_root_through_children(sent, client_holder) -> None:
+    # Root context (fetch_context on the run root) supplies the part of the
+    # path ABOVE the crawled subtree; each child's own path is threaded
+    # purely from the crawl itself (parent path + parent title) -- no
+    # further fetch_context calls needed.
+    client = _three_page_tree()
+    client.contexts = {'100': PageContext(space_key='DOCS', ancestor_titles=['Space Home'])}
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    # fetch_context is called exactly once, for the root -- never per child.
+    assert client.context_fetched == ['100']
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+
+    root_meta = _frontmatter(by_page['100'].result_markdown)
+    assert root_meta['space'] == 'DOCS'
+    assert root_meta['confluence_path'] == ['Space Home']
+    assert root_meta['parent_title'] == 'Space Home'
+    assert root_meta['depth'] == 1
+    # Breadcrumb line directly after the frontmatter fence, then a blank
+    # line before the converted body.
+    assert '---\n\n> Confluence: Space Home\n\n' in by_page['100'].result_markdown
+
+    child_meta = _frontmatter(by_page['101'].result_markdown)
+    assert child_meta['space'] == 'DOCS'
+    assert child_meta['confluence_path'] == ['Space Home', 'Root Page']
+    assert child_meta['parent_title'] == 'Root Page'
+    assert child_meta['depth'] == 2
+    assert '> Confluence: Space Home › Root Page' in by_page['101'].result_markdown
+
+
+def test_resume_tolerates_legacy_two_element_frontier_entries(sent, client_holder) -> None:
+    # A frontier persisted by a pre-path-tracking version of this worker:
+    # entries are plain [page_id, depth] pairs. Resuming from it must not
+    # crash; pages popped from it simply carry an empty path (no
+    # confluence_path/space frontmatter, no breadcrumb) and the root-context
+    # fetch (gated on pages_discovered == 0) is not re-run for an
+    # already-in-progress run.
+    client = _three_page_tree()
+    client.contexts = {'100': PageContext(space_key='DOCS', ancestor_titles=['Space Home'])}
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    db = _db()
+    try:
+        db.execute(
+            update(ImportRun)
+            .where(ImportRun.id == run_id)
+            .values(
+                pages_discovered=3,
+                pages_imported=1,
+                root_page_title='Root Page',
+                state={'frontier': [['101', 1], ['102', 1]], 'visited': {'100': str(uuid.uuid4())}, 'errors': []},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.pages_imported == 3
+    assert client.context_fetched == []  # never re-fetched for an already-started run
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+    for page_id in ('101', '102'):
+        meta = _frontmatter(by_page[page_id].result_markdown)
+        assert 'confluence_path' not in meta
+        assert 'space' not in meta
+        assert 'children_titles' not in meta
+
+
+def test_path_tags_option_adds_ancestor_titles_to_job_tags(sent, client_holder) -> None:
+    client = _three_page_tree()
+    client.contexts = {'100': PageContext(space_key='DOCS', ancestor_titles=['Space Home'])}
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(
+        owner.id, _make_source(owner.id), options={'tags': ['imported'], 'path_tags': True}
+    )
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+    assert _job_tag_names(by_page['100'].id) == {'imported', 'Space Home'}
+    assert _job_tag_names(by_page['101'].id) == {'imported', 'Space Home', 'Root Page'}
+
+
+def test_path_tags_default_off_leaves_only_run_tags(sent, client_holder) -> None:
+    client = _three_page_tree()
+    client.contexts = {'100': PageContext(space_key='DOCS', ancestor_titles=['Space Home'])}
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id), options={'tags': ['imported']})
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+    assert _job_tag_names(by_page['100'].id) == {'imported'}
+    assert _job_tag_names(by_page['101'].id) == {'imported'}
+
+
+def test_finalize_stamps_children_titles_onto_parent_markdown(sent, client_holder) -> None:
+    client = _three_page_tree()
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+    root_meta = _frontmatter(by_page['100'].result_markdown)
+    assert root_meta['children_titles'] == ['Child One', 'Child Two']
+    # Leaf pages have no children of their own: no key added.
+    assert 'children_titles' not in _frontmatter(by_page['101'].result_markdown)
+
+
+def test_root_context_fetch_failure_is_best_effort(sent, client_holder) -> None:
+    client = _three_page_tree()
+    client.fetch_context_error = ConfluenceError('root context unreachable', status_code=500)
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    import_confluence(run_id, 0)
+    _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    # A failed root-context fetch degrades to an empty context; it must
+    # never fail the run.
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.pages_imported == 3
+    assert any('root context' in e['error'] for e in run.state['errors'])
+
+    jobs = _run_jobs(run_id)
+    by_page = {j.processing_info['settings']['import']['source_page_id']: j for j in jobs}
+    root_meta = _frontmatter(by_page['100'].result_markdown)
+    assert 'space' not in root_meta
+    assert 'confluence_path' not in root_meta
 
 
 # --- Setup failures ------------------------------------------------------------

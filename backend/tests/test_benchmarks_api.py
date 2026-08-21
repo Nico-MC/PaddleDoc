@@ -313,6 +313,31 @@ def test_user_vl_connections_only_enabled_and_minimal_shape():
     assert 'Disabled Conn' not in names
 
 
+def test_paddle_capabilities_lists_enabled_vl_connections_after_static_profiles():
+    user = _user('vlcaps', role=UserRole.USER)
+    client = login_as(user.username)
+    enabled = _make_vl_connection(name='Enabled Vision', model='gpt-4o', enabled=True)
+    _make_vl_connection(name='Disabled Vision', model='gpt-4o-mini', enabled=False)
+
+    resp = client.get('/api/v1/paddle/capabilities')
+    assert resp.status_code == 200
+    profiles = resp.json()['profiles']
+
+    static_profiles = [p for p in profiles if p['kind'] == 'ocr']
+    vl_profiles = [p for p in profiles if p['kind'] == 'vl']
+    # Static presets first, dynamic VL entries appended after -- see
+    # paddle_service.get_paddle_capabilities.
+    assert profiles == static_profiles + vl_profiles
+    assert any(p['value'] == 'ppocrv6_tiny' for p in static_profiles)
+
+    vl_values = {p['value'] for p in vl_profiles}
+    assert f'vl:{enabled.id}' in vl_values
+    assert all('Disabled Vision' != p['label'].removeprefix('VL: ') for p in vl_profiles)
+    enabled_entry = next(p for p in vl_profiles if p['value'] == f'vl:{enabled.id}')
+    assert enabled_entry['label'] == 'VL: Enabled Vision'
+    assert enabled_entry['description'] == 'gpt-4o — vision-language connection'
+
+
 # --- Benchmark create validation ------------------------------------------------
 
 def test_benchmark_create_zero_variants_returns_422():

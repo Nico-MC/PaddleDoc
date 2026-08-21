@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 from sqlalchemy import select
 
 from app.models.models import (
@@ -31,7 +32,7 @@ from app.models.models import (
     JobStatus,
 )
 from app.services import security
-from app.services.confluence import Page
+from app.services.confluence import ConfluenceError, Page, PageContext
 from app.workers import import_tasks
 from app.workers import refresh_tasks
 from app.workers.celery_app import celery_app
@@ -49,18 +50,36 @@ def _page(page_id: str, title: str, html: str, *, version: int) -> Page:
     )
 
 
+_EMPTY_CONTEXT = PageContext(space_key=None, ancestor_titles=[])
+
+
 class FakeClient:
     """Single-page PageSource -- these tests only exercise the per-page
-    diff, never discovery, so children/attachments are always empty."""
+    diff, never discovery, so children/attachments are always empty.
 
-    def __init__(self, page: Page) -> None:
+    Every fresh run's first chunk calls fetch_context once on the frontier
+    root (spec AUFGABE 1, in app/workers/import_tasks.py) -- a refresh run's
+    frontier root is exactly the tracked page here, so `context` (default:
+    empty) is what the re-imported/unchanged page's own path ends up
+    carrying, same as a manually started run."""
+
+    def __init__(self, page: Page, *, context: PageContext | None = None) -> None:
         self.page = page
+        self.context = context or _EMPTY_CONTEXT
         self.fetched: list[str] = []
+        self.context_fetched: list[str] = []
+        self.fetch_context_error: ConfluenceError | None = None
 
     def fetch_page(self, page_id: str) -> Page:
         self.fetched.append(page_id)
         assert page_id == self.page.id
         return self.page
+
+    def fetch_context(self, page_id: str) -> PageContext:
+        self.context_fetched.append(page_id)
+        if self.fetch_context_error is not None:
+            raise self.fetch_context_error
+        return self.context
 
     def iter_children(self, page_id: str):
         return iter(())
@@ -254,6 +273,11 @@ def _get_page_state(source_id: str, page_id: str) -> ImportPageState | None:
         db.close()
 
 
+def _frontmatter(markdown: str) -> dict:
+    end = markdown.find('\n---\n', 4)
+    return yaml.safe_load(markdown[4:end + 1])
+
+
 def _get_job(job_id: str) -> Job:
     db = _db()
     try:
@@ -405,6 +429,41 @@ def test_refresh_run_changed_page_creates_chained_job_and_updates_state(sent, cl
     state_row = _get_page_state(source_id, page_id)
     assert state_row.page_version == 4
     assert state_row.job_id == new_job_id
+
+
+def test_refresh_reimport_carries_confluence_path_context(sent, client_holder) -> None:
+    # Spec AUFGABE 4: a changed page's refresh re-import must carry the same
+    # space/confluence_path context a manually started run would -- inherited
+    # here from the shared import_confluence crawl's root fetch_context (the
+    # refresh run's frontier root IS this page, in this single-page test
+    # setup), not from any refresh-specific per-page call.
+    owner = _make_owner()
+    source_id = _make_source(owner.id)
+    page_id = 'P1'
+    prior_job_id = _make_prior_job(owner.id, page_id, version=3, document_version=2)
+    _make_page_state(source_id, page_id, version=3, job_id=prior_job_id)
+
+    client = FakeClient(
+        _page(page_id, 'Root Page', '<p>updated body</p>', version=4),
+        context=PageContext(space_key='DOCS', ancestor_titles=['Space Home']),
+    )
+    client_holder['client'] = client
+
+    run_id = _make_refresh_run(owner.id, source_id, scope_value=page_id)
+    import_confluence(run_id, 0)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.pages_imported == 1
+    assert client.context_fetched == [page_id]
+
+    new_job_id = run.state['visited'][page_id]
+    new_job = _get_job(new_job_id)
+    meta = _frontmatter(new_job.result_markdown)
+    assert meta['space'] == 'DOCS'
+    assert meta['confluence_path'] == ['Space Home']
+    assert meta['parent_title'] == 'Space Home'
+    assert '> Confluence: Space Home' in new_job.result_markdown
 
 
 def test_refresh_run_unchanged_page_with_deleted_job_reimports_instead_of_skipping(sent, client_holder) -> None:

@@ -53,6 +53,9 @@ _EXCESS_BLANK_LINES_RE = re.compile(r'\n{3,}')
 # captured so image embeds can be skipped. Frontmatter values never match
 # this shape, so the rewrite pass cannot touch the provenance `source:` URL.
 _MD_LINK_URL_RE = re.compile(r'(!?)(\[[^\]]*\]\()(https?://[^()\s]+)\)')
+# Same link shape, but capturing (text, url) and excluding image embeds via
+# the leading-'!' lookbehind -- used by is_navigation_page's link-density check.
+_NAV_LINK_RE = re.compile(r'(?<!!)\[([^\]]*)\]\(([^()\s]+)\)')
 
 _INFO_MACRO_LABELS = {
     'information': 'Info',
@@ -260,6 +263,57 @@ def render_frontmatter(meta: dict) -> str:
     return f'---\n{dumped}---\n\n'
 
 
+def add_frontmatter_keys(markdown: str, extra: dict) -> str:
+    """Non-destructively merge `extra` into `markdown`'s YAML frontmatter:
+    a key `extra` names that the document already has is left alone, only
+    the missing ones are added. The body is carried through byte-for-byte.
+    `markdown` without a recognizable '---\\n' ... '\\n---\\n' frontmatter
+    block (e.g. no frontmatter at all) is returned unchanged.
+
+    Like `render_frontmatter`, the merged mapping goes through
+    `yaml.safe_dump` only, never f-string interpolation -- an `extra` value
+    built from page titles (e.g. a breadcrumb path) is attacker-controllable
+    and must not be able to close the fence or inject sibling keys.
+    """
+    if not markdown.startswith('---\n'):
+        return markdown
+    end = markdown.find('\n---\n', 4)
+    if end == -1:
+        return markdown
+    frontmatter_block = markdown[4:end + 1]
+    body = markdown[end + len('\n---\n'):]
+    try:
+        meta = yaml.safe_load(frontmatter_block)
+    except yaml.YAMLError:
+        return markdown
+    if not isinstance(meta, dict):
+        return markdown
+    for key, value in extra.items():
+        meta.setdefault(key, value)
+    dumped = yaml.safe_dump(meta, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return f'---\n{dumped}---\n{body}'
+
+
+def is_navigation_page(body_markdown: str) -> bool:
+    """Heuristic flag for Confluence table-of-contents / children-macro
+    pages, whose whole body is essentially a list of links to other pages
+    rather than prose: true when `body_markdown` contains at least 5
+    markdown links AND at least 70% of its non-whitespace characters fall
+    inside link text or link targets. Image embeds (`![...](...)`) never
+    count as links. Deliberately conservative -- false whenever in doubt --
+    so `convert_page` can set the `is_navigation` frontmatter flag and
+    callers can filter such pages out of a RAG push.
+    """
+    matches = list(_NAV_LINK_RE.finditer(body_markdown))
+    if len(matches) < 5:
+        return False
+    total_chars = len(re.sub(r'\s+', '', body_markdown))
+    if total_chars == 0:
+        return False
+    link_chars = sum(len(re.sub(r'\s+', '', m.group(1))) + len(m.group(2)) for m in matches)
+    return link_chars / total_chars >= 0.7
+
+
 def convert_page(
     html: str,
     *,
@@ -271,15 +325,26 @@ def convert_page(
     import_run_id: str,
     imported_at: datetime | None = None,
     capture_attachments: bool = True,
+    space_key: str | None = None,
+    path_titles: list[str] | None = None,
 ) -> ConversionResult:
     """Full conversion for one page: pre-pass + markdownify + frontmatter.
     The result's markdown satisfies the `PUT /jobs/{id}/save` contract
     (starts with '---\\n'). `capture_attachments=False` (a run with
     include_attachments off) leaves same-host attachment images as absolute
-    URLs instead of artifacts/ refs that would never resolve."""
+    URLs instead of artifacts/ refs that would never resolve.
+
+    `space_key` and `path_titles` (the ancestor titles from the space root
+    down to this page's direct parent -- the page itself is never included)
+    are optional PageContext data: when given, they add `space` /
+    `confluence_path` / `parent_title` / `depth` frontmatter keys (only the
+    ones that are actually populated) and, for a non-empty `path_titles`, a
+    '> Confluence: A › B › C' breadcrumb line right after the
+    frontmatter."""
     body, images, linked_page_ids = html_to_markdown(
         html, base_url=base_url, capture_attachments=capture_attachments
     )
+    navigation = is_navigation_page(body)
     moment = (imported_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     meta = {
         'title': title,
@@ -289,6 +354,16 @@ def convert_page(
         'imported_at': moment.strftime('%Y-%m-%dT%H:%M:%SZ'),
         'import_run': import_run_id,
     }
+    if space_key:
+        meta['space'] = space_key
+    if path_titles:
+        meta['confluence_path'] = list(path_titles)
+        meta['parent_title'] = path_titles[-1]
+        meta['depth'] = len(path_titles)
+        breadcrumb = '> Confluence: ' + ' › '.join(path_titles)
+        body = f'{breadcrumb}\n\n{body}'
+    if navigation:
+        meta['is_navigation'] = True
     markdown = render_frontmatter(meta) + body + '\n'
     return ConversionResult(markdown=markdown, images=images, linked_page_ids=linked_page_ids)
 

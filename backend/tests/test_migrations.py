@@ -735,7 +735,7 @@ def test_migration_history_has_a_single_head():
     assert len(heads) == 1, f'alembic history has diverged into {len(heads)} heads: {heads}'
 
 
-def test_0012_provider_use_email_as_username_round_trip(tmp_path, monkeypatch) -> None:
+def test_0012_provider_email_username_round_trip(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / 'migration_scratch_0012.db'
     db_url = f'sqlite:///{db_path}'
     monkeypatch.setattr(settings, 'database_url', db_url)
@@ -782,3 +782,25 @@ def test_0012_provider_use_email_as_username_round_trip(tmp_path, monkeypatch) -
     insp = inspect(engine)
     provider_columns = {c['name'] for c in insp.get_columns('auth_providers')}
     assert 'use_email_as_username' in provider_columns
+
+
+def test_migration_revision_ids_fit_alembic_version_column():
+    """Alembic stores the current revision in alembic_version.version_num,
+    a VARCHAR(32). PostgreSQL enforces that limit; SQLite (this suite's
+    database) silently doesn't -- so an over-long revision id passes every
+    test here and then aborts the entire transactional-DDL upgrade on the
+    final version UPDATE against a real deployment.
+    0012_provider_use_email_as_username (35 chars) did exactly that: the
+    backend went into CrashLoopBackOff on k8s. This guards the whole chain.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option('script_location', str(BACKEND_DIR / 'alembic'))
+    too_long = [
+        rev.revision
+        for rev in ScriptDirectory.from_config(cfg).walk_revisions()
+        if len(rev.revision) > 32
+    ]
+    assert not too_long, f'revision ids exceed alembic_version VARCHAR(32): {too_long}'

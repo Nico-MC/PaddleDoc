@@ -50,6 +50,23 @@ const VERSION_STATUS_BADGE: Record<string, string> = {
   FAILED: 'bg-red-600/20 text-red-300',
 };
 
+/**
+ * Display form for a stored `settings.profile_id`. Static profile ids pass
+ * through unchanged; a `vl:<connection-id>` id (dynamic VL connection, see
+ * GET /api/v1/paddle/capabilities) is shown as "VL: <name>" using the
+ * `variant_label` companion field the backend stamps into settings
+ * (mirroring benchmark variant jobs, see backend/app/api/benchmarks.py),
+ * falling back to the raw connection id if that field is absent.
+ */
+function profileIdDisplay(profileId: string, settings: Record<string, unknown> | undefined): string {
+  if (!profileId.startsWith('vl:')) {
+    return profileId;
+  }
+  const label = settings?.variant_label;
+  const name = typeof label === 'string' && label.trim() ? label.trim() : null;
+  return name ? `VL: ${name}` : `VL: ${profileId.slice('vl:'.length)}`;
+}
+
 /** Defensive read of settings.mail.mail_message_id, mirroring the backend's isinstance() guards on processing_info. */
 function mailMessageIdFromSettings(settings: Record<string, unknown> | undefined): string | null {
   if (!settings || typeof settings !== 'object') {
@@ -365,8 +382,16 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
   const fallbackReason = typeof execution?.fallback_reason === 'string' ? execution.fallback_reason : null;
   const engine = typeof execution?.engine === 'string' ? execution.engine : null;
   const resolvedProfileId = typeof execution?.profile_id === 'string' ? execution.profile_id : null;
+  // A vl:<connection-id> request always resolves to the openai_vision
+  // pipeline internally (same as benchmark VL variants) -- that's expected
+  // behavior, not the worker falling back from an unknown profile, so it's
+  // excluded from the mismatch check below.
   const profileMismatch = Boolean(
-    job.status === 'FINISHED' && selectedProfileId && resolvedProfileId && selectedProfileId !== resolvedProfileId
+    job.status === 'FINISHED' &&
+      selectedProfileId &&
+      !selectedProfileId.startsWith('vl:') &&
+      resolvedProfileId &&
+      selectedProfileId !== resolvedProfileId
   );
   const suggestedLowerProfile =
     (typeof execution?.suggested_profile_id === 'string' ? execution.suggested_profile_id : null) ||
@@ -471,7 +496,7 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
           )}
         </p>
         <p>Created: {new Date(job.created_at).toLocaleString()}</p>
-        {selectedProfileId && <p>Profile: {selectedProfileId}</p>}
+        {selectedProfileId && <p>Profile: {profileIdDisplay(selectedProfileId, settings)}</p>}
         {selectedProfileLabel && <p>Profile name: {selectedProfileLabel}</p>}
         {converter && <p>Converter: {converter}</p>}
         {pageCount !== null && blockCount !== null && <p>Structure: {pageCount} pages, {blockCount} blocks</p>}

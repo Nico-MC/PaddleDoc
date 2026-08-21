@@ -58,7 +58,7 @@ from app.schemas.mail import (
     MailPartResponse,
 )
 from app.services.mail_ingest import MailParseError, compute_content_sha256, extract_mail_part, parse_mail_message
-from app.services.paddle_service import get_paddle_settings
+from app.services.paddle_service import effective_pipeline_profile_id, get_paddle_settings, resolve_profile_selection
 from app.services.security import enforce_rate_limit
 from app.workers.tasks import process_job
 
@@ -142,7 +142,12 @@ def _find_visible_mail_by_hash(db: Session, user: User, content_sha256: str) -> 
 def _job_dispatch_args(job: Job) -> str | None:
     info = job.processing_info if isinstance(job.processing_info, dict) else {}
     settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
-    return settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    stored_profile_id = settings_info.get('profile_id') if isinstance(settings_info.get('profile_id'), str) else None
+    # settings.profile_id is the display value (a 'vl:<connection_id>'
+    # selection stays 'vl:<connection_id>' there for the UI/re-run -- see
+    # paddle_service.resolve_profile_selection); process_job itself needs
+    # the real pipeline id ('openai_vision' for a vl: selection).
+    return effective_pipeline_profile_id(stored_profile_id)
 
 
 def _redispatch_pending_mail_jobs(db: Session, mail_message_id: str) -> int:
@@ -384,6 +389,10 @@ async def ingest_mail_message(
     subfolder_clean = subfolder.strip()
     tag_list = _parse_tags(tags)
     effective_profile_id = (profile_id or '').strip() or str(get_paddle_settings()['default_profile'])
+    # Raises 422 only for an unknown/disabled 'vl:<connection_id>' selection
+    # (see resolve_profile_selection); {} for a static profile. Resolved
+    # once, applied to every attachment job created below.
+    profile_settings = resolve_profile_selection(db, effective_profile_id)
 
     message_id = str(uuid.uuid4())
     message = MailMessage(
@@ -455,6 +464,10 @@ async def ingest_mail_message(
                                 'part_index': part.index,
                                 'rfc_message_id': parsed.envelope.rfc_message_id,
                             },
+                            # vl_connection_id/variant_label for a 'vl:'
+                            # selection ({} for a static profile) -- see
+                            # resolve_profile_selection.
+                            **profile_settings,
                         },
                     },
                 )

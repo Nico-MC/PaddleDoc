@@ -54,6 +54,12 @@ export type PaddleOption = {
   value: string;
   label: string;
   description: string;
+  /**
+   * Static OCR profiles omit this (treat as 'ocr'); dynamic entries for
+   * enabled VL connections (value `vl:<connection-id>`) carry kind: 'vl'.
+   * Optional/additive so older cached capabilities responses stay valid.
+   */
+  kind?: 'ocr' | 'vl';
 };
 
 export type PaddleCapabilities = {

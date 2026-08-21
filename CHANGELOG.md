@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- VL connections power normal processing, not just benchmarks: every enabled connection
+  now appears as a selectable profile (`VL: <name>`) in the File Task wizard, the
+  re-run-with-profile dialog, mail-API ingestion, and Confluence attachment OCR. Selecting
+  one stores the same settings shape benchmark variants use, so the worker path — including
+  key decryption strictly inside the worker and the clean failure when a connection was
+  removed — is shared and unchanged. Previously the "OpenAI-compatible Vision API" profile
+  read credentials from environment variables only, so a VL connection that worked in a
+  benchmark silently had no effect on normal uploads. The jobs table shows such jobs by
+  their connection name; the deployment default profile deliberately stays restricted to
+  the static OCR profiles
+- Confluence imports carry their logical location: every imported page's frontmatter now
+  records `space`, `confluence_path` (the ancestor titles down to its parent), `parent_title`,
+  and `depth`, and a `> Confluence: A › B › C` breadcrumb line sits at the top of the body so
+  RAG chunking keeps the context beyond the first chunk. The path comes from the crawl tree
+  itself (plus one `ancestors` API call for the import root), not from parsing rendered
+  table-of-contents macros — deterministic on every re-import, and auto-refresh resolves it
+  per changed page the same way, best effort. Pages that are essentially link lists (children/
+  TOC macros) are flagged `is_navigation: true`, parents get `children_titles` stamped in the
+  end-of-run pass that already rewrites cross-page links, and an opt-in **Use hierarchy as
+  tags** toggle on the import wizard turns breadcrumb parts into job tags so the jobs list
+  can filter by section
 - Sign-in events show up in the admin Logs tab: OIDC logins (with a claim diagnostic —
   which of email/preferred_username/upn/unique_name the ID token carried and whether the
   userinfo endpoint had to be queried), account provisioning, username/email syncs and
@@ -30,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `preferred_username` is a UPN): when enabled, the claimed email becomes the
   account's username at provisioning, and existing accounts are renamed on their next
   login — skipped safely when another account already holds that name or the IdP sent no
-  real email claim (migration 0012)
+  real email claim (migration 0012_provider_email_username; its revision id is deliberately
+  ≤ 32 chars — see Fixed below)
 - The Processing page is now an overview: per-user stat tiles (running/finished/failed,
   pages processed), a breakdown by job type (single, multiple files, Confluence import,
   mail), and the most recent jobs — the upload wizard moved to its own **File Task** entry
@@ -83,6 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the backend health check fails
 
 ### Fixed
+- Migration 0012 crash-looped every PostgreSQL deployment: its original revision id
+  (`0012_provider_use_email_as_username`, 35 chars) exceeded Alembic's
+  `alembic_version.version_num` VARCHAR(32), so the final version UPDATE aborted the whole
+  transactional-DDL upgrade — the backend died before serving a request. SQLite, which the
+  test suite runs on, silently ignores varchar limits, so 466 tests stayed green. The
+  revision is renamed to `0012_provider_email_username` (28 chars) and a guard test now
+  fails the suite if any revision id in the chain exceeds 32 chars
 - Entra sign-ins no longer provision garbage accounts (username = raw `sub`, email =
   `sub@entra.oidc.invalid`): the email is now resolved from `email`, `upn`, `unique_name`,
   or `preferred_username` (values must look like an address; `DOMAIN\user` forms are

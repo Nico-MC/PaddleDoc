@@ -48,6 +48,7 @@ from app.schemas.import_ import (
     ImportSourceUpdateRequest,
 )
 from app.services.confluence import ConfluenceError, detect_server_kind, extract_page_id
+from app.services.paddle_service import resolve_profile_selection
 # Module-object access (security.encrypt_import_credential /
 # security.decrypt_import_credential) rather than from-imports: the helpers
 # live in the services slice of this feature and late binding keeps them
@@ -392,6 +393,13 @@ def create_import_run(
             detail='Source connection has not been tested successfully yet; test the connection first',
         )
 
+    # Raises 422 only for an unknown/disabled 'vl:<connection_id>' selection
+    # (see resolve_profile_selection); a bad *static* ocr_profile_id stays
+    # un-validated here, same as upload/collections-start. Fails fast,
+    # before any run-cap bookkeeping below.
+    if payload.options.ocr_profile_id:
+        resolve_profile_selection(db, payload.options.ocr_profile_id)
+
     if payload.scope.type == 'page':
         scope_value = extract_page_id(payload.scope.value)
         if scope_value is None:
@@ -449,6 +457,7 @@ def create_import_run(
         'subfolder': _sanitize_storage_path(payload.options.subfolder),
         'tags': _parse_tags(','.join(payload.options.tags)),
         'email': payload.options.email.strip(),
+        'path_tags': payload.options.path_tags,
     }
     # Page scope seeds the frontier directly; space scope leaves it empty --
     # run creation makes no outbound requests, so the worker resolves the

@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from app.services import paddle_service
+from app.models.models import VlConnection
+from app.services import paddle_service, security
 from app.services.quality_gate import evaluate_document_quality
+from conftest import TestingSessionLocal
 
 
 def test_runtime_capability_cpu_selected(monkeypatch):
@@ -158,6 +160,125 @@ def test_get_paddle_capabilities_exposes_profiles():
     assert any(profile['value'] == 'ppocrv6_small_structurev3' for profile in caps['profiles'])
     assert any(profile['value'] == 'ppocrv6_medium_structurev3' for profile in caps['profiles'])
     assert any(profile['value'] == 'paddlevl_1_6_0_9b' for profile in caps['profiles'])
+    # Every static preset is 'kind': 'ocr' -- distinguishes it from the
+    # dynamic 'kind': 'vl' entries appended below.
+    assert all(profile['kind'] == 'ocr' for profile in caps['profiles'])
+
+
+def _make_vl_connection_row(*, name: str = 'Test VL', model: str = 'vl-model', enabled: bool = True) -> VlConnection:
+    db = TestingSessionLocal()
+    try:
+        connection = VlConnection(
+            name=name,
+            base_url='https://vl.example.com',
+            model=model,
+            api_key_encrypted=security.encrypt_vl_api_key('secret-key'),
+            system_prompt='',
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def test_get_paddle_capabilities_appends_vl_entries_static_profiles_first():
+    connection = _make_vl_connection_row(name='Prod Vision', model='gpt-4o')
+
+    caps = paddle_service.get_paddle_capabilities(vl_connections=[connection])
+    profiles = caps['profiles']
+
+    static_count = 8  # 6 ppocrv6 presets + paddlevl_1_6_0_9b + openai_vision
+    assert [p['kind'] for p in profiles[:static_count]] == ['ocr'] * static_count
+    vl_entry = profiles[static_count]
+    assert vl_entry == {
+        'value': f'vl:{connection.id}',
+        'label': 'VL: Prod Vision',
+        'description': 'gpt-4o — vision-language connection',
+        'kind': 'vl',
+    }
+
+
+def test_resolve_profile_selection_static_profile_and_unknown_static_are_no_ops():
+    db = TestingSessionLocal()
+    try:
+        assert paddle_service.resolve_profile_selection(db, 'ppocrv6_tiny') == {}
+        # Deliberately un-validated here, same as today's silent clamp
+        # downstream (paddle_service._resolve_profile) -- see
+        # resolve_profile_selection's docstring.
+        assert paddle_service.resolve_profile_selection(db, 'not-a-real-profile') == {}
+        assert paddle_service.resolve_profile_selection(db, None) == {}
+    finally:
+        db.close()
+
+
+def test_resolve_profile_selection_vl_profile_returns_settings_shape():
+    connection = _make_vl_connection_row(name='Selectable Conn')
+    db = TestingSessionLocal()
+    try:
+        resolved = paddle_service.resolve_profile_selection(db, f'vl:{connection.id}')
+    finally:
+        db.close()
+    assert resolved == {
+        'profile_id': f'vl:{connection.id}',
+        'vl_connection_id': connection.id,
+        'variant_label': 'Selectable Conn',
+    }
+
+
+def test_resolve_profile_selection_rejects_unknown_and_disabled_vl_connection():
+    disabled = _make_vl_connection_row(enabled=False)
+    db = TestingSessionLocal()
+    try:
+        with pytest.raises(paddle_service.HTTPException) as unknown_exc:
+            paddle_service.resolve_profile_selection(db, 'vl:does-not-exist')
+        assert unknown_exc.value.status_code == 422
+        assert unknown_exc.value.detail == "Unknown profile 'vl:does-not-exist'"
+
+        with pytest.raises(paddle_service.HTTPException) as disabled_exc:
+            paddle_service.resolve_profile_selection(db, f'vl:{disabled.id}')
+        assert disabled_exc.value.status_code == 422
+        assert disabled_exc.value.detail == f"Unknown profile 'vl:{disabled.id}'"
+    finally:
+        db.close()
+
+
+def test_vl_settings_for_worker_never_raises_and_keeps_connection_id():
+    db = TestingSessionLocal()
+    try:
+        # Static profile: no-op, same as resolve_profile_selection.
+        assert paddle_service.vl_settings_for_worker(db, 'ppocrv6_tiny') == {}
+        # Unknown/deleted connection: does not raise (unlike
+        # resolve_profile_selection) -- still carries vl_connection_id so
+        # process_job's own disabled/missing-connection check can fail just
+        # that one job later (see the function's docstring).
+        assert paddle_service.vl_settings_for_worker(db, 'vl:does-not-exist') == {
+            'profile_id': 'vl:does-not-exist',
+            'vl_connection_id': 'does-not-exist',
+        }
+    finally:
+        db.close()
+
+    connection = _make_vl_connection_row(name='Worker Conn')
+    db = TestingSessionLocal()
+    try:
+        resolved = paddle_service.vl_settings_for_worker(db, f'vl:{connection.id}')
+    finally:
+        db.close()
+    assert resolved == {
+        'profile_id': f'vl:{connection.id}',
+        'vl_connection_id': connection.id,
+        'variant_label': 'Worker Conn',
+    }
+
+
+def test_effective_pipeline_profile_id_translates_vl_to_openai_vision():
+    assert paddle_service.effective_pipeline_profile_id('vl:some-connection-id') == 'openai_vision'
+    assert paddle_service.effective_pipeline_profile_id('ppocrv6_tiny') == 'ppocrv6_tiny'
+    assert paddle_service.effective_pipeline_profile_id(None) is None
 
 
 def test_convert_to_markdown_uses_paddlevl_profile(monkeypatch, tmp_path):
