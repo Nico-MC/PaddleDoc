@@ -84,7 +84,14 @@ from app.schemas.auth import (
     WorkerLogListResponse,
 )
 from app.services import paddle_service
-from app.services.oidc import OIDCError, exchange_code_for_tokens, fetch_jwks, get_discovery_document, validate_id_token
+from app.services.oidc import (
+    OIDCError,
+    exchange_code_for_tokens,
+    fetch_jwks,
+    fetch_userinfo,
+    get_discovery_document,
+    validate_id_token,
+)
 from app.services.security import (
     decrypt_client_secret,
     decrypt_vl_api_key,
@@ -229,6 +236,42 @@ def _count_active_admins(db: Session, *, exclude_user_id: str | None = None) -> 
     return db.scalar(query) or 0
 
 
+def _log_auth_event(db: Session, level: str, message: str) -> None:
+    """Write one auth-related row into worker_log_entries via the request's
+    own session, so login/provisioning/claim-resolution events show up in
+    the same admin Logs tab that already tails Celery worker output (read
+    side: GET /auth/admin/worker-logs below). logger_name='app.auth'
+    distinguishes these from worker-emitted rows, worker_name='backend'
+    from the pod/container name a Celery worker replica would report.
+
+    Unlike app.workers.log_capture.WorkerLogDBHandler (a logging.Handler
+    with its own dedicated engine/session, since it runs outside any
+    request), this just adds to the caller's already-open, request-scoped
+    `db` session -- the caller commits, at whatever point it already
+    commits its own change, so the log line rides along in the same
+    transaction instead of needing one of its own.
+
+    Never call this with a password, token, or full `sub` claim -- see the
+    callers below for what's safe to include (identifiers/usernames yes,
+    secrets no, `sub` truncated if ever needed).
+
+    Retention: WorkerLogDBHandler._prune deletes by created_at across the
+    whole table with no logger_name/worker_name filter, so these rows age
+    out under the same cap as worker-emitted ones -- no separate retention
+    logic needed here.
+    """
+    db.add(
+        WorkerLogEntry(
+            level=level,
+            logger_name='app.auth',
+            worker_name='backend',
+            task_id=None,
+            task_name=None,
+            message=message,
+        )
+    )
+
+
 def _generate_unique_username(db: Session, base: str) -> str:
     # '@' is allowed alongside the usual username punctuation so a full
     # email address (see AuthProvider.use_email_as_username) survives intact
@@ -310,6 +353,7 @@ def _register_failed_login(db: Session, user: User, now: datetime) -> None:
         user.locked_until = now + _LOGIN_LOCKOUT_DURATION
         user.failed_login_count = 0
         logger.warning('login locked for user %s until %s', user.id, user.locked_until)
+        _log_auth_event(db, 'WARNING', f'account locked for user {user.username} until {user.locked_until.isoformat()}')
 
     db.commit()
 
@@ -353,11 +397,19 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         # covers spraying), and re-counting during an active lockout would
         # extend it indefinitely.
         if user is not None and not locked:
-            _register_failed_login(db, user, now)
+            _register_failed_login(db, user, now)  # commits its own change (and a lockout log line, if triggered)
+        # The identifier itself is safe to log (it's exactly what the
+        # client just submitted); never the password. _register_failed_login
+        # already committed above for a known account, but that commit
+        # doesn't cover an unknown identifier or an already-locked account
+        # -- commit explicitly here so this line is never lost.
+        _log_auth_event(db, 'WARNING', f'failed sign-in for identifier {identifier}')
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid credentials')
 
     _clear_failed_logins(db, user)
-    _create_session(db, request, response, user)
+    _log_auth_event(db, 'INFO', f'user {user.username} signed in')
+    _create_session(db, request, response, user)  # commits, carrying the log line above along with it
     return _user_response(user)
 
 
@@ -551,6 +603,70 @@ def oidc_authorize(slug: str, request: Request, db: Session = Depends(get_db)) -
     return redirect_response
 
 
+# --- OIDC: claim resolution ------------------------------------------------
+#
+# Some IdPs simply don't put a usable email/username in the ID token.
+# Observed in production: Microsoft Entra v1.0 tokens carry neither `email`
+# nor `preferred_username` -- `upn`/`unique_name` is what's actually
+# populated there, and `email` only shows up with the right scope/optional
+# claims configuration -- so a naive `claims.get('email')` silently
+# provisions users under a synthetic `sub@slug.oidc.invalid` address and a
+# garbage sub-derived username. The helpers below widen claim resolution to
+# cover that, in priority order, before falling back to userinfo and then
+# to the synthetic address.
+
+# Priority order for finding a real email address in the ID token, per the
+# task: email, then upn, then unique_name, then preferred_username.
+_EMAIL_CLAIM_PRIORITY = ('email', 'upn', 'unique_name', 'preferred_username')
+# Same four claims, in the order surfaced in the login-success diagnostic
+# log line below (matches how the issue was described/investigated).
+_DIAGNOSTIC_CLAIM_KEYS = ('email', 'preferred_username', 'upn', 'unique_name')
+
+
+def _usable_email(value: object) -> str | None:
+    """A claim value only counts as a real email if it looks like one: an
+    '@' present and no backslash. The backslash exclusion matters for
+    Entra's `unique_name`, which can be a down-level logon name shaped like
+    `DOMAIN\\user` rather than an address."""
+    if not isinstance(value, str) or '@' not in value or '\\' in value:
+        return None
+    return value
+
+
+def _resolve_email(claims: dict) -> str | None:
+    """First usable email-shaped value across the claim priority order, or
+    None if nothing in `claims` qualifies."""
+    for key in _EMAIL_CLAIM_PRIORITY:
+        candidate = _usable_email(claims.get(key))
+        if candidate:
+            return candidate
+    return None
+
+
+def _username_base_from_claims(claims: dict, resolved_email: str | None) -> str:
+    """Best-effort readable username seed, in priority order:
+    preferred_username, then a UPN-shaped upn, then a usable unique_name,
+    then the `name` claim, then the resolved email's localpart, then
+    finally the raw sub -- the only thing guaranteed to exist at all.
+    Called after use_email_as_username's own (higher-priority) full-email
+    check has already been tried by the caller."""
+    preferred_username = claims.get('preferred_username')
+    if preferred_username:
+        return preferred_username
+    upn = claims.get('upn')
+    if isinstance(upn, str) and '@' in upn:
+        return upn
+    unique_name = _usable_email(claims.get('unique_name'))
+    if unique_name:
+        return unique_name
+    name = claims.get('name')
+    if name:
+        return name
+    if resolved_email:
+        return resolved_email.split('@')[0]
+    return claims['sub']
+
+
 @router_public.get('/oidc/{slug}/callback')
 def oidc_callback(
     slug: str,
@@ -624,22 +740,95 @@ def oidc_callback(
     if not subject:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail='ID token is missing sub claim')
 
+    # Which of the diagnostic claims the ID token itself carried, captured
+    # *before* any userinfo merge below -- this is the exact information
+    # that would have immediately explained the sub-as-username /
+    # sub@...oidc.invalid production incident this resolution logic fixes.
+    id_token_claim_keys = [key for key in _DIAGNOSTIC_CLAIM_KEYS if claims.get(key)]
+    resolved_email = _resolve_email(claims)
+
+    userinfo_endpoint = discovery.get('userinfo_endpoint')
+    access_token = tokens.get('access_token')
+    userinfo_fetched = False
+    if (not resolved_email or not claims.get('preferred_username')) and userinfo_endpoint and access_token:
+        try:
+            userinfo_claims = fetch_userinfo(userinfo_endpoint, access_token)
+        except OIDCError as exc:
+            # Best effort: userinfo is a fallback, never a hard dependency
+            # -- a flaky/misconfigured userinfo endpoint must not turn an
+            # otherwise-successful login into a failure. Log the exception
+            # class only, never the endpoint URL or the access token.
+            _log_auth_event(
+                db, 'WARNING', f'oidc userinfo fetch failed for provider {slug}: {type(exc).__name__}'
+            )
+            db.commit()
+        else:
+            userinfo_fetched = True
+            # ID token claims win on overlap -- userinfo only fills gaps the
+            # ID token left empty. Filtering out None values before the
+            # overlay (rather than a plain dict-merge) matters because a
+            # claim can be present with an explicit null, not just absent;
+            # a null must not out-rank a real userinfo value.
+            claims = {**userinfo_claims, **{k: v for k, v in claims.items() if v is not None}}
+            resolved_email = _resolve_email(claims)
+
+    # Synthetic last resort, same as before -- now only reached once email,
+    # upn, unique_name, preferred_username, *and* userinfo have all come up
+    # empty.
+    email = resolved_email or f'{subject}@{slug}.oidc.invalid'
+
+    diagnostic_claims = ','.join(id_token_claim_keys) or 'none'
+    login_diagnostic = f'id_token_claims=[{diagnostic_claims}] userinfo_fetched={userinfo_fetched}'
+
     user = db.scalar(select(User).where(User.oidc_provider_id == provider.id, User.oidc_subject == subject))
     if user is not None:
         if not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Account is inactive')
-        if provider.use_email_as_username:
-            claim_email = claims.get('email')
-            if claim_email and claim_email != user.username:
-                # Never clobber a different, already-existing user's
-                # username -- silently skip the rename and let login proceed
-                # rather than failing an otherwise-successful login over a
-                # cosmetic username sync.
-                username_taken = (
-                    db.scalar(select(User.id).where(User.username == claim_email, User.id != user.id)) is not None
+
+        # Self-heal accounts provisioned before claim resolution covered
+        # upn/unique_name/userinfo (the sub@slug.oidc.invalid + garbage-
+        # username accounts this fixes): if this login resolved a real
+        # email that differs from what's stored, adopt it -- as long as no
+        # *other* user already owns it. This is purely a same-account data
+        # refresh, not account linking: the row being updated was already
+        # selected above strictly by (provider, sub), and that's the only
+        # thing that ever decides which account an OIDC login lands on.
+        if resolved_email and resolved_email != user.email:
+            email_taken = (
+                db.scalar(select(User.id).where(func.lower(User.email) == resolved_email.lower(), User.id != user.id))
+                is not None
+            )
+            if email_taken:
+                _log_auth_event(
+                    db, 'WARNING',
+                    f'oidc email update skipped for user {user.username}: {resolved_email} already in use',
                 )
-                if not username_taken:
-                    user.username = claim_email
+            else:
+                old_email = user.email
+                user.email = resolved_email
+                _log_auth_event(
+                    db, 'INFO', f'oidc email updated for user {user.username}: {old_email} -> {resolved_email}'
+                )
+
+        if provider.use_email_as_username and resolved_email and resolved_email != user.username:
+            # Never clobber a different, already-existing user's
+            # username -- silently skip the rename and let login proceed
+            # rather than failing an otherwise-successful login over a
+            # cosmetic username sync.
+            username_taken = (
+                db.scalar(select(User.id).where(User.username == resolved_email, User.id != user.id)) is not None
+            )
+            if username_taken:
+                _log_auth_event(
+                    db, 'WARNING',
+                    f'oidc username update skipped for user {user.id}: {resolved_email} already in use',
+                )
+            else:
+                old_username = user.username
+                user.username = resolved_email
+                _log_auth_event(
+                    db, 'INFO', f'oidc username updated for user {user.id}: {old_username} -> {resolved_email}'
+                )
     else:
         # No silent email auto-link: a brand-new local user is always
         # created for an unrecognized (provider, sub) pair, even if the
@@ -648,14 +837,13 @@ def oidc_callback(
         # action (silent auto-link by email is an account-takeover vector:
         # anyone who controls that email address at the IdP could hijack a
         # pre-existing local account).
-        email = claims.get('email') or f'{subject}@{slug}.oidc.invalid'
-        if provider.use_email_as_username and claims.get('email'):
+        if provider.use_email_as_username and resolved_email:
             # Full address, not just the localpart -- the whole point is a
             # readable, stable identifier for IdPs whose preferred_username
             # is a UPN (e.g. Microsoft Entra).
-            username_base = email
+            username_base = resolved_email
         else:
-            username_base = claims.get('preferred_username') or (email.split('@')[0] if '@' in email else subject)
+            username_base = _username_base_from_claims(claims, resolved_email)
         user = User(
             username=_generate_unique_username(db, username_base),
             email=email,
@@ -684,6 +872,11 @@ def oidc_callback(
                 )
             if not user.is_active:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Account is inactive')
+        else:
+            _log_auth_event(db, 'INFO', f'created user {user.username} (provider {slug})')
+            db.commit()
+
+    _log_auth_event(db, 'INFO', f'oidc login succeeded: provider={slug} user={user.username} {login_diagnostic}')
 
     redirect_target = settings.cors_origins[0] if settings.cors_origins else '/'
     redirect_response = RedirectResponse(url=redirect_target, status_code=status.HTTP_302_FOUND)

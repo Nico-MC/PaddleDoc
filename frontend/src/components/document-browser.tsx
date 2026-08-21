@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, Settings2, Trash2, UploadCloud } from 'lucide-react';
+import { Download, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, Settings2, Trash2, TrendingDown, UploadCloud } from 'lucide-react';
 
 import { Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
@@ -149,6 +149,28 @@ function usedFallbackForJob(job: Job): boolean {
 
 function profileSortValue(job: Job): string {
   return usedFallbackForJob(job) ? 'fallback (no OCR)' : profileForJob(job);
+}
+
+/**
+ * Short chip label + full human label per profile id, mirroring
+ * backend/app/services/paddle_service.py's _PADDLE_PROFILES. Labels are
+ * hardcoded (rather than sourced from the capabilities API) because this
+ * table doesn't otherwise load capabilities.
+ */
+const PROFILE_ABBREVIATIONS: Record<string, { short: string; label: string }> = {
+  ppocrv6_tiny: { short: 'ocr6t', label: 'PP-OCRv6 tiny det + rec' },
+  ppocrv6_tiny_structurev3: { short: 'ocr6t+v3', label: 'PP-StructureV3 + PP-OCRv6 tiny det + rec' },
+  ppocrv6_small: { short: 'ocr6s', label: 'PP-OCRv6 small det + rec' },
+  ppocrv6_small_structurev3: { short: 'ocr6s+v3', label: 'PP-StructureV3 + PP-OCRv6 small det + rec' },
+  ppocrv6_medium: { short: 'ocr6m', label: 'PP-OCRv6 medium det + rec' },
+  ppocrv6_medium_structurev3: { short: 'ocr6m+v3', label: 'PP-StructureV3 + PP-OCRv6 medium det + rec' },
+  paddlevl_1_6_0_9b: { short: 'vl9b', label: 'PaddleOCR-VL 1.6 (0.9B)' },
+  openai_vision: { short: 'oai', label: 'OpenAI-compatible Vision API' },
+};
+
+/** Falls back to the raw id (as both short label and tooltip) for unknown profiles. */
+function profileAbbreviation(profileId: string): { short: string; label: string } {
+  return PROFILE_ABBREVIATIONS[profileId] ?? { short: profileId, label: profileId };
 }
 
 function qualityForJob(job: Job): { grade: string; score: number | null } | null {
@@ -768,28 +790,23 @@ export function DocumentBrowser({
                     Document{sortIndicator('document')}
                   </button>
                 </th>
-                <th className="pb-2 pr-4">
+                <th className="w-24 pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('status')}>
                     Status{sortIndicator('status')}
                   </button>
                 </th>
-                <th className="hidden pb-2 pr-4 lg:table-cell">
+                <th className="hidden w-32 pb-2 pr-4 lg:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('profile')}>
                     Used Profile{sortIndicator('profile')}
                   </button>
                 </th>
-                <th className="pb-2 pr-4">
+                <th className="w-16 pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('pages')}>
                     Pages{sortIndicator('pages')}
                   </button>
                 </th>
-                <th className="hidden pb-2 pr-4 sm:table-cell">Quality</th>
-                <th className="hidden pb-2 pr-4 md:table-cell">
-                  <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('created')}>
-                    Created{sortIndicator('created')}
-                  </button>
-                </th>
-                <th className="pb-2 text-right">Actions</th>
+                <th className="hidden w-28 pb-2 pr-4 sm:table-cell">Quality</th>
+                <th className="w-40 pb-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -797,7 +814,11 @@ export function DocumentBrowser({
                 <tr key={job.id} className="border-t border-slate-100">
                   <td className="py-3.5 pr-4">
                     <div className="flex items-center gap-2">
-                      <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
+                      <Link
+                        href={`/jobs/${job.id}`}
+                        className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700"
+                        title={`Uploaded ${new Date(job.created_at).toLocaleString()}`}
+                      >
                         {job.original_filename}
                       </Link>
                       {typeof job.document_version === 'number' && job.document_version > 1 && (
@@ -834,7 +855,21 @@ export function DocumentBrowser({
                     {usedFallbackForJob(job) ? (
                       <span className="text-red-700">fallback (no OCR)</span>
                     ) : (
-                      <span className="text-slate-700">{profileForJob(job)}</span>
+                      (() => {
+                        const rawProfile = profileForJob(job);
+                        if (rawProfile === '-') {
+                          return <span className="text-slate-700">-</span>;
+                        }
+                        const { short, label } = profileAbbreviation(rawProfile);
+                        return (
+                          <span
+                            className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700"
+                            title={label}
+                          >
+                            {short}
+                          </span>
+                        );
+                      })()
                     )}
                   </td>
                   <td className="whitespace-nowrap py-3.5 pr-4 text-slate-700">{pageCountForJob(job)}</td>
@@ -849,44 +884,57 @@ export function DocumentBrowser({
                         : quality.grade;
                     })()}
                   </td>
-                  <td className="hidden whitespace-nowrap py-3.5 pr-4 text-slate-700 md:table-cell">{new Date(job.created_at).toLocaleString()}</td>
                   <td className="py-3.5 pl-2 text-right">
                     {endpoint === 'jobs' && (
-                      <div className="flex flex-wrap justify-end gap-2">
+                      <div className="flex flex-wrap justify-end gap-1">
                         {job.status === 'FAILED' && suggestedLowerProfile(job) && (
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={retryingLowerJobId === job.id}
                             onClick={() => void retryJobLowerProfile(job)}
+                            aria-label="Retry with lower profile"
+                            title="Retry with lower profile"
                           >
-                            <RotateCcw className="mr-2 h-4 w-4" />
-                            {retryingLowerJobId === job.id ? 'Retrying...' : 'Retry Lower'}
+                            {retryingLowerJobId === job.id ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin text-amber-700" />
+                            ) : (
+                              <TrendingDown className="h-4 w-4 text-amber-700" />
+                            )}
                           </Button>
                         )}
                         {!isImportJob(job) && (
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={job.status === 'RUNNING' || restartingJobId === job.id}
                             onClick={() => void restartJob(job.id)}
+                            aria-label="Restart"
+                            title="Restart"
                           >
-                            <RotateCcw className="mr-2 h-4 w-4" />
-                            {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
+                            {restartingJobId === job.id ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin text-slate-700" />
+                            ) : (
+                              <RotateCcw className="h-4 w-4 text-slate-700" />
+                            )}
                           </Button>
                         )}
                         {!isImportJob(job) && (job.status === 'FINISHED' || job.status === 'FAILED') && (
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={restartingJobId === job.id}
                             onClick={() => setRestartProfileJob(job)}
+                            aria-label="Re-run with profile"
+                            title="Re-run with profile"
                           >
-                            <Settings2 className="mr-2 h-4 w-4" />
-                            Re-run with profile…
+                            <Settings2 className="h-4 w-4 text-slate-700" />
                           </Button>
                         )}
                         {job.status === 'FINISHED' && (
@@ -921,8 +969,11 @@ export function DocumentBrowser({
                             type="button"
                             size="sm"
                             variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={job.status === 'RUNNING'}
                             onClick={() => void removeJob(job.id)}
+                            aria-label="Delete"
+                            title="Delete"
                           >
                             <Trash2 className="h-4 w-4 text-red-600" />
                           </Button>

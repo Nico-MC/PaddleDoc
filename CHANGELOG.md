@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Sign-in events show up in the admin Logs tab: OIDC logins (with a claim diagnostic —
+  which of email/preferred_username/upn/unique_name the ID token carried and whether the
+  userinfo endpoint had to be queried), account provisioning, username/email syncs and
+  skipped collisions, plus local sign-ins, failures, and lockouts, all as `backend` rows.
+  Messages never contain tokens, passwords, or full subject identifiers
 - Jobs can be re-run with a different OCR profile: `POST /api/v1/jobs/{id}/restart` now
   accepts an optional `{"profile_id": ...}` body (validated against the profile registry,
   persisted as previous/requested/effective profile like the existing lower-profile retry),
@@ -61,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Confluence importing has exactly one entry point: the wizard's "Import from Confluence"
   tile is gone, and everything import-related lives under Processing > Confluence Import.
   The File Task wizard keeps two equally sized tiles, Single file and Multiple files
+- The jobs table got denser and calmer: every row action is an icon button with a hover
+  tooltip (download, restart, retry lower, re-run with profile, edit, push, delete), the
+  Created column is gone (the timestamp lives in the filename's hover tooltip; sorting
+  still defaults to newest first), and Used Profile shows compact codes like `ocr6m+v3`
+  with the full profile name on hover. The freed width goes to the document column
 - One naming scheme throughout: the processed items are **Jobs** everywhere (the jobs page
   was still headlined "Tasks"), and **File Task** is deliberately the only "task" — the flow
   that creates jobs from uploads. Alongside, the jobs table dropped its never-rendered
@@ -73,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the backend health check fails
 
 ### Fixed
+- Entra sign-ins no longer provision garbage accounts (username = raw `sub`, email =
+  `sub@entra.oidc.invalid`): the email is now resolved from `email`, `upn`, `unique_name`,
+  or `preferred_username` (values must look like an address; `DOMAIN\user` forms are
+  rejected), and when the ID token carries none of them the userinfo endpoint is queried
+  with the access token — best effort, a failure never blocks the login. Existing accounts
+  self-heal on their next sign-in: a genuinely resolved email replaces a stored synthetic
+  one (guarded against collisions; account matching stays strictly `(provider, sub)`), and
+  the "Use email as username" sync then picks it up
 - Uploading files that already exist as identical versions during a multi-file batch
   looked like nothing happened: the "N unchanged file(s) skipped" notice (and the upload
   progress panel) rendered only on the wizard's last step, while collection uploads happen

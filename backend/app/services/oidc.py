@@ -93,6 +93,29 @@ def fetch_jwks(jwks_uri: str) -> KeySet:
     return KeySet.import_key_set(jwks_dict)
 
 
+def fetch_userinfo(userinfo_endpoint: str, access_token: str) -> dict:
+    """GET the userinfo endpoint with the token-exchange access token and
+    return the parsed JSON claims.
+
+    Used as a best-effort fallback when the ID token itself is missing
+    email/preferred_username -- some IdPs only populate those via userinfo
+    depending on the granted scopes (e.g. Microsoft Entra v1.0 tokens carry
+    neither by default). Like the other fetch helpers, this raises
+    OIDCError on any failure; it's the caller's job to treat that as
+    non-fatal and continue the login with whatever claims the ID token
+    already had."""
+    try:
+        response = safe_fetch(userinfo_endpoint, headers={'Authorization': f'Bearer {access_token}'})
+    except SafeFetchError as exc:
+        raise OIDCError(f'userinfo fetch failed: {exc}') from exc
+    if response.status_code != 200:
+        raise OIDCError(f'userinfo endpoint returned HTTP {response.status_code}')
+    try:
+        return json.loads(response.body)
+    except ValueError as exc:
+        raise OIDCError('userinfo response is not valid JSON') from exc
+
+
 def validate_id_token(
     id_token: str,
     *,

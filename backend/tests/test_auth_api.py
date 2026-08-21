@@ -57,6 +57,19 @@ def _wipe_users_and_sessions() -> None:
         db.close()
 
 
+def _wipe_worker_logs() -> None:
+    # Local/OIDC logins now write worker_log_entries rows (see
+    # _log_auth_event in app/api/auth.py); tests that assert exact counts
+    # against this table need a clean slate, since it isn't reset between
+    # tests the way users/sessions are above.
+    db = _db()
+    try:
+        db.query(WorkerLogEntry).delete()
+        db.commit()
+    finally:
+        db.close()
+
+
 def _create_user(
     *,
     username: str,
@@ -172,6 +185,23 @@ def test_login_oidc_only_account_rejected(client: TestClient) -> None:
 
     resp = _login(client, 'oidconlyuser', 'anything12')
     assert resp.status_code == 401
+
+
+def test_login_failure_writes_worker_log_entry(client: TestClient) -> None:
+    _wipe_worker_logs()
+    _create_user(username='logfailuser', email='logfail@example.com', password='CorrectHorse1')
+
+    resp = _login(client, 'logfailuser', 'wrong-password')
+    assert resp.status_code == 401
+
+    db = _db()
+    try:
+        rows = db.scalars(select(WorkerLogEntry).where(WorkerLogEntry.logger_name == 'app.auth')).all()
+        assert len(rows) == 1
+        assert rows[0].level == 'WARNING'
+        assert rows[0].message == 'failed sign-in for identifier logfailuser'
+    finally:
+        db.close()
 
 
 # --- logout / me ------------------------------------------------------------------
@@ -421,14 +451,37 @@ def _make_oidc_provider(slug: str = 'test-oidc', *, use_email_as_username: bool 
         db.close()
 
 
-def _oidc_login(client: TestClient, monkeypatch: pytest.MonkeyPatch, slug: str, **claim_overrides):
+def _oidc_login(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    slug: str,
+    *,
+    discovery_extra: dict | None = None,
+    userinfo_response: dict | None = None,
+    userinfo_raises: bool = False,
+    **claim_overrides,
+):
     """Drives the full authorize -> callback dance for `slug` and returns the
     callback response. `claim_overrides` go straight into the signed ID
     token (see `_sign_id_token`) -- e.g. sub=..., email=..., preferred_username=...
+
+    `discovery_extra` merges into `_DISCOVERY_DOCUMENT` (e.g. to add a
+    `userinfo_endpoint`). `userinfo_response`/`userinfo_raises` stub out
+    `fetch_userinfo` for the userinfo-fallback tests; by default neither is
+    set, so a callback that doesn't need userinfo never calls it.
     """
     signing_key, key_set = _rsa_keypair_and_jwks()
     monkeypatch.setattr(auth_module, 'generate_token', lambda length=30: 'fixed-oidc-test-token')
-    monkeypatch.setattr(auth_module, 'get_discovery_document', lambda issuer_url: _DISCOVERY_DOCUMENT)
+    discovery = {**_DISCOVERY_DOCUMENT, **(discovery_extra or {})}
+    monkeypatch.setattr(auth_module, 'get_discovery_document', lambda issuer_url: discovery)
+
+    if userinfo_response is not None:
+        monkeypatch.setattr(auth_module, 'fetch_userinfo', lambda endpoint, access_token: userinfo_response)
+    elif userinfo_raises:
+        def _raise_userinfo_error(endpoint, access_token):
+            raise auth_module.OIDCError('userinfo endpoint unreachable')
+
+        monkeypatch.setattr(auth_module, 'fetch_userinfo', _raise_userinfo_error)
 
     authorize_resp = client.get(f'/api/v1/auth/oidc/{slug}/authorize', follow_redirects=False)
     assert authorize_resp.status_code == 302
@@ -701,6 +754,205 @@ def test_oidc_callback_use_email_as_username_no_email_claim_skips_rename_on_logi
         db.close()
 
 
+# --- OIDC: claim resolution (upn/unique_name/userinfo fallback) ----------------------
+
+def test_oidc_callback_upn_only_token_resolves_email_from_upn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Token carries neither `email` nor `preferred_username` (the observed
+    Entra v1.0 shape) but does carry `upn`: the real email must come from
+    `upn`, never the synthetic sub@...oidc.invalid fallback."""
+    _make_oidc_provider('test-oidc-upn-only')
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-upn-only',
+        sub='idp-subject-upn-only',
+        email=None,
+        preferred_username=None,
+        upn='realupn@example.com',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-upn-only'))
+        assert created is not None
+        assert created.email == 'realupn@example.com'
+        assert not created.email.endswith('.oidc.invalid')
+    finally:
+        db.close()
+
+
+def test_oidc_callback_userinfo_fallback_supplies_email(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Token has no usable email/preferred_username/upn/unique_name at all,
+    but the discovery document has a userinfo_endpoint and the token
+    response an access_token: userinfo's email is used."""
+    _make_oidc_provider('test-oidc-userinfo-email')
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-userinfo-email',
+        sub='idp-subject-userinfo-email',
+        email=None,
+        preferred_username=None,
+        discovery_extra={'userinfo_endpoint': 'https://idp.example.com/userinfo'},
+        userinfo_response={'email': 'fromuserinfo@example.com'},
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-userinfo-email'))
+        assert created is not None
+        assert created.email == 'fromuserinfo@example.com'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_userinfo_failure_does_not_block_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Userinfo is best-effort: if it raises, login still succeeds, falling
+    back to the synthetic sub@slug.oidc.invalid address like before."""
+    _make_oidc_provider('test-oidc-userinfo-error')
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-userinfo-error',
+        sub='idp-subject-userinfo-error',
+        email=None,
+        preferred_username=None,
+        discovery_extra={'userinfo_endpoint': 'https://idp.example.com/userinfo'},
+        userinfo_raises=True,
+    )
+    assert resp.status_code == 302
+    assert 'paddledoc_session' in client.cookies
+
+    db = _db()
+    try:
+        created = db.scalar(select(User).where(User.oidc_subject == 'idp-subject-userinfo-error'))
+        assert created is not None
+        assert created.email == 'idp-subject-userinfo-error@test-oidc-userinfo-error.oidc.invalid'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_self_heals_synthetic_email_on_existing_user(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduces the production incident: an account previously
+    provisioned with the sub@slug.oidc.invalid fallback (because the ID
+    token had no usable claim at the time) now resolves a real email on
+    login -- the stored email must be healed in place, still matched
+    purely by (provider, sub)."""
+    provider = _make_oidc_provider('test-oidc-selfheal')
+    garbage_user = _create_user(
+        username='eauonfycuondabsxiu4prgku5vgz2rcllhsqecxi5wk',
+        email='idp-subject-selfheal@test-oidc-selfheal.oidc.invalid',
+        password=None,
+        oidc_provider_id=provider.id,
+        oidc_subject='idp-subject-selfheal',
+    )
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-selfheal',
+        sub='idp-subject-selfheal',
+        email='realuser@example.com',
+        preferred_username='realuser',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        healed = db.get(User, garbage_user.id)
+        assert healed is not None
+        assert healed.email == 'realuser@example.com'
+        assert healed.oidc_provider_id == provider.id
+        assert healed.oidc_subject == 'idp-subject-selfheal'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_self_heal_skips_on_email_collision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resolved email is already owned by a different user: the
+    self-heal must be skipped (no email update), and login must still
+    succeed rather than fail over a cosmetic data-refresh conflict."""
+    provider = _make_oidc_provider('test-oidc-selfheal-collision')
+    _create_user(username='otherowner', email='taken@example.com', password='CorrectHorse1')
+    garbage_user = _create_user(
+        username='sub-derived-garbage-name',
+        email='idp-subject-selfheal-collision@test-oidc-selfheal-collision.oidc.invalid',
+        password=None,
+        oidc_provider_id=provider.id,
+        oidc_subject='idp-subject-selfheal-collision',
+    )
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-selfheal-collision',
+        sub='idp-subject-selfheal-collision',
+        email='taken@example.com',
+        preferred_username='someupn',
+    )
+    assert resp.status_code == 302
+    assert 'paddledoc_session' in client.cookies
+
+    db = _db()
+    try:
+        unchanged = db.get(User, garbage_user.id)
+        assert unchanged is not None
+        assert unchanged.email == 'idp-subject-selfheal-collision@test-oidc-selfheal-collision.oidc.invalid'
+    finally:
+        db.close()
+
+
+def test_oidc_callback_logs_claim_diagnostic_on_success(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful OIDC login writes a worker_log_entries row (logger_name
+    'app.auth') carrying the provider, the user, and which claims the ID
+    token actually had -- the diagnostic that would have immediately
+    explained the sub-as-username production incident."""
+    _wipe_worker_logs()
+    _make_oidc_provider('test-oidc-diagnostic-log')
+    resp = _oidc_login(
+        client,
+        monkeypatch,
+        'test-oidc-diagnostic-log',
+        sub='idp-subject-diagnostic-log',
+        email='diagnostic@example.com',
+        preferred_username='diagnosticuser',
+    )
+    assert resp.status_code == 302
+
+    db = _db()
+    try:
+        rows = db.scalars(
+            select(WorkerLogEntry).where(WorkerLogEntry.logger_name == 'app.auth').order_by(WorkerLogEntry.created_at)
+        ).all()
+        success_rows = [r for r in rows if 'oidc login succeeded' in r.message]
+        assert len(success_rows) == 1
+        message = success_rows[0].message
+        assert success_rows[0].level == 'INFO'
+        assert 'provider=test-oidc-diagnostic-log' in message
+        assert 'user=diagnosticuser' in message
+        assert 'id_token_claims=' in message
+        assert 'email' in message and 'preferred_username' in message
+        assert 'userinfo_fetched=False' in message
+
+        provisioning_rows = [r for r in rows if r.message.startswith('created user')]
+        assert len(provisioning_rows) == 1
+        assert 'created user diagnosticuser (provider test-oidc-diagnostic-log)' == provisioning_rows[0].message
+    finally:
+        db.close()
+
+
 # --- admin: worker logs -------------------------------------------------------
 
 def test_admin_worker_logs_endpoint_requires_admin_role(client: TestClient) -> None:
@@ -713,6 +965,10 @@ def test_admin_worker_logs_endpoint_requires_admin_role(client: TestClient) -> N
 
 def test_admin_worker_logs_filters_by_level_floor_and_worker(client: TestClient) -> None:
     _create_user(username='logsadmin', email='logsadmin@example.com', password='CorrectHorse1', role=UserRole.ADMIN)
+    _login(client, 'logsadmin', 'CorrectHorse1')
+    # The login above itself writes an app.auth row (see _log_auth_event) --
+    # wipe it and start from a clean slate so the counts below are exact.
+    _wipe_worker_logs()
     db = _db()
     try:
         db.add_all([
@@ -732,7 +988,6 @@ def test_admin_worker_logs_filters_by_level_floor_and_worker(client: TestClient)
         db.commit()
     finally:
         db.close()
-    _login(client, 'logsadmin', 'CorrectHorse1')
 
     resp = client.get('/api/v1/auth/admin/worker-logs')
     assert resp.status_code == 200
