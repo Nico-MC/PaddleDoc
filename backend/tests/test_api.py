@@ -8,7 +8,8 @@ from fastapi import HTTPException, UploadFile
 from app.api.deps import get_current_user
 from app.api.routes import _JOB_LIST_PAGE_LIMIT_MAX
 from app.main import app
-from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, User, UserRole
+from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, User, UserRole, VlConnection
+from app.services import security
 from conftest import TestingSessionLocal, client
 
 # These tests predate the Step 2 auth work and exercise business logic that
@@ -114,6 +115,93 @@ def test_upload_creates_job(monkeypatch, tmp_path):
     assert job.upload_size_bytes == len(b'%PDF-sample')
     assert sorted(tag.name for tag in job.tags) == ['finance', 'invoices']
     db.close()
+
+
+def _make_vl_connection(*, name: str = 'Upload VL', enabled: bool = True) -> VlConnection:
+    db = TestingSessionLocal()
+    try:
+        connection = VlConnection(
+            name=name,
+            base_url='https://vl.example.com',
+            model='vl-model',
+            api_key_encrypted=security.encrypt_vl_api_key('secret-key'),
+            system_prompt='',
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def test_upload_with_vl_profile_creates_job_with_vl_settings_and_dispatches_openai_vision(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    connection = _make_vl_connection(name='Prod Vision')
+
+    called = {}
+    monkeypatch.setattr(
+        routes.process_job,
+        'delay',
+        lambda job_id, profile_id=None, mode=None, email=None, department=None: called.update(
+            job_id=job_id, profile_id=profile_id
+        ),
+    )
+
+    response = client.post(
+        '/api/v1/upload',
+        # Distinct filename/content: this shared-DB test module never resets
+        # between tests, and _find_predecessor_job's duplicate-content check
+        # is keyed on (visible-to-user, filename, sha256) -- reusing
+        # 'document.pdf' / b'%PDF-sample' here would 409 against
+        # test_upload_creates_job's job instead of creating a new one.
+        files={'file': ('document-vl.pdf', b'%PDF-vl-upload-sample', 'application/pdf')},
+        data={'profile_id': f'vl:{connection.id}', 'email': 'vl-upload@example.com'},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    # Dispatched with the real pipeline id, never the raw 'vl:<connection_id>'
+    # display value -- see paddle_service.effective_pipeline_profile_id.
+    assert called['profile_id'] == 'openai_vision'
+
+    db = TestingSessionLocal()
+    try:
+        job = db.get(Job, payload['job_id'])
+        settings_info = job.processing_info['settings']
+        assert settings_info['profile_id'] == f'vl:{connection.id}'
+        assert settings_info['vl_connection_id'] == connection.id
+        assert settings_info['variant_label'] == 'Prod Vision'
+    finally:
+        db.close()
+
+
+def test_upload_with_unknown_vl_profile_is_422_and_creates_no_job(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    delayed: list[tuple] = []
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args, **kwargs: delayed.append(args))
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('document.pdf', b'%PDF-sample', 'application/pdf')},
+        data={'profile_id': 'vl:does-not-exist'},
+    )
+    assert response.status_code == 422
+    assert response.json()['detail'] == "Unknown profile 'vl:does-not-exist'"
+    assert delayed == []
+    # No partial upload file/Job row left behind for a request rejected
+    # before create_job_from_upload ever runs.
+    assert not (settings.uploads_dir / 'inbox').exists()
 
 
 def test_upload_allows_missing_email(monkeypatch, tmp_path):
@@ -275,6 +363,79 @@ def test_collection_flow(monkeypatch, tmp_path):
     assert delayed[0]['mode'] == 'collection'
     assert delayed[0]['email'] == ''
     assert delayed[0]['department'] == ''
+
+
+def test_collection_start_with_vl_profile_sets_vl_settings_and_dispatches_openai_vision(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    connection = _make_vl_connection(name='Collection Vision')
+
+    delayed: list[dict[str, str | None]] = []
+    monkeypatch.setattr(
+        routes.process_job,
+        'delay',
+        lambda job_id, profile_id=None, mode=None, email=None, department=None: delayed.append(
+            {'job_id': job_id, 'profile_id': profile_id}
+        ),
+    )
+
+    create_resp = client.post('/api/v1/collections', json={'folder': 'vl-accounts', 'subfolder': '2026'})
+    collection_id = create_resp.json()['collection_id']
+    upload_resp = client.post(
+        f'/api/v1/collections/{collection_id}/upload',
+        # Distinct filename/content -- see the comment on the /upload vl:
+        # test above (same shared-DB duplicate-content hazard).
+        files={'file': ('document-vl-collection.pdf', b'%PDF-vl-collection-sample', 'application/pdf')},
+    )
+    job_id = upload_resp.json()['job_id']
+
+    start_resp = client.post(
+        f'/api/v1/collections/{collection_id}/start',
+        json={'profile_id': f'vl:{connection.id}'},
+    )
+    assert start_resp.status_code == 200, start_resp.text
+    assert start_resp.json()['started_jobs'] == 1
+    # Dispatched with the real pipeline id, never the raw 'vl:<connection_id>'
+    # display value -- see paddle_service.effective_pipeline_profile_id.
+    assert delayed == [{'job_id': job_id, 'profile_id': 'openai_vision'}]
+
+    db = TestingSessionLocal()
+    try:
+        settings_info = db.get(Job, job_id).processing_info['settings']
+        assert settings_info['profile_id'] == f'vl:{connection.id}'
+        assert settings_info['vl_connection_id'] == connection.id
+        assert settings_info['variant_label'] == 'Collection Vision'
+    finally:
+        db.close()
+
+
+def test_collection_start_with_unknown_vl_profile_is_422_and_starts_nothing(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    delayed: list[tuple] = []
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args, **kwargs: delayed.append(args))
+
+    create_resp = client.post('/api/v1/collections', json={'folder': 'vl-bad', 'subfolder': '2026'})
+    collection_id = create_resp.json()['collection_id']
+    client.post(
+        f'/api/v1/collections/{collection_id}/upload',
+        files={'file': ('document-vl-bad.pdf', b'%PDF-vl-bad-sample', 'application/pdf')},
+    )
+
+    start_resp = client.post(
+        f'/api/v1/collections/{collection_id}/start',
+        json={'profile_id': 'vl:does-not-exist'},
+    )
+    assert start_resp.status_code == 422
+    assert start_resp.json()['detail'] == "Unknown profile 'vl:does-not-exist'"
+    assert delayed == []
 
 
 def test_collection_persists_in_db_across_sessions(tmp_path):
@@ -1510,3 +1671,85 @@ def test_create_folder_keep_marker_survives_job_deletion_cleanup(tmp_path):
     assert (settings.uploads_dir / 'ops' / 'weekly' / '.keep').exists()
     # Results-side folder (no marker) is pruned once empty, as before.
     assert not (settings.results_dir / 'ops' / 'weekly').exists()
+
+
+def test_process_job_with_vl_settings_shape_forwards_vl_override(monkeypatch, tmp_path):
+    """Worker-integration slice for the 'vl:<connection_id>' profile
+    contract (AUFGABE 5d): a job whose settings carry the shape
+    upload_document/restart_job now write (vl_connection_id, dispatched
+    with the real pipeline id 'openai_vision' -- see
+    paddle_service.effective_pipeline_profile_id) reaches
+    convert_to_markdown_with_details with the same vl_override shape the
+    benchmark variant path already exercises (tasks.py ~335), unmodified.
+    """
+    from app.core.config import settings
+    from app.workers import tasks
+
+    monkeypatch.setattr(tasks, 'SessionLocal', TestingSessionLocal)
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    connection = _make_vl_connection(name='Worker Path Vision')
+
+    upload_path = settings.uploads_dir / 'inbox' / 'job-vl-single.pdf'
+    upload_path.parent.mkdir(parents=True, exist_ok=True)
+    upload_path.write_bytes(b'%PDF-1.4 fake upload content')
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'job-vl-single').delete()
+    db.commit()
+    db.add(
+        Job(
+            id='job-vl-single',
+            original_filename='job-vl-single.pdf',
+            upload_path=str(upload_path),
+            upload_content=b'%PDF-1.4 fake upload content',
+            upload_mime_type='application/pdf',
+            upload_size_bytes=len(b'%PDF-1.4 fake upload content'),
+            status=JobStatus.PENDING,
+            processing_info={
+                'settings': {
+                    'storage_folder': 'inbox/job-vl-single',
+                    'profile_id': f'vl:{connection.id}',
+                    'vl_connection_id': connection.id,
+                    'variant_label': connection.name,
+                }
+            },
+        )
+    )
+    db.commit()
+    db.close()
+
+    seen_calls = []
+    monkeypatch.setattr(
+        tasks,
+        'convert_to_markdown_with_details',
+        lambda *args, **kwargs: (seen_calls.append(kwargs) or ('# vl result', {'page_count': 1})),
+    )
+
+    # Real pipeline id, as effective_pipeline_profile_id / the benchmark
+    # variant spec would dispatch -- never the raw 'vl:<connection_id>'.
+    tasks.process_job('job-vl-single', 'openai_vision', 'single', '', None)
+
+    assert len(seen_calls) == 1
+    vl_override = seen_calls[0]['vl_override']
+    assert vl_override['name'] == 'Worker Path Vision'
+    assert vl_override['base_url'] == connection.base_url
+    assert vl_override['model'] == connection.model
+
+    db = TestingSessionLocal()
+    try:
+        job = db.get(Job, 'job-vl-single')
+        assert job.status == JobStatus.FINISHED
+        assert job.result_markdown == '# vl result'
+        # The RUNNING transition rewrites settings from the task parameter
+        # (the real pipeline id) -- it must NOT clobber the vl: selection,
+        # which is the job's user-facing profile identity (jobs table,
+        # detail page, restart audit). Regression: the first cut stored
+        # 'openai_vision' here after the job ran.
+        post_settings = job.processing_info['settings']
+        assert post_settings['profile_id'] == f'vl:{connection.id}'
+        assert post_settings['requested_profile_id'] == f'vl:{connection.id}'
+        assert post_settings['vl_connection_id'] == connection.id
+    finally:
+        db.close()

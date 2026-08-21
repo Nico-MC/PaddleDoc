@@ -37,7 +37,8 @@ from app.database.session import SessionLocal
 from app.models.models import ImportPageState, ImportRun, ImportRunStatus, ImportSource, Job, JobArtifact, JobStatus, Tag
 from app.services import security
 from app.services.confluence import AttachmentMeta, ConfluenceError, Page, PageSource, create_client
-from app.services.confluence_markdown import convert_page, rewrite_cross_page_links, sanitize_filename
+from app.services.confluence_markdown import add_frontmatter_keys, convert_page, rewrite_cross_page_links, sanitize_filename
+from app.services.paddle_service import effective_pipeline_profile_id, vl_settings_for_worker
 from app.workers.celery_app import celery_app
 
 
@@ -157,6 +158,27 @@ def _default_folder(run: ImportRun) -> str:
     return f'imports/{_slug(base)}'
 
 
+def _normalize_frontier_entry(entry) -> list:
+    """Defensive unpack for one persisted frontier entry into the current
+    `[page_id, depth, path_titles, parent_page_id]` shape.
+
+    Tolerates the legacy 2-element `[page_id, depth]` shape written by runs
+    that started before path/parent tracking existed: a resume against a
+    still-running (or crashed-and-reclaimed) old-format run must not crash,
+    it just gets an empty path (`path_titles=[]`) and no parent
+    (`parent_page_id=None`, so that page contributes no children_titles
+    entry -- see _import_one_page). Anything shorter is defensively treated
+    the same way rather than raising.
+    """
+    values = list(entry)
+    page_id = str(values[0]) if values else ''
+    depth = int(values[1]) if len(values) > 1 else 0
+    raw_path = values[2] if len(values) > 2 else None
+    path_titles = [str(title) for title in raw_path] if isinstance(raw_path, list) else []
+    parent_page_id = values[3] if len(values) > 3 and values[3] is not None else None
+    return [page_id, depth, path_titles, str(parent_page_id) if parent_page_id is not None else None]
+
+
 class _RunState:
     """Mutable view over ImportRun.state (plain JSON column: whole-dict
     reassignment on every persist, per the model contract)."""
@@ -164,11 +186,27 @@ class _RunState:
     def __init__(self, run: ImportRun) -> None:
         raw = run.state if isinstance(run.state, dict) else {}
         frontier = raw.get('frontier') if isinstance(raw.get('frontier'), list) else []
-        self.frontier: list[list] = [list(entry) for entry in frontier if isinstance(entry, (list, tuple)) and len(entry) == 2]
+        self.frontier: list[list] = [
+            _normalize_frontier_entry(entry) for entry in frontier if isinstance(entry, (list, tuple)) and len(entry) >= 2
+        ]
         visited = raw.get('visited') if isinstance(raw.get('visited'), dict) else {}
         self.visited: dict[str, str | None] = dict(visited)
         errors = raw.get('errors') if isinstance(raw.get('errors'), list) else []
         self.errors: list[dict] = [entry for entry in errors if isinstance(entry, dict)]
+        # The run root's space key, resolved once via fetch_context on the
+        # first chunk (see import_confluence's "first chunk" block) and
+        # persisted so a resumed run never re-fetches it.
+        space_key = raw.get('space_key')
+        self.space_key: str | None = space_key if isinstance(space_key, str) and space_key else None
+        # parent_page_id -> ordered list of imported/visited child titles, in
+        # crawl order (spec AUFGABE 2). Built incrementally in
+        # _import_one_page as each child is imported/visited, keyed by the
+        # parent_page_id carried on its frontier entry; consumed once at
+        # _finalize_run to stamp children_titles onto the parent's markdown.
+        children_titles = raw.get('children_titles') if isinstance(raw.get('children_titles'), dict) else {}
+        self.children_titles: dict[str, list[str]] = {
+            str(key): [str(title) for title in value] for key, value in children_titles.items() if isinstance(value, list)
+        }
 
     def add_error(self, page_id: str, title: str, error: str) -> None:
         if len(self.errors) < _ERROR_LIST_MAX_ENTRIES:
@@ -180,6 +218,14 @@ class _RunState:
                 }
             )
 
+    def add_child_title(self, parent_page_id: str | None, title: str) -> None:
+        # No parent tracked for this frontier entry (the run root, or a
+        # legacy pre-feature frontier entry normalized above): nothing to
+        # attribute the title to.
+        if parent_page_id is None:
+            return
+        self.children_titles.setdefault(parent_page_id, []).append(title)
+
     def persist(self, run: ImportRun) -> None:
         # Copies, not references: run.state must never share list/dict objects
         # with this instance, or later in-place mutations (frontier.pop/append,
@@ -189,6 +235,8 @@ class _RunState:
             'frontier': [list(entry) for entry in self.frontier],
             'visited': dict(self.visited),
             'errors': [dict(entry) for entry in self.errors],
+            'space_key': self.space_key,
+            'children_titles': {key: list(value) for key, value in self.children_titles.items()},
         }
 
 
@@ -304,10 +352,11 @@ def _cancel_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> None:
 
 
 def _finalize_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> None:
-    """End-of-run cross-page link rewrite (§2.2) + terminal transition +
-    re-enqueue backstop for stranded attachment-OCR children."""
+    """End-of-run cross-page link rewrite (§2.2) + children_titles stamp
+    (spec AUFGABE 2) + terminal transition + re-enqueue backstop for
+    stranded attachment-OCR children."""
     mapping = {str(page_id): job_id for page_id, job_id in state.visited.items() if job_id}
-    if mapping:
+    if mapping or state.children_titles:
         page_jobs = db.scalars(
             select(Job)
             .where(Job.import_run_id == run.id)
@@ -319,7 +368,19 @@ def _finalize_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> Non
             job_settings = info.get('settings') if isinstance(info.get('settings'), dict) else {}
             if job_settings.get('mode') != 'import':
                 continue
-            rewritten = rewrite_cross_page_links(job.result_markdown or '', mapping)
+            markdown = job.result_markdown or ''
+            rewritten = rewrite_cross_page_links(markdown, mapping) if mapping else markdown
+            # children_titles only ever stamps a job created IN THIS RUN (the
+            # page_jobs query above is already scoped to Job.import_run_id ==
+            # run.id) -- an unchanged refresh parent (case (b) in
+            # _import_one_page, whose job belongs to an earlier run) is
+            # deliberately left untouched here, same "no new versioning
+            # logic" discipline as the link rewrite right above it.
+            import_info = job_settings.get('import') if isinstance(job_settings.get('import'), dict) else {}
+            page_id = import_info.get('source_page_id')
+            children = state.children_titles.get(str(page_id)) if page_id else None
+            if children:
+                rewritten = add_frontmatter_keys(rewritten, {'children_titles': list(children)})
             if rewritten != job.result_markdown:
                 job.result_markdown = rewritten
 
@@ -342,7 +403,13 @@ def _finalize_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> Non
     for child_id in pending_children:
         celery_app.send_task(
             'process_job',
-            args=[child_id, options.get('ocr_profile_id'), 'import_attachment', options.get('email') or '', None],
+            args=[
+                child_id,
+                effective_pipeline_profile_id(options.get('ocr_profile_id')),
+                'import_attachment',
+                options.get('email') or '',
+                None,
+            ],
         )
 
 
@@ -473,6 +540,12 @@ def _store_attachments(
                         'subfolder': subfolder,
                         'storage_folder': child_storage_folder,
                         'import': {'parent_job_id': job.id, 'source_page_id': page.id},
+                        # vl_connection_id/variant_label for a 'vl:'
+                        # ocr_profile_id ({} for a static profile) -- see
+                        # vl_settings_for_worker (non-raising: the
+                        # connection was already validated once at run
+                        # creation in import_routes.py).
+                        **vl_settings_for_worker(db, options.get('ocr_profile_id')),
                     },
                 },
             )
@@ -549,6 +622,20 @@ def _seed_page_states_if_empty(db, run: ImportRun, claimed_seq: int) -> None:
     _commit_owned(db, run.id, claimed_seq)
 
 
+def _job_tags(options: dict, path_titles: list[str] | None) -> list[str]:
+    """Run tags (options.tags) plus, when options.path_tags is set, the
+    page's ancestor titles (spec AUFGABE 1) -- deduplicated, order not
+    significant beyond "run tags first"."""
+    tags = list(options.get('tags') or [])
+    if options.get('path_tags') and path_titles:
+        seen = set(tags)
+        for title in path_titles:
+            if title and title not in seen:
+                seen.add(title)
+                tags.append(title)
+    return tags
+
+
 def _import_one_page(
     db,
     run: ImportRun,
@@ -557,10 +644,21 @@ def _import_one_page(
     page_id: str,
     options: dict,
     claimed_seq: int,
+    *,
+    path_titles: list[str] | None = None,
+    parent_page_id: str | None = None,
 ) -> tuple[Page | None, bool]:
     """Fetch + convert + persist one page (per-page commit). Returns
     (page, byte_cap_hit); page is None when the page failed or the cap
-    stopped the run before importing it."""
+    stopped the run before importing it.
+
+    `path_titles` is this page's ancestor-title path (space root down to its
+    direct parent, this page itself never included -- see PageContext/
+    convert_page's contract) and `parent_page_id` is the direct parent's
+    Confluence page id, both carried on the frontier entry this page was
+    popped from (see import_confluence's main loop and _discover_children).
+    Both are None/empty for the run root and for a legacy pre-feature
+    frontier entry (_normalize_frontier_entry's resume tolerance)."""
     page = client.fetch_page(page_id)
     html_bytes = page.html.encode('utf-8')
 
@@ -625,6 +723,7 @@ def _import_one_page(
         # fresh version-1 chain, exactly like a page seen for the first
         # time).
         state.visited[str(page.id)] = existing_state.job_id
+        state.add_child_title(parent_page_id, page.title)
         state.persist(run)
         _commit_owned(db, run.id, claimed_seq)
         return page, False
@@ -653,6 +752,8 @@ def _import_one_page(
         # include_attachments off: no artifacts will be stored, so same-host
         # images keep their absolute URL instead of a dangling artifacts/ ref.
         capture_attachments=bool(options.get('include_attachments', True)),
+        space_key=state.space_key,
+        path_titles=path_titles,
     )
 
     folder = options.get('folder') or _default_folder(run)
@@ -706,7 +807,7 @@ def _import_one_page(
     # PRAGMA foreign_keys=ON, which is why the test suite pins that on; see
     # tests/conftest.py.)
     db.flush()
-    _attach_tags(db, job, options.get('tags') or [])
+    _attach_tags(db, job, _job_tags(options, path_titles))
 
     # Upsert ImportPageState -- spec AUFGABE 2/5: written for BOTH normal
     # and refresh runs, so a later refresh always has real prior state to
@@ -732,6 +833,7 @@ def _import_one_page(
             )
 
     state.visited[str(page.id)] = job_id
+    state.add_child_title(parent_page_id, page.title)
     run.pages_imported += 1
     run.content_bytes += len(html_bytes)
 
@@ -749,7 +851,13 @@ def _import_one_page(
     for child_id in child_job_ids:
         celery_app.send_task(
             'process_job',
-            args=[child_id, options.get('ocr_profile_id'), 'import_attachment', options.get('email') or '', None],
+            args=[
+                child_id,
+                effective_pipeline_profile_id(options.get('ocr_profile_id')),
+                'import_attachment',
+                options.get('email') or '',
+                None,
+            ],
         )
     return page, False
 
@@ -763,11 +871,19 @@ def _discover_children(
     depth: int,
     max_pages: int,
     claimed_seq: int,
+    path_titles: list[str] | None = None,
 ) -> None:
     """Append child page ids to the frontier (bounded by max_pages and the
-    frontier link-bomb guard). Failures are recorded, never fatal."""
+    frontier link-bomb guard). Failures are recorded, never fatal.
+
+    Each new frontier entry carries the child's own path (`path_titles` --
+    this page's path plus this page's own title, per the PageContext/
+    convert_page contract) and this page's id as `parent_page_id`, so
+    _import_one_page can thread both through to convert_page and to
+    state.add_child_title once the child is actually imported."""
     frontier_cap = max_pages * 4
     frontier_ids = {entry[0] for entry in state.frontier}
+    child_path = [*(path_titles or []), page.title]
     try:
         for child_id in client.iter_children(page.id):
             if run.pages_discovered >= max_pages or len(state.frontier) >= frontier_cap:
@@ -775,7 +891,7 @@ def _discover_children(
             child_id = str(child_id)
             if child_id in state.visited or child_id in frontier_ids:
                 continue
-            state.frontier.append([child_id, depth + 1])
+            state.frontier.append([child_id, depth + 1, list(child_path), str(page.id)])
             frontier_ids.add(child_id)
             run.pages_discovered += 1
     except ConfluenceError as exc:
@@ -858,8 +974,24 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
                 except ConfluenceError as exc:
                     _fail_run(db, run, state, f'could not resolve space {run.scope_value!r}: {exc}', claimed_seq)
                     return
-                state.frontier = [[str(root_id), 0]]
+                state.frontier = [[str(root_id), 0, [], None]]
             if state.frontier:
+                # Root context (spec AUFGABE 1): resolved once, here, for the
+                # run's single root frontier entry -- space_key is persisted
+                # on the run state (survives resume), and the root's
+                # ancestor_titles become its path_titles (the part of the
+                # tree ABOVE the imported subtree; the root's own title is
+                # never in its own path, same as everywhere else in the
+                # PageContext contract). Best-effort: a fetch_context failure
+                # here must not fail the run, only degrade it to an empty
+                # context (space/confluence_path frontmatter simply absent).
+                root_entry = state.frontier[0]
+                try:
+                    root_context = client.fetch_context(root_entry[0])
+                    state.space_key = root_context.space_key
+                    root_entry[2] = list(root_context.ancestor_titles)
+                except ConfluenceError as exc:
+                    state.add_error(root_entry[0], '', f'could not fetch root context: {exc}')
                 run.pages_discovered = len(state.frontier)
                 state.persist(run)
                 _commit_owned(db, run.id, claimed_seq)
@@ -870,7 +1002,7 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
         # The page currently being imported; None between pages. Read by the
         # soft-time-limit handler to keep the §3 resume contract (a crash
         # re-imports at most the in-flight page -- never silently drops it).
-        in_flight: tuple[str, int] | None = None
+        in_flight: tuple[str, int, list[str], str | None] | None = None
         try:
             while state.frontier and pages_this_chunk < settings.import_chunk_pages:
                 if run.pages_imported >= max_pages:
@@ -879,15 +1011,18 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
                     cancelled = True
                     break
 
-                page_id, depth = state.frontier.pop(0)
+                page_id, depth, path_titles, parent_page_id = state.frontier.pop(0)
                 page_id = str(page_id)
                 if page_id in state.visited:
                     continue
-                in_flight = (page_id, int(depth))
+                in_flight = (page_id, int(depth), list(path_titles), parent_page_id)
                 pages_this_chunk += 1
 
                 try:
-                    page, byte_cap_hit = _import_one_page(db, run, state, client, page_id, options, claimed_seq)
+                    page, byte_cap_hit = _import_one_page(
+                        db, run, state, client, page_id, options, claimed_seq,
+                        path_titles=path_titles, parent_page_id=parent_page_id,
+                    )
                 except (SoftTimeLimitExceeded, _LeaseLost):
                     raise
                 except Exception as exc:
@@ -911,7 +1046,7 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
                     _commit_owned(db, run.id, claimed_seq)
                     break
                 if page is not None and int(depth) < max_depth:
-                    _discover_children(db, run, state, client, page, int(depth), max_pages, claimed_seq)
+                    _discover_children(db, run, state, client, page, int(depth), max_pages, claimed_seq, path_titles=path_titles)
                 in_flight = None
         except SoftTimeLimitExceeded:
             # Same continuation path as a full chunk, but first discard the
@@ -924,7 +1059,7 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
             if run is None:
                 return
             if in_flight is not None:
-                flight_id, flight_depth = in_flight
+                flight_id, flight_depth, flight_path_titles, flight_parent_page_id = in_flight
                 committed_job_id = state.visited.get(flight_id)
                 if committed_job_id is not None and db.scalar(select(Job.id).where(Job.id == committed_job_id)) is None:
                     # The page's job row was rolled back with the session:
@@ -933,7 +1068,7 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
                     del state.visited[flight_id]
                     committed_job_id = None
                 if flight_id not in state.visited:
-                    state.frontier.insert(0, [flight_id, flight_depth])
+                    state.frontier.insert(0, [flight_id, flight_depth, flight_path_titles, flight_parent_page_id])
                 elif committed_job_id is not None:
                     # Page committed, but its attachment phase / child
                     # discovery may have been cut short; re-importing would

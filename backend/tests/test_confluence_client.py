@@ -286,6 +286,40 @@ def test_v2_safe_fetch_error_wrapped(monkeypatch):
         _cloud_client().fetch_page('123')
 
 
+def test_v2_fetch_context(monkeypatch):
+    fake = _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/pages/123?expand=ancestors,space': (200, _json_body({
+            'id': '123',
+            'ancestors': [{'title': 'Handbook'}, {'title': 'Ops'}],
+            'space': {'key': 'DOCS'},
+        })),
+    })
+    context = _cloud_client().fetch_context('123')
+    assert context.space_key == 'DOCS'
+    assert context.ancestor_titles == ['Handbook', 'Ops']
+    call = fake.calls[0]
+    assert call['headers']['Authorization'].startswith('Basic ')
+
+
+def test_v2_fetch_context_missing_space_and_ancestors(monkeypatch):
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/pages/123?expand=ancestors,space': (200, _json_body({'id': '123'})),
+    })
+    context = _cloud_client().fetch_context('123')
+    assert context.space_key is None
+    assert context.ancestor_titles == []
+
+
+def test_v2_fetch_context_http_error(monkeypatch):
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/pages/123?expand=ancestors,space': (500, b'boom'),
+    })
+    with pytest.raises(ConfluenceError) as excinfo:
+        _cloud_client().fetch_context('123')
+    assert excinfo.value.status_code == 500
+    assert SECRET not in str(excinfo.value)
+
+
 def test_v2_iter_children_follows_cursor(monkeypatch):
     next_path = '/wiki/api/v2/pages/123/children?limit=50&cursor=abc'
     fake = _install(monkeypatch, {
@@ -426,6 +460,39 @@ def test_v1_fetch_page(monkeypatch):
     assert page.html == '<p>ops</p>'
     assert page.url == f'{DC_BASE}/display/DOCS/Runbook'
     assert fake.calls[0]['headers']['Authorization'] == f'Bearer {SECRET}'
+
+
+def test_v1_fetch_context(monkeypatch):
+    fake = _install(monkeypatch, {
+        f'{DC_BASE}/rest/api/content/42?expand=ancestors,space': (200, _json_body({
+            'id': '42',
+            'ancestors': [{'title': 'Wiki'}, {'title': 'Runbooks'}],
+            'space': {'key': 'OPS'},
+        })),
+    })
+    context = _dc_client().fetch_context('42')
+    assert context.space_key == 'OPS'
+    assert context.ancestor_titles == ['Wiki', 'Runbooks']
+    assert fake.calls[0]['headers']['Authorization'] == f'Bearer {SECRET}'
+
+
+def test_v1_fetch_context_no_ancestors_no_space(monkeypatch):
+    _install(monkeypatch, {
+        f'{DC_BASE}/rest/api/content/42?expand=ancestors,space': (200, _json_body({
+            'id': '42', 'ancestors': [], 'space': None,
+        })),
+    })
+    context = _dc_client().fetch_context('42')
+    assert context.space_key is None
+    assert context.ancestor_titles == []
+
+
+def test_v1_fetch_context_safe_fetch_error_wrapped(monkeypatch):
+    _install(monkeypatch, {
+        f'{DC_BASE}/rest/api/content/42?expand=ancestors,space': SafeFetchError('blocked address'),
+    })
+    with pytest.raises(ConfluenceError, match='blocked address'):
+        _dc_client().fetch_context('42')
 
 
 def test_v1_iter_children_start_limit_pagination(monkeypatch):

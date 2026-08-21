@@ -24,6 +24,7 @@ from app.models.models import (
     JobStatus,
     Team,
     UserRole,
+    VlConnection,
 )
 from app.services import security
 from app.services.confluence import ConfluenceError
@@ -468,8 +469,99 @@ def test_create_run_extracts_page_id_clamps_caps_and_enqueues_by_name(monkeypatc
     assert row.options['max_pages'] == settings.import_max_pages  # clamped
     assert row.options['max_depth'] == settings.import_max_depth  # clamped
     assert row.options['tags'] == ['a', 'b']
+    assert row.options['path_tags'] is False  # defaults off, not sent above
     assert row.state['frontier'] == [['123456', 0]]
     assert row.state['visited'] == {}
+
+
+def _make_vl_connection(*, name: str = 'Import VL', enabled: bool = True) -> VlConnection:
+    db = _db()
+    try:
+        connection = VlConnection(
+            name=name,
+            base_url='https://vl.example.com',
+            model='vl-model',
+            api_key_encrypted=security.encrypt_vl_api_key('secret-key'),
+            system_prompt='',
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def test_create_run_rejects_unknown_vl_ocr_profile_and_creates_no_run(monkeypatch):
+    user = _user('imp-run-vl-bad')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    sent: list[tuple] = []
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda name, args=None, **kw: sent.append((name, args)))
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': '123456'},
+            'options': {'ocr_attachments': True, 'ocr_profile_id': 'vl:does-not-exist'},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()['detail'] == "Unknown profile 'vl:does-not-exist'"
+    assert sent == []
+
+    db = _db()
+    try:
+        assert db.query(ImportRun).filter(ImportRun.owner_id == user.id).count() == 0
+    finally:
+        db.close()
+
+
+def test_create_run_accepts_enabled_vl_ocr_profile(monkeypatch):
+    user = _user('imp-run-vl-ok')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+    connection = _make_vl_connection(name='Attach Vision')
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': '123456'},
+            'options': {'ocr_attachments': True, 'ocr_profile_id': f'vl:{connection.id}'},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    row = _get_run_row(resp.json()['id'])
+    assert row.options['ocr_profile_id'] == f'vl:{connection.id}'
+
+
+def test_create_run_persists_path_tags_option(monkeypatch):
+    # Regression: create_import_run's `options` dict must copy path_tags
+    # through to the persisted run -- app/workers/import_tasks.py's
+    # _job_tags reads it from there, and a run created via this endpoint
+    # (not the test-only _make_run helper other worker tests use) is what
+    # the frontend's "Use hierarchy as tags" toggle actually drives.
+    user = _user('imp-run-path-tags')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': '123456'},
+            'options': {'path_tags': True},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    row = _get_run_row(resp.json()['id'])
+    assert row.options['path_tags'] is True
 
 
 def test_create_run_space_scope_from_url_leaves_frontier_for_worker(monkeypatch):
@@ -740,6 +832,7 @@ def test_run_detail_exposes_source_id_and_options_ignoring_extra_keys():
         'subfolder': 'confluence',
         'tags': ['a', 'b'],
         'email': 'me@example.com',
+        'path_tags': False,
     }
 
     # Deleted source -> source_id goes NULL, run keeps its history.

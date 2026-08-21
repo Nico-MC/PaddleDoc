@@ -144,6 +144,11 @@ class PaddleOption(BaseModel):
     value: str
     label: str
     description: str
+    # 'ocr' for the static presets, 'vl' for a dynamic 'vl:<connection_id>'
+    # entry (one per enabled VlConnection) -- see
+    # paddle_service.get_paddle_capabilities. Defaulted for forward
+    # compatibility, though the service always sets it explicitly now.
+    kind: str = 'ocr'
     text_detection_model_name: str | None = None
     text_recognition_model_name: str | None = None
 

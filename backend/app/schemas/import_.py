@@ -82,6 +82,11 @@ class ImportRunOptions(BaseModel):
     subfolder: str = ''
     tags: list[str] = Field(default_factory=list)
     email: str = ''
+    # When set, each imported page's job additionally gets its Confluence
+    # ancestor titles (PageContext.ancestor_titles / convert_page's
+    # path_titles) attached as tags, on top of `tags` above -- see
+    # app/workers/import_tasks.py's _job_tags.
+    path_tags: bool = False
 
 
 class ImportRunCreateRequest(BaseModel):

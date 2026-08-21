@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, defer
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, Team, User, UserRole
+from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, Team, User, UserRole, VlConnection
 from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
@@ -46,9 +46,11 @@ from app.schemas.jobs import (
 )
 from app.schemas.import_ import JobArtifactListResponse, JobArtifactResponse
 from app.services.paddle_service import (
+    effective_pipeline_profile_id,
     get_paddle_capabilities,
     get_paddle_settings,
     get_paddle_status,
+    resolve_profile_selection,
     update_paddle_settings,
 )
 from app.services.security import DUMMY_PASSWORD_HASH, enforce_rate_limit, hash_password, verify_password
@@ -586,6 +588,17 @@ def _find_predecessor_job(db: Session, user: User, filename: str) -> Job | None:
     return db.scalars(query).first()
 
 
+def _enabled_vl_connections(db: Session) -> list[VlConnection]:
+    """Loaded here (not inside paddle_service, which has never had a DB
+    dependency) and handed to get_paddle_capabilities -- shared by the
+    /paddle/capabilities endpoint and restart_job's profile validator, same
+    order (`VlConnection.name`) as benchmarks.list_vl_connections /
+    auth.admin_list_vl_connections."""
+    return list(
+        db.scalars(select(VlConnection).where(VlConnection.enabled.is_(True)).order_by(VlConnection.name)).all()
+    )
+
+
 def create_job_from_upload(
     db: Session,
     file: UploadFile,
@@ -834,6 +847,12 @@ def start_collection_processing(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Collection not found')
     _require_visible_collection(db, collection, user)
 
+    # Raises 422 for an unknown/disabled 'vl:<connection_id>' selection;
+    # {} for a static profile (see resolve_profile_selection). Resolved once
+    # up front -- every job in the collection gets the same profile.
+    profile_settings = resolve_profile_selection(db, payload.profile_id)
+    dispatch_profile_id = effective_pipeline_profile_id(payload.profile_id)
+
     job_ids = _collection_job_ids(db, collection_id, user)
     if not job_ids:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='No files uploaded to collection')
@@ -844,8 +863,14 @@ def start_collection_processing(
         if job is None:
             continue
         info = job.processing_info if isinstance(job.processing_info, dict) else {}
-        settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+        settings_info = dict(info.get('settings')) if isinstance(info.get('settings'), dict) else {}
+        # Clear any stale vl_connection_id/variant_label before applying the
+        # new selection so switching away from a vl: profile never leaves
+        # orphaned VL fields behind (same discipline as restart_job).
+        settings_info.pop('vl_connection_id', None)
+        settings_info.pop('variant_label', None)
         settings_info['profile_id'] = payload.profile_id
+        settings_info.update(profile_settings)
         settings_info['mode'] = 'collection'
         settings_info['email'] = collection.email
         settings_info['department'] = collection.department
@@ -853,7 +878,7 @@ def start_collection_processing(
         job.processing_info = {**info, 'settings': settings_info}
         process_job.delay(
             job.id,
-            payload.profile_id,
+            dispatch_profile_id,
             'collection',
             collection.email,
             collection.department,
@@ -895,6 +920,12 @@ def upload_document(
     if password.strip():
         password_hash = hash_password(password.strip())
 
+    # Raises 422 only for an unknown/disabled 'vl:<connection_id>' selection
+    # -- a bad *static* profile_id stays un-validated here (unchanged
+    # behavior: create_job_from_upload/paddle_service silently clamp it to
+    # the default profile downstream). See resolve_profile_selection.
+    profile_settings = resolve_profile_selection(db, profile_id)
+
     file_id = str(uuid.uuid4())
     storage_folder = _storage_folder(file_id, folder_clean, subfolder_clean)
 
@@ -912,12 +943,13 @@ def upload_document(
             subfolder=subfolder_clean or None,
             tags=_parse_tags(tags),
             password_hash=password_hash,
+            extra_settings=profile_settings or None,
         )
     except DuplicateUploadError as exc:
         return _duplicate_upload_response(exc.predecessor)
     db.commit()
 
-    process_job.delay(file_id, profile_id, 'single', email_clean, None)
+    process_job.delay(file_id, effective_pipeline_profile_id(profile_id), 'single', email_clean, None)
     return UploadResponse(job_id=job.id, status=job.status)
 
 
@@ -1131,7 +1163,7 @@ def restart_pending_jobs(request: Request, db: Session = Depends(get_db), user: 
         email = settings_info.get('email') if isinstance(settings_info.get('email'), str) else None
         department = settings_info.get('department') if isinstance(settings_info.get('department'), str) else None
 
-        process_job.delay(job.id, profile_id, mode, email, department)
+        process_job.delay(job.id, effective_pipeline_profile_id(profile_id), mode, email, department)
         restarted += 1
 
     return {
@@ -1167,7 +1199,9 @@ def restart_job(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Job is currently running')
 
     if requested_profile_id is not None:
-        known_profile_ids = {p['value'] for p in get_paddle_capabilities()['profiles']}
+        known_profile_ids = {
+            p['value'] for p in get_paddle_capabilities(vl_connections=_enabled_vl_connections(db))['profiles']
+        }
         if requested_profile_id not in known_profile_ids:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1188,14 +1222,24 @@ def restart_job(
     settings_payload = info.get('settings') if isinstance(info.get('settings'), dict) else {}
     execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
     if requested_profile_id:
+        # Already validated above (known_profile_ids), so this never raises
+        # here -- just resolves the vl_connection_id/variant_label fields
+        # ({} for a static profile).
+        resolved = resolve_profile_selection(db, requested_profile_id)
+        next_settings = dict(settings_payload)
+        # Clear any stale vl_connection_id/variant_label from a previous
+        # selection before applying the new one, so a vl: -> static switch
+        # never leaves orphaned VL fields behind, and a vl: -> different
+        # vl: switch never mixes fields from two connections.
+        next_settings.pop('vl_connection_id', None)
+        next_settings.pop('variant_label', None)
+        next_settings['previous_profile_id'] = current_profile
+        next_settings['requested_profile_id'] = requested_profile_id
+        next_settings['profile_id'] = requested_profile_id
+        next_settings.update(resolved)
         job.processing_info = {
             **info,
-            'settings': {
-                **settings_payload,
-                'previous_profile_id': current_profile,
-                'requested_profile_id': requested_profile_id,
-                'profile_id': requested_profile_id,
-            },
+            'settings': next_settings,
             'execution': {
                 **execution,
                 'status': 'requeued',
@@ -1215,7 +1259,7 @@ def restart_job(
     job.error_message = None
     db.commit()
 
-    process_job.delay(job.id, profile_id, mode, email, department)
+    process_job.delay(job.id, effective_pipeline_profile_id(profile_id), mode, email, department)
 
     return {
         'job_id': job.id,
@@ -1346,7 +1390,7 @@ def restart_folder(
         }
         job.status = JobStatus.PENDING
         job.error_message = None
-        process_job.delay(job.id, profile_id, mode, email, department)
+        process_job.delay(job.id, effective_pipeline_profile_id(profile_id), mode, email, department)
         restarted += 1
 
     db.commit()
@@ -1778,8 +1822,8 @@ def get_paddle_runtime_settings() -> PaddleSettingsResponse:
 
 
 @router.get('/paddle/capabilities', response_model=PaddleCapabilitiesResponse)
-def get_paddle_capability_options() -> PaddleCapabilitiesResponse:
-    return PaddleCapabilitiesResponse(**get_paddle_capabilities())
+def get_paddle_capability_options(db: Session = Depends(get_db)) -> PaddleCapabilitiesResponse:
+    return PaddleCapabilitiesResponse(**get_paddle_capabilities(vl_connections=_enabled_vl_connections(db)))
 
 
 @router.put('/paddle/settings', response_model=PaddleSettingsResponse)

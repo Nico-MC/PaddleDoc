@@ -323,11 +323,16 @@ export default function BenchmarkPage() {
                 className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950"
               >
                 <option value="">No profile (VL connections only)</option>
-                {capabilities.profiles.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
+                {capabilities.profiles
+                  // Dynamic vl:<connection-id> entries are already offered above
+                  // as VL connection checkboxes -- listing them again here as an
+                  // "OCR baseline" would double them up as benchmark variants.
+                  .filter((option) => option.kind !== 'vl' && !option.value.startsWith('vl:'))
+                  .map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
               </select>
             </label>
 

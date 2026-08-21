@@ -361,13 +361,27 @@ def process_job(
                 'name': vl_conn.name,
             }
 
+        # Callers translate a 'vl:<connection_id>' selection into the real
+        # pipeline id before dispatch (effective_pipeline_profile_id), so this
+        # task's profile_id parameter never carries the vl: form. The vl:
+        # selection recorded in settings at creation time is the job's
+        # user-facing profile identity (jobs table, detail page, restart's
+        # previous_profile_id audit) and must survive the RUNNING transition —
+        # vl_override resolution reads settings.vl_connection_id either way.
+        existing_profile = (
+            existing_settings.get('profile_id')
+            if isinstance(existing_settings.get('profile_id'), str)
+            else None
+        )
+        keep_vl_identity = bool(existing_profile) and existing_profile.startswith('vl:')
+
         execution_payload = {'status': 'running', 'started_at': now.isoformat()}
         job.processing_info = {
             'settings': {
                 **existing_settings,
                 'default_profile': runtime.get('default_profile'),
-                'requested_profile_id': profile_id,
-                'profile_id': effective_profile_id,
+                'requested_profile_id': existing_profile if keep_vl_identity else profile_id,
+                'profile_id': existing_profile if keep_vl_identity else effective_profile_id,
                 'timeout_seconds': runtime.get('timeout_seconds'),
                 'mode': mode,
                 'email': email,

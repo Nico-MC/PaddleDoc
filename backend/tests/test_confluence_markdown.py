@@ -14,8 +14,11 @@ import yaml
 from app.services.confluence_markdown import (
     ConversionResult,
     ImageRef,
+    add_frontmatter_keys,
     convert_page,
     html_to_markdown,
+    is_navigation_page,
+    render_frontmatter,
     rewrite_cross_page_links,
     sanitize_filename,
 )
@@ -79,6 +82,79 @@ def test_hostile_title_cannot_break_frontmatter(hostile_title):
     assert meta['import_run'] == 'run-1'
     assert len(meta) == 6
     assert 'body text' in body
+
+
+# --- space/path context (PageContext plumbing) --------------------------------
+
+def test_convert_page_with_space_and_path_adds_frontmatter_and_breadcrumb():
+    result = convert_page(
+        '<p>hello</p>',
+        base_url=BASE,
+        title='Deploying',
+        page_id='555',
+        page_url=f'{BASE}/wiki/spaces/DOCS/pages/555/Deploying',
+        page_version=2,
+        import_run_id='run-1',
+        imported_at=IMPORTED_AT,
+        space_key='DOCS',
+        path_titles=['Handbook', 'Ops'],
+    )
+    meta, body = _split_frontmatter(result.markdown)
+    assert meta['space'] == 'DOCS'
+    assert meta['confluence_path'] == ['Handbook', 'Ops']
+    assert meta['parent_title'] == 'Ops'
+    assert meta['depth'] == 2
+    assert 'is_navigation' not in meta
+    # Order: existing keys first, then space, confluence_path, parent_title, depth.
+    assert list(meta.keys())[-4:] == ['space', 'confluence_path', 'parent_title', 'depth']
+    assert body.lstrip('\n').startswith('> Confluence: Handbook › Ops')
+    assert 'hello' in body
+
+
+def test_convert_page_without_path_omits_new_keys_and_breadcrumb():
+    # Regression: no new args -> unchanged behaviour (they all default).
+    result = _convert('<p>hello</p>', title='Page')
+    meta, body = _split_frontmatter(result.markdown)
+    assert 'space' not in meta
+    assert 'confluence_path' not in meta
+    assert 'parent_title' not in meta
+    assert 'depth' not in meta
+    assert 'is_navigation' not in meta
+    assert '> Confluence:' not in body
+
+
+def test_convert_page_empty_path_titles_list_omits_breadcrumb():
+    result = convert_page(
+        '<p>hello</p>', base_url=BASE, title='Page', page_id='1',
+        page_url=f'{BASE}/wiki/spaces/DOCS/pages/1/Page', page_version=1,
+        import_run_id='run-1', imported_at=IMPORTED_AT, path_titles=[],
+    )
+    meta, body = _split_frontmatter(result.markdown)
+    assert 'confluence_path' not in meta
+    assert 'parent_title' not in meta
+    assert 'depth' not in meta
+    assert '> Confluence:' not in body
+
+
+def test_convert_page_space_without_path_only_adds_space_key():
+    result = convert_page(
+        '<p>hello</p>', base_url=BASE, title='Page', page_id='1',
+        page_url=f'{BASE}/wiki/spaces/DOCS/pages/1/Page', page_version=1,
+        import_run_id='run-1', imported_at=IMPORTED_AT, space_key='DOCS',
+    )
+    meta, body = _split_frontmatter(result.markdown)
+    assert meta['space'] == 'DOCS'
+    assert 'confluence_path' not in meta
+    assert '> Confluence:' not in body
+
+
+def test_convert_page_navigation_body_sets_is_navigation_flag():
+    links = ''.join(
+        f'<p><a href="{BASE}/wiki/spaces/DOCS/pages/{i}/P{i}">Page {i}</a></p>' for i in range(10)
+    )
+    result = _convert(links)
+    meta, _ = _split_frontmatter(result.markdown)
+    assert meta['is_navigation'] is True
 
 
 # --- code blocks --------------------------------------------------------------
@@ -317,3 +393,91 @@ def test_sanitize_filename_truncates_keeping_extension():
     name = sanitize_filename('a' * 300 + '.png')
     assert len(name) <= 200
     assert name.endswith('.png')
+
+
+# --- is_navigation_page ---------------------------------------------------------
+
+def test_is_navigation_page_pure_link_list_true():
+    body = '\n\n'.join(f'[Page {i}](https://example.com/pages/{i})' for i in range(6))
+    assert is_navigation_page(body) is True
+
+
+def test_is_navigation_page_prose_with_links_false():
+    # >= 5 links, but diluted by enough surrounding prose that the 70%
+    # link-density threshold is not met -- exercises the ratio branch,
+    # not just the link-count branch.
+    filler = (
+        'This is a long paragraph of ordinary documentation prose that explains '
+        'the process in detail, covering prerequisites, edge cases, and the '
+        'reasoning behind each step so a new engineer can follow along without '
+        'prior context. '
+    ) * 4
+    links = ' '.join(f'[link {i}](https://example.com/pages/{i})' for i in range(5))
+    body = filler + links
+    assert is_navigation_page(body) is False
+
+
+def test_is_navigation_page_image_gallery_false():
+    # Image embeds never count as links, so the link count stays at 0.
+    body = '\n\n'.join(f'![Photo {i}](https://example.com/img/{i}.png)' for i in range(10))
+    assert is_navigation_page(body) is False
+
+
+def test_is_navigation_page_few_links_false():
+    body = '[a](https://example.com/1) [b](https://example.com/2)'
+    assert is_navigation_page(body) is False
+
+
+def test_is_navigation_page_empty_body_false():
+    assert is_navigation_page('') is False
+
+
+# --- add_frontmatter_keys -------------------------------------------------------
+
+def test_add_frontmatter_keys_adds_missing_keys():
+    markdown = '---\ntitle: Page\nsource: https://example.com\n---\n\nBody text\n'
+    result = add_frontmatter_keys(markdown, {'space': 'DOCS', 'depth': 2})
+    meta, body = _split_frontmatter(result)
+    assert meta == {'title': 'Page', 'source': 'https://example.com', 'space': 'DOCS', 'depth': 2}
+    assert body == '\nBody text\n'
+
+
+def test_add_frontmatter_keys_does_not_overwrite_existing():
+    markdown = '---\ntitle: Page\nspace: ALREADY\n---\n\nBody\n'
+    result = add_frontmatter_keys(markdown, {'space': 'NEW', 'depth': 3})
+    meta, _ = _split_frontmatter(result)
+    assert meta['space'] == 'ALREADY'
+    assert meta['depth'] == 3
+
+
+def test_add_frontmatter_keys_no_frontmatter_returns_unchanged():
+    markdown = 'Just a plain document, no frontmatter here.\n'
+    assert add_frontmatter_keys(markdown, {'space': 'DOCS'}) == markdown
+
+
+def test_add_frontmatter_keys_empty_string_returns_unchanged():
+    assert add_frontmatter_keys('', {'space': 'DOCS'}) == ''
+
+
+def test_add_frontmatter_keys_yaml_injection_via_extra_value_impossible():
+    # A value handed in through `extra` containing '---' and ': ' must stay
+    # inert data, not break the fence or inject a sibling key.
+    hostile = 'Evil: value\n---\nnew_key: hacked'
+    markdown = '---\ntitle: Page\n---\n\nBody\n'
+    result = add_frontmatter_keys(markdown, {'parent_title': hostile})
+    meta, body = _split_frontmatter(result)
+    assert meta['parent_title'] == hostile
+    assert 'new_key' not in meta
+    assert len(meta) == 2
+    assert 'Body' in body
+
+
+def test_add_frontmatter_keys_yaml_injection_via_existing_title_survives():
+    hostile_title = 'Evil: value\n---\ninjected: true'
+    markdown = render_frontmatter({'title': hostile_title}) + 'Body\n'
+    result = add_frontmatter_keys(markdown, {'space': 'DOCS'})
+    meta, body = _split_frontmatter(result)
+    assert meta['title'] == hostile_title
+    assert meta['space'] == 'DOCS'
+    assert 'injected' not in meta
+    assert 'Body' in body

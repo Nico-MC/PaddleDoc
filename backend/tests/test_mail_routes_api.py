@@ -14,7 +14,8 @@ from email.message import EmailMessage
 
 import pytest
 
-from app.models.models import Job, JobStatus, MailMessage, Team, UserRole
+from app.models.models import Job, JobStatus, MailMessage, Team, UserRole, VlConnection
+from app.services import security
 from app.services.security import rate_limiter
 from conftest import TestingSessionLocal, create_test_user, login_as
 
@@ -128,6 +129,74 @@ def test_ingest_mixed_attachments_creates_job_for_pdf_only():
         assert job.processing_info['settings']['mail']['part_index'] == pdf_part['index']
     finally:
         db.close()
+
+
+def _make_vl_connection(*, name: str = 'Mail VL', enabled: bool = True) -> VlConnection:
+    db = _db()
+    try:
+        connection = VlConnection(
+            name=name,
+            base_url='https://vl.example.com',
+            model='vl-model',
+            api_key_encrypted=security.encrypt_vl_api_key('secret-key'),
+            system_prompt='',
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def test_ingest_with_vl_profile_creates_job_with_vl_settings_and_dispatches_openai_vision(monkeypatch):
+    from app.api import mail_routes
+
+    dispatched: list[tuple] = []
+    monkeypatch.setattr(mail_routes.process_job, 'delay', lambda *args, **kwargs: dispatched.append(args))
+
+    user = _user('mailer')
+    client = login_as(user.username)
+    connection = _make_vl_connection(name='Mail Vision')
+    raw = _mixed_with_pdf_and_zip_eml()
+
+    resp = _post_raw(client, raw, folder='mail', profile_id=f'vl:{connection.id}')
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    pdf_part = next(p for p in body['parts'] if p['filename'] == 'bericht-q3.pdf')
+
+    db = _db()
+    try:
+        job = db.get(Job, pdf_part['job_id'])
+        settings_info = job.processing_info['settings']
+        assert settings_info['profile_id'] == f'vl:{connection.id}'
+        assert settings_info['vl_connection_id'] == connection.id
+        assert settings_info['variant_label'] == 'Mail Vision'
+    finally:
+        db.close()
+
+    # Dispatched with the real pipeline id, never the raw 'vl:<connection_id>'
+    # display value -- see _job_dispatch_args / effective_pipeline_profile_id.
+    assert dispatched == [(pdf_part['job_id'], 'openai_vision', 'mail_attachment', '', None)]
+
+
+def test_ingest_with_unknown_vl_profile_is_422_and_persists_nothing():
+    user = _user('mailer')
+    client = login_as(user.username)
+    raw = _mixed_with_pdf_and_zip_eml(subject='Rejected VL profile')
+
+    rejected = _post_raw(client, raw, profile_id='vl:does-not-exist')
+    assert rejected.status_code == 422
+    assert rejected.json()['detail'] == "Unknown profile 'vl:does-not-exist'"
+
+    # If the rejected attempt had persisted the MailMessage/dedup row
+    # despite the 422, this identical re-post would come back as a 200
+    # replay instead of a fresh 201 ingest.
+    retried = _post_raw(client, raw)
+    assert retried.status_code == 201, retried.text
+    assert retried.json()['replayed'] is False
 
 
 def test_ingest_multipart_form_data_convenience():

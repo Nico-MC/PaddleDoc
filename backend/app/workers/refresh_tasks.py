@@ -40,6 +40,16 @@ on instead of a new migration. The per-page diff against ImportPageState
 app/workers/import_tasks.py, gated on that same flag; the
 last_refresh_at/last_refresh_error bookkeeping on ImportSource lives there
 too (set when a refresh run reaches a terminal state).
+
+Confluence path/space context (frontmatter `space` / `confluence_path` /
+`parent_title` / `depth`, the breadcrumb line, and `path_tags` -- see
+app/services/confluence.PageContext and app/workers/import_tasks.py's
+_import_one_page) needs NO extra plumbing here: a refresh run is a normal
+`import_confluence` crawl from the copied scope's root (frontier below), so
+it goes through the exact same one-fetch_context-per-run root resolution and
+per-page path threading as a manually started run -- a changed page's
+re-import gets a freshly walked ancestor path (from the CURRENT tree
+shape, not a stale cached one) at zero extra API cost per page.
 """
 
 import logging

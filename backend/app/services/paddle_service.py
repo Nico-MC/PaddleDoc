@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Sequence
 from datetime import datetime, timezone
 import html
 import importlib.util
@@ -13,11 +14,14 @@ from tempfile import TemporaryDirectory
 from typing import cast
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
+from fastapi import HTTPException, status
 from pypdf import PdfReader, PdfWriter
 from redis import Redis
+from sqlalchemy.orm import Session
 import yaml
 
 from app.core.config import settings
+from app.models.models import VlConnection
 from app.services import safe_fetch as safe_fetch_module
 from app.services.quality_gate import evaluate_document_quality
 from app.services.mail_ingest import (
@@ -115,6 +119,20 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'pipeline': 'openai_vision',
     },
 }
+# Every static preset is a 'kind': 'ocr' entry, set in one place rather than
+# repeated per literal above -- distinguishes them from the 'kind': 'vl'
+# entries get_paddle_capabilities appends per enabled VlConnection (see
+# resolve_profile_selection / the 'vl:<connection_id>' profile_id contract).
+for _profile in _PADDLE_PROFILES.values():
+    _profile['kind'] = 'ocr'
+del _profile
+
+# Prefix marking a profile_id as "use this admin-configured VlConnection
+# instead of a static preset" (value shape: 'vl:<connection_id>') -- see
+# get_paddle_capabilities, resolve_profile_selection, and
+# effective_pipeline_profile_id below, plus app/api/benchmarks.py's variant
+# generation, whose settings shape this mirrors.
+_VL_PROFILE_PREFIX = 'vl:'
 
 
 def _default_runtime_settings() -> dict[str, str | int]:
@@ -955,7 +973,22 @@ def update_paddle_settings(*, default_profile: str, timeout_seconds: int) -> Non
         settings.paddle_timeout_seconds = timeout_seconds
 
 
-def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
+def get_paddle_capabilities(
+    vl_connections: Sequence[VlConnection] = (),
+) -> dict[str, list[dict[str, str]]]:
+    """Static presets (unchanged, 'kind': 'ocr') plus one dynamic 'kind':
+    'vl' entry per already-enabled VlConnection the caller passes in --
+    static entries always first, per the profile_id contract used across
+    upload/collections-start/restart/mail/import (see
+    resolve_profile_selection).
+
+    Takes already-loaded connections rather than a db session/query itself:
+    this module has never had a DB dependency (Redis for runtime settings,
+    nothing else), and callers (routes.py's /paddle/capabilities endpoint
+    and its restart-time profile validator) already need a Session for
+    other things, so loading the enabled-connections list is cheapest done
+    once there and handed in -- see routes.py's _enabled_vl_connections.
+    """
     profile_order = [
         'ppocrv6_tiny',
         'ppocrv6_tiny_structurev3',
@@ -966,13 +999,103 @@ def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
         'paddlevl_1_6_0_9b',
         'openai_vision',
     ]
-    return {
-        'profiles': [
-            _PADDLE_PROFILES[profile_id]
-            for profile_id in profile_order
-            if profile_id in _PADDLE_PROFILES
-        ],
-    }
+    profiles = [
+        _PADDLE_PROFILES[profile_id]
+        for profile_id in profile_order
+        if profile_id in _PADDLE_PROFILES
+    ]
+    profiles.extend(
+        {
+            'value': f'{_VL_PROFILE_PREFIX}{connection.id}',
+            'label': f'VL: {connection.name}',
+            'description': f'{connection.model} — vision-language connection',
+            'kind': 'vl',
+        }
+        for connection in vl_connections
+    )
+    return {'profiles': profiles}
+
+
+def _vl_connection_settings(db: Session, connection_id: str) -> tuple[dict[str, str], VlConnection | None]:
+    """Shared lookup behind resolve_profile_selection and
+    vl_settings_for_worker: settings fields always carry vl_connection_id
+    (even when the connection is missing/disabled) plus variant_label when
+    the connection still exists, so a caller either raises on a bad
+    connection (resolve_profile_selection, for API endpoints) or lets
+    process_job's own disabled/missing-connection check fail just that one
+    job later (vl_settings_for_worker, for background workers -- see its
+    docstring)."""
+    connection = db.get(VlConnection, connection_id)
+    fields: dict[str, str] = {'vl_connection_id': connection_id}
+    if connection is not None:
+        fields['variant_label'] = connection.name
+    return fields, connection
+
+
+def resolve_profile_selection(db: Session, profile_id: str | None) -> dict[str, str]:
+    """Translates a client-supplied profile_id into the extra
+    processing_info.settings fields it implies, mirroring the shape
+    app/api/benchmarks.py's variant generation writes for its 'vl' variant
+    (vl_connection_id + a human-readable label under 'variant_label') -- see
+    app/workers/tasks.py's vl_override build (~line 335) for the consumer,
+    which only needs settings.vl_connection_id to work unchanged.
+
+    Static preset ids (the _PADDLE_PROFILES keys) need no extra settings
+    and return {}. An unrecognized *static-looking* id also returns {},
+    deliberately un-validated -- exactly today's behavior
+    (paddle_service._resolve_profile silently clamps it to the default
+    profile downstream; upload_document has never validated profile_id, and
+    this must not become stricter for that path). Only a
+    'vl:<connection_id>' selection is strictly checked here, because an
+    unknown/disabled connection has no equivalent silent fallback the way a
+    bad static id falls back to a default OCR preset: raises 422 in that
+    case, matching the wording already used for unknown static profiles
+    (see routes.py's restart_job validator).
+    """
+    if not isinstance(profile_id, str) or not profile_id.startswith(_VL_PROFILE_PREFIX):
+        return {}
+    connection_id = profile_id[len(_VL_PROFILE_PREFIX):]
+    fields, connection = _vl_connection_settings(db, connection_id)
+    if connection is None or not connection.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown profile '{profile_id}'",
+        )
+    return {'profile_id': profile_id, **fields}
+
+
+def vl_settings_for_worker(db: Session, profile_id: str | None) -> dict[str, str]:
+    """Non-raising counterpart to resolve_profile_selection for Celery
+    workers (app/workers/import_tasks.py's attachment-OCR dispatch), which
+    must never abort a whole run/page over an HTTP-shaped exception --
+    workers in this codebase deliberately stay fastapi-free (see
+    app/workers/openwebui_tasks.py's "instead of raising HTTPException"
+    house rule). The connection was already validated once, at request time
+    (import_routes.py's create_import_run calls resolve_profile_selection);
+    if it has since been deleted/disabled, this still returns
+    vl_connection_id so process_job's own disabled-connection check
+    (tasks.py ~335) fails just that one child job with its normal clear
+    message, instead of silently dropping the selection."""
+    if not isinstance(profile_id, str) or not profile_id.startswith(_VL_PROFILE_PREFIX):
+        return {}
+    connection_id = profile_id[len(_VL_PROFILE_PREFIX):]
+    fields, _connection = _vl_connection_settings(db, connection_id)
+    return {'profile_id': profile_id, **fields}
+
+
+def effective_pipeline_profile_id(profile_id: str | None) -> str | None:
+    """The real OCR/VL pipeline id to hand to process_job.delay /
+    convert_to_markdown_with_details -- a 'vl:<connection_id>' selection
+    always resolves to 'openai_vision' (the same real profile
+    app/api/benchmarks.py's vl variant spec uses), matching the
+    settings.vl_connection_id the worker's vl_override build already reads
+    unchanged (tasks.py ~335). The stored settings.profile_id stays the
+    display value ('vl:<connection_id>', see resolve_profile_selection) --
+    this function is only for the argument passed to the Celery task /
+    conversion call, never for what's persisted."""
+    if isinstance(profile_id, str) and profile_id.startswith(_VL_PROFILE_PREFIX):
+        return 'openai_vision'
+    return profile_id
 
 
 def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
