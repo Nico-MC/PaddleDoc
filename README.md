@@ -24,7 +24,9 @@ PaddleDoc is a document processing platform powered by PaddleOCR that converts P
 
 It is built for teams that need reliable ingestion quality, searchable outputs, and simple deployment options from standalone NAS Docker to Kubernetes.
 
-![Home page](docs/screenshots/home.png)
+![Home page](docs/screenshots/overview-133.png)
+
+Screenshots of every screen live in the [User Guide](https://github.com/bl0rb/PaddleDoc/wiki/User-Guide).
 
 ## Why PaddleDoc
 
@@ -157,8 +159,6 @@ A personal "what do I do now" landing page: a **New File Task** call to action, 
 
 ### Processing (`/processing`)
 
-![Processing](docs/screenshots/processing.png)
-
 The team's work center: stat tiles (running/finished/failed, pages processed), a type-distribution bar with four clickable cards (single file, multiple files, Confluence import, mail) that jump to the jobs list pre-filtered, and recent jobs attributed to their owner. Starting new work happens via the **File Task** and **New import** actions, centered under the header.
 
 ### File Task (`/processing/new`)
@@ -167,13 +167,11 @@ The upload wizard is a four-step flow — **Metadata → Profile → Upload → 
 
 ### Jobs (`/jobs`)
 
-![Jobs](docs/screenshots/jobs.png)
+![Jobs](docs/screenshots/jobs-133.png)
 
 Browse all jobs with folder tree, All/Running/Completed/Failed filter chips with counts, a job-type filter, quality grades, and version badges — `v2` marks documents that were re-uploaded with changed content. Every row action is an icon button with a hover tooltip: download, restart, retry with a lower profile, re-run with a different profile, edit markdown, push (OpenWebUI), delete. The Used Profile column shows compact codes like `ocr6m+v3` (full name on hover), and jobs processed by a VL connection show its name.
 
 ### Job Detail (`/jobs/{id}`)
-
-![Job detail](docs/screenshots/job-detail.png)
 
 Review metadata, quality gate, and processing info; preview or edit markdown (an "Edit markdown" toolbar button jumps straight into edit mode); download the result as Markdown or JSON; re-run with a different profile. The **Versions** table shows the full history of the document — who uploaded which version when, with content hashes — and links to every prior version.
 
@@ -189,11 +187,9 @@ Confluence import runs, each with a status and page count. Every imported page's
 
 ### VL Benchmark (`/benchmark`)
 
-![Benchmark](docs/screenshots/benchmark.png)
-
 Run one document against up to 6 admin-configured VL connections plus optionally one OCR profile (2–7 variants per run) — the same document through several vision-language models, compared side by side.
 
-![Benchmark report](docs/screenshots/benchmark-report.png)
+![Benchmark report](docs/screenshots/benchmark-report-133.png)
 
 The report compares duration, pages, output size, quality grade, and errors per variant — with Best result and Fastest badges, a tabbed markdown preview, links to each variant's job, and a JSON export. Variants that silently degraded to plain-text fallback are never crowned fastest/best.
 
@@ -203,13 +199,9 @@ Every user configures the external systems their account talks to, in two groups
 
 ### Settings (`/settings`)
 
-![Settings](docs/screenshots/settings.png)
-
 Create personal API tokens for programmatic access. Tokens are shown exactly once, stored as a hash, support optional expiry, and can be revoked anytime. Token management itself requires a browser session — a leaked token cannot mint replacements.
 
 ### Admin Console (`/admin`)
-
-![Admin users](docs/screenshots/admin-users.png)
 
 Tabs: **Users** (roles, teams, activation, password resets, assigning legacy ownerless jobs), **Teams**, **Identity Providers**, **Logs**, **VL Connections**, and **Paddle** (default OCR profile and timeout).
 
@@ -223,11 +215,7 @@ Tabs: **Users** (roles, teams, activation, password resets, assigning legacy own
 
 For IdPs like Microsoft Entra ID whose `preferred_username` is a UPN rather than an email, a per-provider **"Use email as username"** switch makes the claimed email the account's username at provisioning (and renames existing accounts on their next login, skipped safely on a collision). Claim resolution itself falls back through `email`, `upn`, `unique_name`, and `preferred_username`, then queries the userinfo endpoint as a last resort — best effort, never blocking the login.
 
-![VL connections](docs/screenshots/admin-vl-connections.png)
-
 **VL Connections** hold OpenAI-compatible vision endpoints: base URL, model, API key (encrypted at rest, never displayed again), and a per-connection system prompt — with a test button that reports latency. Internal endpoints (vLLM, LiteLLM, Ollama) are first-class citizens. Every enabled connection is usable both from the VL Benchmark and, since 1.3.3, as a normal processing profile (`VL: <name>`) in the File Task wizard, re-run dialogs, mail ingestion, and Confluence attachment OCR.
-
-![Worker logs](docs/screenshots/admin-logs.png)
 
 **Logs** covers both worker output and sign-ins: worker logs stream the processing containers' output — level/worker/text filtering, auto-refresh, expandable tracebacks, identical under Docker Compose and Kubernetes (persisted via the database, no docker.sock required) — and sign-in events (OIDC and local logins, account provisioning, username/email syncs, failures and lockouts) are logged alongside them, with an OIDC claim diagnostic and no tokens, passwords, or full subject identifiers in the message text.
 
