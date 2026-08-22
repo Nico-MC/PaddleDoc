@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Plus, Sparkles, UploadCloud } from 'lucide-react';
+import { Check, FileText, Plus, Sparkles, UploadCloud, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { ErrorNotice, Field, Modal, inputClass } from '@/components/admin/admin-shared';
@@ -43,12 +43,20 @@ const JOBS_KEY = '/api/v1/jobs';
 const PADDLE_SETTINGS_KEY = '/api/v1/paddle/settings';
 const PADDLE_CAPABILITIES_KEY = '/api/v1/paddle/capabilities';
 
+type WizardStepId = 1 | 2 | 3 | 4;
+
+/** Tone drives the color/role of a flow message; `step` scopes it to render inline
+ * at that step instead of (only) in the global fallback banner at the bottom. */
+type FlowMessageTone = 'error' | 'warning' | 'info';
+type FlowMessage = { text: string; step?: WizardStepId; tone: FlowMessageTone };
+
 export function ProcessingFlow() {
   const router = useRouter();
 
   const [busy, setBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const [wizardStep, setWizardStep] = useState(1);
+  const [wizardStep, setWizardStep] = useState<WizardStepId>(1);
+  const [furthestStep, setFurthestStep] = useState<WizardStepId>(1);
   const [mode, setMode] = useState<UploadMode>('single');
 
   const [department, setDepartment] = useState('');
@@ -61,10 +69,14 @@ export function ProcessingFlow() {
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [folderModalError, setFolderModalError] = useState<string | null>(null);
 
-  const [flowMessage, setFlowMessage] = useState<string | null>(null);
+  const [flowMessage, setFlowMessage] = useState<FlowMessage | null>(null);
   const [collectionId, setCollectionId] = useState<string | null>(null);
   const [collectionFiles, setCollectionFiles] = useState<string[]>([]);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+
+  // Single-mode: the chosen file is only held in state at step 3 — the
+  // actual upload (uploadSingle) fires from the Review & Start button.
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   // Jobs (for the folder picker), the default profile setting, and the
   // profile catalog itself all come from the shared cache: they rarely
@@ -100,17 +112,11 @@ export function ProcessingFlow() {
   const [selectedProfileId, setSelectedProfileId] = useState(
     () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY)?.default_profile ?? 'ppocrv6_tiny',
   );
-  // Kept as an error channel for uploadSingle() below (e.g. "no profile
-  // available yet") — the editable Paddle Settings form itself now lives in
-  // the admin area (components/admin/paddle-tab.tsx).
-  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
-
   const singleFileInputRef = useRef<HTMLInputElement>(null);
   const collectionFileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedProfile =
     capabilities.profiles.find((option) => option.value === selectedProfileId) ?? capabilities.profiles[0];
-  const selectedProfileCopy = selectedProfile?.description ?? 'Pick a profile to see details.';
   const selectedSubfolderOptions = folder ? (folderOptions[folder] ?? []) : [];
 
   const refreshFolderOptions = async () => {
@@ -141,7 +147,7 @@ export function ProcessingFlow() {
 
   const uploadSingle = async (file: File) => {
     if (!selectedProfile) {
-      setSettingsMessage('No profile available yet. Try again after capabilities load.');
+      setFlowMessage({ text: 'No profile available yet. Try again after capabilities load.', step: 4, tone: 'error' });
       return;
     }
     setBusy(true);
@@ -171,15 +177,15 @@ export function ProcessingFlow() {
           bytesTotal: total || file.size || 1,
         });
       });
-      setFlowMessage('Single file uploaded and processing started.');
+      setFlowMessage({ text: 'Single file uploaded and processing started.', step: 4, tone: 'info' });
       await refreshFolderOptions();
       router.push('/jobs');
     } catch (error) {
       if (error instanceof UploadError && error.status === 409) {
-        setFlowMessage(duplicateUploadMessage(file.name, error));
+        setFlowMessage({ text: duplicateUploadMessage(file.name, error), step: 4, tone: 'warning' });
       } else {
         const detail = error instanceof Error ? error.message : 'Single upload failed. Please verify the file type.';
-        setFlowMessage(detail);
+        setFlowMessage({ text: detail, step: 4, tone: 'error' });
       }
     } finally {
       setUploadProgress(null);
@@ -250,7 +256,7 @@ export function ProcessingFlow() {
             skippedDuplicates.push({ name: file.name, version: duplicateUploadVersion(error) });
           } else {
             const detail = error instanceof Error ? error.message : 'upload failed';
-            setFlowMessage(`Failed to upload ${file.name}: ${detail}`);
+            setFlowMessage({ text: `Failed to upload ${file.name}: ${detail}`, step: 3, tone: 'error' });
           }
           continue;
         }
@@ -273,7 +279,11 @@ export function ProcessingFlow() {
             `${skippedDuplicates.length} unchanged file(s) skipped (identical to existing versions): ${details}.`,
           );
         }
-        setFlowMessage(parts.join(' '));
+        setFlowMessage({
+          text: parts.join(' '),
+          step: 3,
+          tone: skippedDuplicates.length > 0 ? 'warning' : 'info',
+        });
       }
       await refreshFolderOptions();
     } finally {
@@ -284,7 +294,7 @@ export function ProcessingFlow() {
 
   const startCollection = async () => {
     if (!collectionId || !selectedProfile) {
-      setFlowMessage('Upload collection files first.');
+      setFlowMessage({ text: 'Upload collection files first.', step: 4, tone: 'error' });
       return;
     }
     setBusy(true);
@@ -295,27 +305,32 @@ export function ProcessingFlow() {
       body: JSON.stringify({ profile_id: selectedProfile.value }),
     });
     if (!response.ok) {
-      setFlowMessage('Failed to start collection processing.');
+      setFlowMessage({ text: 'Failed to start collection processing.', step: 4, tone: 'error' });
       setBusy(false);
       return;
     }
     const payload = await response.json();
-    setFlowMessage(`Collection started (${payload.started_jobs} jobs).`);
+    setFlowMessage({ text: `Collection started (${payload.started_jobs} jobs).`, step: 4, tone: 'info' });
     await refreshFolderOptions();
     router.push('/jobs');
     setBusy(false);
   };
 
-  const onDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+  const onDropSingle = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    const file = event.dataTransfer.files?.[0];
+    if (file) {
+      setSelectedFile(file);
+    }
+  };
+
+  const onDropCollection = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragActive(false);
     const files = event.dataTransfer.files;
     if (files && files.length > 0) {
-      if (mode === 'single') {
-        await uploadSingle(files[0]);
-      } else {
-        await uploadCollectionFiles(files);
-      }
+      await uploadCollectionFiles(files);
     }
   };
 
@@ -355,7 +370,7 @@ export function ProcessingFlow() {
     }
     setFolderBusy(false);
     closeFolderModal();
-    setFlowMessage(`Folder created: ${payload.path}`);
+    setFlowMessage({ text: `Folder created: ${payload.path}`, step: 1, tone: 'info' });
   };
 
   const closeFolderModal = () => {
@@ -365,55 +380,133 @@ export function ProcessingFlow() {
     setFolderModalError(null);
   };
 
-  const steps =
-    mode === 'collection'
-      ? [
-          { id: 1, title: 'Folder + metadata', description: 'Choose where this multi-file batch should be stored.' },
-          { id: 2, title: 'Upload files', description: 'Upload all files into the selected folder.' },
-          { id: 3, title: 'Settings + start', description: 'Choose OCR profile and start processing.' },
-        ]
-      : [
-          { id: 1, title: 'Folder + metadata', description: 'Single-file metadata is optional.' },
-          { id: 2, title: 'Choose profile', description: 'Pick OCR preset for this conversion.' },
-          { id: 3, title: 'Upload', description: 'Upload one file into the selected folder.' },
-        ];
+  // Per-step validity — drives both the Continue button's disabled state and
+  // stepReachable() below, so a step can never be jumped to ahead of its
+  // prerequisite being satisfied.
+  const isStep1Valid = true;
+  const isStep2Valid = Boolean(selectedProfile);
+  const isStep3Valid = mode === 'single' ? Boolean(selectedFile) : collectionFiles.length > 0;
+
+  const goToStep = (step: WizardStepId) => {
+    setWizardStep(step);
+    setFurthestStep((prev) => (step > prev ? step : prev));
+  };
+
+  const stepReachable = (step: WizardStepId) => step <= furthestStep && (step !== 4 || isStep3Valid);
+
+  const wizardSteps: { id: WizardStepId; label: string; description: string }[] = [
+    { id: 1, label: 'Metadata', description: 'Choose mode, target folder, and department.' },
+    { id: 2, label: 'Profile', description: 'Pick the OCR or vision-language profile for this job.' },
+    {
+      id: 3,
+      label: 'Upload',
+      description: mode === 'single' ? 'Select the file to upload.' : 'Upload all files into the folder.',
+    },
+    { id: 4, label: 'Review & Start', description: 'Review your choices and start processing.' },
+  ];
+
+  const targetFolderLabel = folder.trim()
+    ? `${folder.trim()}${subfolder.trim() ? ` / ${subfolder.trim()}` : ''}`
+    : 'No folder (inbox)';
+
+  /** Inline, step-scoped rendering of `flowMessage` — used at the step it belongs to so
+   * the message sits right next to what caused it, instead of only in the global
+   * fallback banner at the bottom (which skips messages already shown inline). */
+  const renderStepMessage = (step: WizardStepId) => {
+    if (!flowMessage || flowMessage.step !== step) return null;
+    const toneClass =
+      flowMessage.tone === 'error'
+        ? 'text-red-600'
+        : flowMessage.tone === 'warning'
+          ? 'text-amber-700'
+          : 'text-emerald-700';
+    return (
+      <p role={flowMessage.tone === 'error' ? 'alert' : undefined} className={`text-xs ${toneClass}`}>
+        {flowMessage.text}
+      </p>
+    );
+  };
+
+  // Step 3's hint doubles as the "why is Continue disabled" explanation and the inline
+  // error slot for upload failures/duplicate skips: a message wins when present, else a
+  // dezent placeholder hint shows while the step is invalid (no silent click-swallower).
+  const step3Message = flowMessage && flowMessage.step === 3 ? flowMessage : null;
+  const step3Hint = step3Message ? (
+    <p
+      role={step3Message.tone === 'error' ? 'alert' : undefined}
+      className={`text-xs ${
+        step3Message.tone === 'error'
+          ? 'text-red-600'
+          : step3Message.tone === 'warning'
+            ? 'text-amber-700'
+            : 'text-slate-500'
+      }`}
+    >
+      {step3Message.text}
+    </p>
+  ) : !isStep3Valid ? (
+    <p className="text-xs text-slate-500">
+      {mode === 'single' ? 'Select a file to continue.' : 'Upload at least one file to continue.'}
+    </p>
+  ) : null;
+
+  const step2Hint = !isStep2Valid ? (
+    <p className="text-xs text-slate-500">Waiting for profiles to load — this unlocks once they arrive.</p>
+  ) : null;
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 text-slate-950 sm:px-6 lg:px-8">
       <section className="mb-8">
         <h1 className="text-3xl font-semibold">File Task</h1>
-        <p className="mt-2 text-slate-600">Transform documents into structured markdown — step through metadata, profile, and upload.</p>
+        <p className="mt-2 text-sm text-slate-600">Transform documents into structured markdown.</p>
       </section>
 
-      <section id="upload-flow" className="mb-8 rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-5">
-        <div className="mb-5 grid gap-3 md:grid-cols-3">
-          {steps.map((step) => {
-            const active = wizardStep === step.id;
-            const completed = wizardStep > step.id;
-            return (
-              <button
-                key={step.id}
-                type="button"
-                onClick={() => setWizardStep(step.id)}
-                className={`rounded-lg border px-4 py-3 text-left transition ${
-                  active
-                    ? 'border-emerald-400 bg-emerald-50'
-                    : completed
-                      ? 'border-slate-200 bg-slate-50'
-                      : 'border-slate-200 bg-white'
-                }`}
-              >
-                <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-100 text-xs text-emerald-800">
-                    {step.id}
-                  </span>
-                  {step.title}
-                </div>
-                <p className="mt-2 text-xs text-slate-600">{step.description}</p>
-              </button>
-            );
-          })}
-        </div>
+      <section id="upload-flow" className="mb-8 rounded-xl border border-slate-200 bg-white p-5">
+        <nav aria-label="Upload wizard steps" className="mb-6">
+          <ol className="flex items-center">
+            {wizardSteps.map((step, index) => {
+              const active = wizardStep === step.id;
+              const completed = wizardStep > step.id;
+              const reachable = stepReachable(step.id);
+              return (
+                <li key={step.id} className={`flex items-center ${index < wizardSteps.length - 1 ? 'flex-1' : ''}`}>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => reachable && goToStep(step.id)}
+                      disabled={!reachable}
+                      aria-current={active ? 'step' : undefined}
+                      title={step.description}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 ${
+                        active
+                          ? 'border-emerald-500 bg-emerald-500 text-white ring-2 ring-emerald-200 ring-offset-2'
+                          : completed
+                            ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
+                            : reachable
+                              ? 'border-slate-300 bg-white text-slate-600 hover:border-emerald-300'
+                              : 'border-slate-200 bg-slate-50 text-slate-300'
+                      }`}
+                    >
+                      {completed ? <Check className="h-4 w-4" /> : step.id}
+                    </button>
+                    <span
+                      className={`hidden text-sm sm:inline ${
+                        active
+                          ? 'font-semibold text-emerald-800'
+                          : `font-medium ${reachable ? 'text-slate-600' : 'text-slate-300'}`
+                      }`}
+                    >
+                      {step.label}
+                    </span>
+                  </div>
+                  {index < wizardSteps.length - 1 && (
+                    <div className={`mx-3 h-px flex-1 ${completed ? 'bg-emerald-300' : 'bg-slate-200'}`} />
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
 
         <AnimatePresence mode="wait">
           {wizardStep === 1 && (
@@ -494,8 +587,9 @@ export function ProcessingFlow() {
                   </Button>
                 </div>
               </div>
+              {renderStepMessage(1)}
               <div className="flex justify-end">
-                <Button onClick={() => setWizardStep(2)}>
+                <Button onClick={() => goToStep(2)} disabled={!isStep1Valid}>
                   Continue
                 </Button>
               </div>
@@ -510,39 +604,101 @@ export function ProcessingFlow() {
               exit={{ opacity: 0, y: -12 }}
               className="space-y-4"
             >
+              <div className="flex items-start gap-3 rounded-lg border border-slate-200 bg-emerald-50 p-4">
+                <Sparkles className="mt-1 h-5 w-5 text-slate-600" />
+                <div>
+                  <p className="font-medium text-slate-950">Selected profile</p>
+                  <p className="text-sm text-slate-600">{selectedProfile?.label ?? 'Loading profiles...'}</p>
+                </div>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {capabilities.profiles.map((profile) => {
+                  const active = profile.value === selectedProfileId;
+                  return (
+                    <button
+                      key={profile.value}
+                      type="button"
+                      onClick={() => setSelectedProfileId(profile.value)}
+                      className={`rounded-xl border p-4 text-left transition ${
+                        active ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      <p className="text-sm font-semibold text-slate-950">{profile.label}</p>
+                      <p className="mt-1 text-xs text-slate-600">{profile.description}</p>
+                    </button>
+                  );
+                })}
+              </div>
+              {step2Hint}
+              <div className="flex justify-between gap-3">
+                <Button variant="outline" onClick={() => goToStep(1)}>
+                  Back
+                </Button>
+                <Button
+                  onClick={() => goToStep(3)}
+                  disabled={!isStep2Valid}
+                  title={isStep2Valid ? undefined : 'Waiting for profiles to load.'}
+                >
+                  Continue
+                </Button>
+              </div>
+            </motion.div>
+          )}
+
+          {wizardStep === 3 && (
+            <motion.div
+              key="step-3"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -12 }}
+              className="space-y-4"
+            >
               {mode === 'single' ? (
-                <>
-                  <div className="flex items-start gap-3 rounded-lg border border-slate-200 bg-emerald-50 p-4">
-                    <Sparkles className="mt-1 h-5 w-5 text-slate-600" />
-                    <div>
-                      <p className="font-medium text-slate-950">Available profile</p>
-                      <p className="text-sm text-slate-600">{selectedProfile?.label ?? 'Loading profiles...'}</p>
-                      <p className="mt-1 text-xs text-slate-500">{selectedProfileCopy}</p>
+                selectedFile ? (
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-slate-50 p-5">
+                    <div className="flex items-center gap-3">
+                      <FileText className="h-8 w-8 text-slate-400" />
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">{selectedFile.name}</p>
+                        <p className="text-xs text-slate-500">{formatBytes(selectedFile.size)}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={() => singleFileInputRef.current?.click()}>
+                        Replace
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedFile(null)}
+                        aria-label="Remove selected file"
+                        className="rounded-full p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
                     </div>
                   </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {capabilities.profiles.map((profile) => {
-                      const active = profile.value === selectedProfileId;
-                      return (
-                        <button
-                          key={profile.value}
-                          type="button"
-                          onClick={() => setSelectedProfileId(profile.value)}
-                          className={`rounded-xl border p-4 text-left transition ${
-                            active ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold text-slate-950">{profile.label}</p>
-                          <p className="mt-1 text-xs text-slate-600">{profile.description}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </>
+                ) : (
+                  <motion.div
+                    onDrop={onDropSingle}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDragEnter={() => setDragActive(true)}
+                    onDragLeave={() => setDragActive(false)}
+                    className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center"
+                    animate={{ borderColor: dragActive ? '#6ee7b7' : '#10b981' }}
+                  >
+                    <UploadCloud className="mx-auto mb-4 h-10 w-10 text-slate-600" />
+                    <p className="mb-2 text-lg font-medium">Drag and drop file here</p>
+                    <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG, EML (max. 100 MB)</p>
+                    <p className="mb-4 text-xs text-slate-500">Target folder: {targetFolderLabel}</p>
+                    <Button variant="outline" onClick={() => singleFileInputRef.current?.click()}>
+                      Select file
+                    </Button>
+                  </motion.div>
+                )
               ) : (
                 <>
                   <motion.div
-                    onDrop={onDrop}
+                    onDrop={onDropCollection}
                     onDragOver={(event) => event.preventDefault()}
                     onDragEnter={() => setDragActive(true)}
                     onDragLeave={() => setDragActive(false)}
@@ -551,21 +707,7 @@ export function ProcessingFlow() {
                   >
                     <UploadCloud className="mx-auto mb-4 h-10 w-10 text-slate-600" />
                     <p className="mb-2 text-lg font-medium">Upload all collection files</p>
-                    <p className="mb-4 text-sm text-slate-600">After upload, choose profile and start processing all files.</p>
-                    <input
-                      ref={collectionFileInputRef}
-                      type="file"
-                      multiple
-                      className="hidden"
-                      accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
-                      onChange={async (event) => {
-                        const files = event.currentTarget.files;
-                        if (files) {
-                          await uploadCollectionFiles(files);
-                        }
-                        event.currentTarget.value = '';
-                      }}
-                    />
+                    <p className="mb-4 text-xs text-slate-500">Target folder: {targetFolderLabel}</p>
                     <Button variant="outline" onClick={() => collectionFileInputRef.current?.click()}>
                       Select files
                     </Button>
@@ -582,119 +724,147 @@ export function ProcessingFlow() {
                   </div>
                 </>
               )}
+              <input
+                ref={singleFileInputRef}
+                type="file"
+                className="hidden"
+                accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) {
+                    setSelectedFile(file);
+                  }
+                  event.currentTarget.value = '';
+                }}
+              />
+              <input
+                ref={collectionFileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
+                onChange={async (event) => {
+                  const files = event.currentTarget.files;
+                  if (files) {
+                    await uploadCollectionFiles(files);
+                  }
+                  event.currentTarget.value = '';
+                }}
+              />
+              {step3Hint}
               <div className="flex justify-between gap-3">
-                <Button variant="outline" onClick={() => setWizardStep(1)}>
+                <Button variant="outline" onClick={() => goToStep(2)}>
                   Back
                 </Button>
-                <Button onClick={() => setWizardStep(3)} disabled={mode === 'collection' && collectionFiles.length === 0}>
+                <Button
+                  onClick={() => goToStep(4)}
+                  disabled={!isStep3Valid}
+                  title={
+                    isStep3Valid
+                      ? undefined
+                      : mode === 'single'
+                        ? 'Select a file to continue.'
+                        : 'Upload at least one file to continue.'
+                  }
+                >
                   Continue
                 </Button>
               </div>
             </motion.div>
           )}
 
-          {wizardStep === 3 && (
+          {wizardStep === 4 && (
             <motion.div
-              key="step-3"
+              key="step-4"
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
+              className="space-y-4"
             >
-              {mode === 'single' ? (
-                <motion.div
-                  onDrop={onDrop}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDragEnter={() => setDragActive(true)}
-                  onDragLeave={() => setDragActive(false)}
-                  className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center"
-                  animate={{ borderColor: dragActive ? '#6ee7b7' : '#10b981' }}
-                >
-                  <UploadCloud className="mx-auto mb-4 h-10 w-10 text-slate-600" />
-                  <p className="mb-2 text-lg font-medium">Drag and drop file here</p>
-                  <p className="mb-4 text-sm text-slate-600">PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG, EML (max. 100 MB)</p>
-                  <p className="mb-4 text-xs text-slate-500">
-                    Target folder: {folder.trim() || 'single'}{subfolder.trim() ? ` / ${subfolder.trim()}` : ''}
-                  </p>
-                  <input
-                    ref={singleFileInputRef}
-                    type="file"
-                    className="hidden"
-                    accept=".pdf,.docx,.pptx,.xlsx,.xls,.png,.jpg,.jpeg,.eml,message/rfc822"
-                    onChange={async (event) => {
-                      const file = event.currentTarget.files?.[0];
-                      if (file) {
-                        await uploadSingle(file);
-                      }
-                      event.currentTarget.value = '';
-                    }}
-                  />
-                  <Button variant="outline" onClick={() => singleFileInputRef.current?.click()}>
-                    Select file
-                  </Button>
-                </motion.div>
-              ) : (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                  <p className="text-sm font-semibold text-slate-950">Collection settings and start</p>
-                  <p className="mt-2 text-xs text-slate-600">
-                    Uploaded files: {collectionFiles.length}. Select profile and start processing for all uploaded files.
-                  </p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Target folder: collections / {folder.trim() || 'collection'}{subfolder.trim() ? ` / ${subfolder.trim()}` : ''}
-                  </p>
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    {capabilities.profiles.map((profile) => {
-                      const active = profile.value === selectedProfileId;
-                      return (
-                        <button
-                          key={profile.value}
-                          type="button"
-                          onClick={() => setSelectedProfileId(profile.value)}
-                          className={`rounded-xl border p-4 text-left transition ${
-                            active ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold text-slate-950">{profile.label}</p>
-                          <p className="mt-1 text-xs text-slate-600">{profile.description}</p>
-                        </button>
-                      );
-                    })}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
+                <p className="mb-3 text-sm font-semibold text-slate-950">Review</p>
+                <dl className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Mode</dt>
+                    <dd className="mt-0.5 text-slate-950">{mode === 'single' ? 'Single file' : 'Multiple files'}</dd>
                   </div>
-                  <div className="mt-4">
-                    <Button onClick={startCollection} disabled={!collectionId || collectionFiles.length === 0 || busy}>
-                      Start Collection Processing
-                    </Button>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Target folder</dt>
+                    <dd className="mt-0.5 text-slate-950">{targetFolderLabel}</dd>
                   </div>
-                </div>
-              )}
-              <div className="mt-4 flex justify-between gap-3">
-                <Button variant="outline" onClick={() => setWizardStep(2)}>
+                  {mode === 'collection' && department.trim() && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Department</dt>
+                      <dd className="mt-0.5 text-slate-950">{department.trim()}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Profile</dt>
+                    <dd className="mt-0.5 text-slate-950">{selectedProfile?.label ?? 'No profile selected'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                      {mode === 'single' ? 'File' : 'Files'}
+                    </dt>
+                    <dd className="mt-0.5 text-slate-950">
+                      {mode === 'single'
+                        ? selectedFile
+                          ? `${selectedFile.name} (${formatBytes(selectedFile.size)})`
+                          : 'No file selected'
+                        : `${collectionFiles.length} file(s)`}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              {renderStepMessage(4)}
+              <div className="flex justify-between gap-3">
+                <Button variant="outline" onClick={() => goToStep(3)}>
                   Back
                 </Button>
-                <p className="self-center text-xs text-slate-500">
-                  Selected: {selectedProfile?.label ?? 'No profile selected'}
-                </p>
+                {mode === 'single' ? (
+                  <Button
+                    onClick={() => selectedFile && uploadSingle(selectedFile)}
+                    disabled={!selectedFile || !selectedProfile || busy}
+                    title={!selectedFile ? 'Select a file in step 3 first.' : !selectedProfile ? 'No profile selected.' : undefined}
+                  >
+                    Start processing
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={startCollection}
+                    disabled={!collectionId || collectionFiles.length === 0 || busy}
+                    title={!collectionId || collectionFiles.length === 0 ? 'Upload collection files first.' : undefined}
+                  >
+                    Start Collection Processing
+                  </Button>
+                )}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Rendered for every wizard step (not just step 3) so upload feedback — e.g. a
-            409 duplicate-file skip during the step-2 collection upload — is never silently
-            swallowed while the user is still looking at an earlier step. */}
-        {flowMessage && (
+        {/* Fallback banner: a message already shown inline at its own step (via
+            renderStepMessage/step3Hint above) is skipped here to avoid showing it twice.
+            It still surfaces here when the user has navigated to a different step than
+            the one the message belongs to — e.g. a step-3 upload finishing while the user
+            already moved on — so feedback is never silently swallowed. */}
+        {flowMessage && flowMessage.step !== wizardStep && (
           <div
+            role={flowMessage.tone === 'error' ? 'alert' : undefined}
+            aria-live={flowMessage.tone === 'error' ? undefined : 'polite'}
             className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
-              /skipped|unchanged/i.test(flowMessage)
-                ? 'border-amber-200 bg-amber-50 text-amber-800'
-                : 'border-slate-200 bg-slate-50 text-slate-700'
+              flowMessage.tone === 'error'
+                ? 'border-red-200 bg-red-50 text-red-700'
+                : flowMessage.tone === 'warning'
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-slate-200 bg-slate-50 text-slate-700'
             }`}
           >
-            {flowMessage}
+            {flowMessage.text}
           </div>
         )}
-        {settingsMessage && <p className="mt-2 text-sm text-red-600">{settingsMessage}</p>}
         {uploadProgress && (
-          <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+          <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700" aria-live="polite">
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="font-medium text-slate-950">

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
+import { Bot, CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
@@ -128,7 +128,7 @@ export function VlConnectionsTab() {
     <div className="space-y-6">
       <SectionCard
         title="VL connections"
-        description="Vision-language model connections used for document processing. Stored API keys are never displayed."
+        description="Vision-language connections for document processing; stored API keys are never shown."
         actions={
           <Button size="sm" onClick={() => setCreating(true)}>
             <Plus className="h-4 w-4" />
@@ -146,9 +146,14 @@ export function VlConnectionsTab() {
         {loading ? (
           <LoadingState label="Loading VL connections…" />
         ) : unavailable ? null : connections.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            No VL connections configured. Add one to enable vision-language processing.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <Bot className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No VL connections yet. Add one to enable vision-language processing.</p>
+            <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              Add connection
+            </Button>
+          </div>
         ) : (
           <ul className="space-y-4">
             {connections.map((c) => (

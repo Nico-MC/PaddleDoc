@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { LoaderCircle, Plus, RefreshCcw, RotateCcw } from 'lucide-react';
+import { FileInput, FilePlus, Inbox, LoaderCircle, RefreshCcw, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
@@ -53,23 +53,31 @@ export default function ImportsPage() {
               Import runs pull Confluence pages into PaddleDoc as markdown jobs.
             </p>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => void loadAll()} disabled={loading}>
-              <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
+          <Button variant="outline" onClick={() => void loadAll()} disabled={loading}>
+            <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+        </section>
+
+        <section className="mb-6 flex flex-wrap items-center justify-center gap-3">
+          <Link href="/processing/new">
+            <Button variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900">
+              <FilePlus className="mr-2 h-4 w-4" /> New File Task
             </Button>
-            <Link href="/imports/new">
-              <Button>
-                <Plus className="mr-2 h-4 w-4" /> New import
-              </Button>
-            </Link>
-          </div>
+          </Link>
+          <Link href="/imports/new">
+            <Button variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900">
+              <FileInput className="mr-2 h-4 w-4" /> New import
+            </Button>
+          </Link>
         </section>
 
         {loadError && (
-          <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{loadError}</p>
+          <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {loadError}
+          </p>
         )}
 
-        <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
           <div className="mb-3 flex items-center justify-between gap-4">
             <h2 className="text-lg font-semibold">Runs</h2>
             <p className="text-sm text-slate-500">{runs.length} run(s)</p>
@@ -128,9 +136,24 @@ export default function ImportsPage() {
               </tbody>
             </table>
             {runs.length === 0 && !loading && (
-              <p className="py-6 text-sm text-slate-600">
-                No import runs yet. Start one with the New import button.
-              </p>
+              <div className="flex flex-col items-center gap-3 py-10 text-center">
+                <Inbox className="h-8 w-8 text-slate-300" />
+                <p className="text-sm text-slate-500">No import runs yet. Start your first import to see it here.</p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Link href="/processing/new">
+                    <Button variant="outline" size="sm" className="border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900">
+                      <FilePlus className="h-4 w-4" />
+                      New File Task
+                    </Button>
+                  </Link>
+                  <Link href="/imports/new">
+                    <Button variant="outline" size="sm" className="border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900">
+                      <FileInput className="h-4 w-4" />
+                      New import
+                    </Button>
+                  </Link>
+                </div>
+              </div>
             )}
             {loading && (
               <div className="flex items-center gap-2 py-6 text-sm text-slate-600">

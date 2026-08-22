@@ -140,8 +140,14 @@ export function PaddleTab() {
             <Button size="sm" onClick={saveSettings} disabled={saving}>
               {saving ? 'Saving…' : 'Save settings'}
             </Button>
-            {saveMessage && <span className="text-sm text-slate-600">{saveMessage}</span>}
-            {saveError && <span className="text-sm text-red-600">{saveError}</span>}
+            <span aria-live="polite">
+              {saveMessage && <span className="text-sm text-slate-600">{saveMessage}</span>}
+            </span>
+            {saveError && (
+              <span role="alert" className="text-sm text-red-600">
+                {saveError}
+              </span>
+            )}
           </div>
         </div>
       )}

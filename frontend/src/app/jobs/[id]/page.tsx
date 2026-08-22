@@ -322,7 +322,7 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
     return (
       <main className="min-h-screen bg-white px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
         <div
-          className="mx-auto w-full max-w-6xl animate-pulse space-y-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-6 lg:p-8"
+          className="mx-auto w-full max-w-6xl animate-pulse space-y-4 rounded-3xl border border-slate-200 bg-white p-4 sm:p-6 lg:p-8"
           role="status"
           aria-label="Loading job"
         >
@@ -342,10 +342,14 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
   if (requirePassword) {
     return (
       <main className="min-h-screen bg-white p-8 text-slate-950">
-        <div className="mx-auto max-w-md space-y-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_24px_70px_rgba(15,23,42,0.08)]">
-          <h1 className="text-2xl font-semibold">Password Required</h1>
-          <p className="text-slate-600">This job is password protected.</p>
-          {loadError && <p className="text-sm text-red-600">{loadError}</p>}
+        <div className="mx-auto max-w-md space-y-4 rounded-3xl border border-slate-200 bg-white p-6">
+          <h1 className="font-serif text-3xl font-semibold">Password Required</h1>
+          <p className="text-sm text-slate-600">This job is password protected.</p>
+          {loadError && (
+            <p className="text-sm text-red-600" role="alert">
+              {loadError}
+            </p>
+          )}
           <input
             type="password"
             value={password}
@@ -470,13 +474,13 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
 
   return (
     <main className="min-h-screen bg-white px-4 py-6 text-slate-950 sm:px-6 lg:px-8">
-      <div className="mx-auto w-full max-w-6xl space-y-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_24px_70px_rgba(15,23,42,0.08)] sm:p-6 lg:p-8">
+      <div className="mx-auto w-full max-w-6xl space-y-4 rounded-3xl border border-slate-200 bg-white p-4 sm:p-6 lg:p-8">
         <div className="flex justify-start">
           <Link href="/jobs">
             <Button variant="outline">Back to jobs</Button>
           </Link>
         </div>
-        <h1 className="font-serif text-2xl font-semibold">Job Details</h1>
+        <h1 className="font-serif text-3xl font-semibold">Job Details</h1>
         <p>Filename: {job.original_filename}</p>
         {job.tags && job.tags.length > 0 && <p>Tags: {job.tags.join(', ')}</p>}
         <p className="flex items-center gap-2">
@@ -699,7 +703,7 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
                   Cancel
                 </Button>
               </div>
-              {saveMessage && <p className="text-sm text-slate-600">{saveMessage}</p>}
+              <div aria-live="polite">{saveMessage && <p className="text-sm text-slate-600">{saveMessage}</p>}</div>
             </div>
           ) : viewTab === 'rendered' ? (
             <div className="rounded-md border border-slate-200 bg-white p-4">

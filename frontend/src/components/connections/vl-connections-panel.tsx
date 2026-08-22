@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Bot } from 'lucide-react';
 
 import { useAuth } from '@/lib/auth-context';
 import { VlConnectionsTab } from '@/components/admin/vl-connections-tab';
@@ -52,13 +53,16 @@ function ReadOnlyVlConnections() {
       description="Vision-language model connections available for document processing."
     >
       <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-        VL connections are managed centrally by an administrator. Ask an admin to add or change one.
+        VL connections are managed by an administrator — ask them to add or change one.
       </div>
       <ErrorNotice message={error} />
       {loading ? (
         <LoadingState label="Loading VL connections..." />
       ) : connections.length === 0 ? (
-        <p className="py-8 text-center text-sm text-slate-500">No VL connections available yet.</p>
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <Bot className="h-8 w-8 text-slate-300" />
+          <p className="text-sm text-slate-500">No VL connections available yet.</p>
+        </div>
       ) : (
         <ul className="space-y-4">
           {connections.map((connection) => (

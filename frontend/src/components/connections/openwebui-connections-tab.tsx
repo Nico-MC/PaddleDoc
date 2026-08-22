@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
+import { CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Send, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError } from '@/lib/api';
@@ -185,7 +185,7 @@ export function OpenWebUIConnectionsTab() {
     <div className="space-y-6">
       <SectionCard
         title="Connections"
-        description="OpenWebUI instances used as push targets. Connections are private to you; stored API keys are never displayed."
+        description="Private OpenWebUI push targets; stored API keys are never displayed."
         actions={
           <Button size="sm" onClick={() => setCreating(true)}>
             <Plus className="h-4 w-4" />
@@ -203,9 +203,14 @@ export function OpenWebUIConnectionsTab() {
         {loading ? (
           <LoadingState label="Loading connections..." />
         ) : unavailable ? null : connections.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            No OpenWebUI connections configured. Add one to start pushing documents.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <Send className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No OpenWebUI connections yet. Add one to start pushing documents.</p>
+            <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              Add connection
+            </Button>
+          </div>
         ) : (
           <ul className="space-y-4">
             {connections.map((connection) => (
@@ -275,7 +280,10 @@ export function OpenWebUIConnectionsTab() {
         {pushesLoading ? (
           <LoadingState label="Loading pushes..." />
         ) : pushes.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">No pushes yet.</p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <Send className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No pushes yet. They will show up here once you push a document.</p>
+          </div>
         ) : (
           <ul className="divide-y divide-slate-100">
             {pushes.map((push) => (

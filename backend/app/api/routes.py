@@ -31,6 +31,7 @@ from app.schemas.jobs import (
     MarkdownBrowserResponse,
     MarkdownFileEntry,
     JobListResponse,
+    JobOwner,
     JobRestartRequest,
     JobResponse,
     JobSaveRequest,
@@ -117,7 +118,7 @@ def _parse_tags(raw_tags: str) -> list[str]:
     return tags
 
 
-def _job_to_response(job: Job) -> JobResponse:
+def _job_to_response(job: Job, owner: JobOwner | None = None) -> JobResponse:
     return JobResponse(
         id=job.id,
         original_filename=job.original_filename,
@@ -131,7 +132,22 @@ def _job_to_response(job: Job) -> JobResponse:
         benchmark_run_id=job.benchmark_run_id,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        owner=owner,
     )
+
+
+def _load_job_owners(db: Session, jobs: list[Job]) -> dict[str, JobOwner]:
+    """Batch-resolve `Job.owner_id` -> `JobOwner` for a set of jobs in one
+    query (distinct owner_ids), mirroring the dict-lookup technique in
+    get_job_versions below -- avoids one User query per job row. Legacy
+    jobs (owner_id IS NULL) are simply absent from the result."""
+    owner_ids = {job.owner_id for job in jobs if job.owner_id}
+    if not owner_ids:
+        return {}
+    return {
+        owner_id: JobOwner(id=owner_id, username=username)
+        for owner_id, username in db.execute(select(User.id, User.username).where(User.id.in_(owner_ids))).all()
+    }
 
 
 def _visible_job_filter(user: User):
@@ -984,7 +1000,8 @@ def get_job(job_id: str, db: Session = Depends(get_db), user: User = Depends(get
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     _require_visible(db, job, user)
-    return _job_to_response(job)
+    owner = _load_job_owners(db, [job]).get(job.owner_id) if job.owner_id else None
+    return _job_to_response(job, owner=owner)
 
 
 def _document_chain(db: Session, job: Job) -> list[Job]:
@@ -1076,7 +1093,8 @@ def list_jobs(
     jobs = _job_query(
         db, user, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter, limit=limit, offset=offset
     )
-    items = [_job_to_response(job) for job in jobs]
+    owners = _load_job_owners(db, jobs)
+    items = [_job_to_response(job, owner=owners.get(job.owner_id)) for job in jobs]
 
     # UI normalization: if workers report active process_job IDs, treat any
     # non-active RUNNING entries as queued/pending to avoid stale RUNNING noise.
@@ -1104,7 +1122,8 @@ def search_documents(
     jobs = _job_query(
         db, user, q=q, tag=tag, from_date=from_date, to_date=to_date, status_filter=status_filter, limit=limit, offset=offset
     )
-    items = [_job_to_response(job) for job in jobs]
+    owners = _load_job_owners(db, jobs)
+    items = [_job_to_response(job, owner=owners.get(job.owner_id)) for job in jobs]
 
     active_job_ids = _active_process_job_ids()
     if active_job_ids:

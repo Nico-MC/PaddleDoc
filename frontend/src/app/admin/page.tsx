@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import { Cpu, KeyRound, ScanEye, ShieldAlert, Terminal, Users, UsersRound } from 'lucide-react';
 
 import { useAuth } from '@/lib/auth-context';
@@ -24,9 +25,34 @@ const tabs: { id: TabId; label: string; icon: typeof Users }[] = [
   { id: 'paddle', label: 'Paddle', icon: Cpu },
 ];
 
+const TAB_IDS: TabId[] = tabs.map((t) => t.id);
+
 export default function AdminPage() {
   const { user } = useAuth();
   const [tab, setTab] = useState<TabId>('users');
+  const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
+
+  const focusTab = (id: TabId) => {
+    setTab(id);
+    tabRefs.current[id]?.focus();
+  };
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, id: TabId) => {
+    const index = TAB_IDS.indexOf(id);
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      focusTab(TAB_IDS[(index + 1) % TAB_IDS.length]);
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      focusTab(TAB_IDS[(index - 1 + TAB_IDS.length) % TAB_IDS.length]);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      focusTab(TAB_IDS[0]);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      focusTab(TAB_IDS[TAB_IDS.length - 1]);
+    }
+  };
 
   if (!user || user.role !== 'admin') {
     return (
@@ -49,10 +75,9 @@ export default function AdminPage() {
     <main className="min-h-screen">
       <div className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <header className="mb-6">
-          <h1 className="text-2xl font-semibold text-slate-950">Administration</h1>
+          <h1 className="text-3xl font-semibold text-slate-950">Administration</h1>
           <p className="mt-1 text-sm text-slate-500">
-            Manage users, teams, single sign-on identity providers, worker logs, VL connections,
-            and the Paddle runtime.
+            Manage accounts, access, and runtime configuration for your PaddleDoc deployment.
           </p>
         </header>
 
@@ -66,9 +91,16 @@ export default function AdminPage() {
             return (
               <button
                 key={id}
+                ref={(el) => {
+                  tabRefs.current[id] = el;
+                }}
+                id={`admin-tab-${id}`}
                 role="tab"
                 aria-selected={active}
+                aria-controls={`admin-panel-${id}`}
+                tabIndex={active ? 0 : -1}
                 onClick={() => setTab(id)}
+                onKeyDown={(event) => handleTabKeyDown(event, id)}
                 className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
                   active
                     ? 'bg-emerald-50 text-emerald-800'
@@ -82,12 +114,40 @@ export default function AdminPage() {
           })}
         </div>
 
-        {tab === 'users' && <UsersTab />}
-        {tab === 'teams' && <TeamsTab />}
-        {tab === 'providers' && <ProvidersTab />}
-        {tab === 'logs' && <LogsTab />}
-        {tab === 'vl-connections' && <VlConnectionsTab />}
-        {tab === 'paddle' && <PaddleTab />}
+        {tab === 'users' && (
+          <div role="tabpanel" id="admin-panel-users" aria-labelledby="admin-tab-users">
+            <UsersTab />
+          </div>
+        )}
+        {tab === 'teams' && (
+          <div role="tabpanel" id="admin-panel-teams" aria-labelledby="admin-tab-teams">
+            <TeamsTab />
+          </div>
+        )}
+        {tab === 'providers' && (
+          <div role="tabpanel" id="admin-panel-providers" aria-labelledby="admin-tab-providers">
+            <ProvidersTab />
+          </div>
+        )}
+        {tab === 'logs' && (
+          <div role="tabpanel" id="admin-panel-logs" aria-labelledby="admin-tab-logs">
+            <LogsTab />
+          </div>
+        )}
+        {tab === 'vl-connections' && (
+          <div
+            role="tabpanel"
+            id="admin-panel-vl-connections"
+            aria-labelledby="admin-tab-vl-connections"
+          >
+            <VlConnectionsTab />
+          </div>
+        )}
+        {tab === 'paddle' && (
+          <div role="tabpanel" id="admin-panel-paddle" aria-labelledby="admin-tab-paddle">
+            <PaddleTab />
+          </div>
+        )}
       </div>
     </main>
   );

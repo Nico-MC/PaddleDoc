@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { LoaderCircle, RefreshCcw } from 'lucide-react';
+import { Inbox, LoaderCircle, RefreshCcw, Search, SlidersHorizontal } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
@@ -33,6 +33,7 @@ export default function MailPage() {
   const [source, setSource] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   // `filters`/`offsetOverride` let callers (Reset, pagination) fetch with
   // values other than this render's state, since setters only land on the
@@ -122,122 +123,131 @@ export default function MailPage() {
             </p>
           </div>
           <Button
-            variant="outline"
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 shrink-0 self-start px-0 sm:self-auto"
+            aria-label="Refresh"
+            title="Refresh"
             onClick={() => {
               setLoading(true);
               void loadItems();
             }}
             disabled={loading}
           >
-            <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
+            <RefreshCcw className="h-4 w-4" />
           </Button>
         </section>
 
         {loadError && (
-          <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{loadError}</p>
+          <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {loadError}
+          </p>
         )}
 
-        <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="text-sm text-slate-700 xl:col-span-2">
-              Search subject / from
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => event.key === 'Enter' && applyFilters()}
-                className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
-                placeholder="quarterly report, alice@partner.example"
-              />
-            </label>
-            <label className="text-sm text-slate-700">
-              Source
-              <input
-                value={source}
-                readOnly
-                className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-100 px-3 py-2 text-slate-950 outline-none cursor-not-allowed"
-                title="This page displays API-ingested messages only"
-              />
-            </label>
-            <div />
-            <label className="text-sm text-slate-700">
-              From date
-              <input
-                type="date"
-                value={fromDate}
-                onChange={(event) => setFromDate(event.target.value)}
-                className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
-              />
-            </label>
-            <label className="text-sm text-slate-700">
-              To date
-              <input
-                type="date"
-                value={toDate}
-                onChange={(event) => setToDate(event.target.value)}
-                className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
-              />
-            </label>
+        <section className="mb-3 flex flex-col gap-2 sm:flex-row">
+          <div className="relative flex-1">
+            <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && applyFilters()}
+              className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-12 pr-4 text-base text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
+              placeholder="Search subject or sender…"
+            />
           </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button onClick={applyFilters}>Apply Filters</Button>
-            <Button variant="outline" onClick={resetFilters}>
-              Reset
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((value) => !value)}
+            className="shrink-0"
+          >
+            <SlidersHorizontal className="mr-2 h-4 w-4" /> Filters
+          </Button>
         </section>
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        {filtersOpen && (
+          <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <label className="text-sm text-slate-700">
+                Source
+                <input
+                  value={source}
+                  readOnly
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-100 px-3 py-2 text-slate-950 outline-none cursor-not-allowed"
+                  title="This page displays API-ingested messages only"
+                />
+              </label>
+              <label className="text-sm text-slate-700">
+                From date
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(event) => setFromDate(event.target.value)}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
+                />
+              </label>
+              <label className="text-sm text-slate-700">
+                To date
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(event) => setToDate(event.target.value)}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
+                />
+              </label>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button onClick={applyFilters}>Apply Filters</Button>
+              <Button variant="outline" onClick={resetFilters}>
+                Reset
+              </Button>
+            </div>
+          </section>
+        )}
+
+        <section className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
           <div className="mb-3 flex items-center justify-between gap-4">
             <h2 className="text-lg font-semibold">Messages</h2>
             <p className="text-sm text-slate-500">{total} message(s)</p>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full table-auto text-left text-xs sm:text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="pb-2 font-medium">Subject</th>
-                  <th className="pb-2 font-medium">From</th>
-                  <th className="hidden pb-2 font-medium md:table-cell">Date</th>
-                  <th className="hidden pb-2 font-medium sm:table-cell">Source</th>
-                  <th className="pb-2 font-medium">Parts</th>
-                  <th className="pb-2 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((message) => {
-                  const status = mailAggregateStatus(message.parts);
-                  return (
-                    <tr key={message.id} className="border-t border-slate-100">
-                      <td className="py-3">
-                        <Link
-                          href={`/mail/${message.id}`}
-                          className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700"
-                        >
-                          {message.subject.trim() || '(no subject)'}
-                        </Link>
-                        {message.rfc_message_id && (
-                          <p className="mt-1 truncate text-xs text-slate-500" title={message.rfc_message_id}>
-                            {message.rfc_message_id}
-                          </p>
-                        )}
-                      </td>
-                      <td className="py-3 text-slate-700">{message.from_address || '-'}</td>
-                      <td className="hidden py-3 text-slate-700 md:table-cell">
-                        {new Date(mailDisplayDate(message)).toLocaleString()}
-                      </td>
-                      <td className="hidden py-3 text-slate-700 sm:table-cell">{message.source || '-'}</td>
-                      <td className="py-3 text-slate-700">{mailPartsSummary(message.parts)}</td>
-                      <td className="py-3">
-                        <span className={`rounded px-2 py-1 text-xs ${status.chipClass}`}>{status.label}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div>
+            {items.map((message) => {
+              const status = mailAggregateStatus(message.parts);
+              return (
+                <Link
+                  key={message.id}
+                  href={`/mail/${message.id}`}
+                  className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 border-t border-slate-100 py-3 first:border-t-0 hover:bg-slate-50"
+                >
+                  <div className="min-w-0 flex-1 basis-64">
+                    <p className="font-medium text-slate-950">{message.from_address || '-'}</p>
+                    <p className="truncate font-semibold text-slate-950">
+                      {message.subject.trim() || '(no subject)'}
+                    </p>
+                    <p className="truncate text-sm text-slate-500">{mailPartsSummary(message.parts)}</p>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <p className="whitespace-nowrap text-xs text-slate-500">
+                      {new Date(mailDisplayDate(message)).toLocaleString()}
+                    </p>
+                    <span className={`whitespace-nowrap rounded px-2 py-1 text-xs ${status.chipClass}`}>
+                      {status.label}
+                    </span>
+                  </div>
+                </Link>
+              );
+            })}
             {items.length === 0 && !loading && (
-              <div className="py-6 text-center">
-                <p className="text-sm text-slate-600">No ingested messages yet. Send raw emails via POST /api/v1/mail/messages to see them here.</p>
+              <div className="flex flex-col items-center gap-3 py-10 text-center">
+                <Inbox className="h-8 w-8 text-slate-300" />
+                <p className="text-sm text-slate-500">No ingested messages yet.</p>
+                <p className="text-sm text-slate-500">
+                  Send raw emails to{' '}
+                  <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">
+                    POST /api/v1/mail/messages
+                  </code>{' '}
+                  — from an SMTP gateway, n8n, or a script — and they appear here.
+                </p>
               </div>
             )}
             {loading && (

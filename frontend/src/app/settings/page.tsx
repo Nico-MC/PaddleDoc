@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Check, Copy, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Check, Copy, KeyRound, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -29,6 +29,7 @@ function formatDate(value: string | null): string {
 }
 
 export default function SettingsPage() {
+  const nameRef = useRef<HTMLInputElement>(null);
   const [tokens, setTokens] = useState<ApiTokenSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);
@@ -136,13 +137,13 @@ export default function SettingsPage() {
     <main className="min-h-screen">
       <div className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <header className="mb-6">
-          <h1 className="text-2xl font-semibold text-slate-950">Settings</h1>
+          <h1 className="text-3xl font-semibold text-slate-950">Settings</h1>
           <p className="mt-1 text-sm text-slate-500">Manage your personal account settings.</p>
         </header>
 
         <SectionCard
           title="API tokens"
-          description="Create personal access tokens to use the API programmatically. Send them as an Authorization: Bearer header."
+          description="Create personal access tokens to use the API programmatically — sent as an Authorization: Bearer header."
         >
           {unavailable ? (
             <p className="py-6 text-center text-sm text-slate-500">Not available on this backend yet.</p>
@@ -157,6 +158,7 @@ export default function SettingsPage() {
                 <div className="w-full max-w-xs">
                   <Field label="Name">
                     <input
+                      ref={nameRef}
                       value={name}
                       onChange={(event) => setName(event.target.value)}
                       className={inputClass}
@@ -207,7 +209,21 @@ export default function SettingsPage() {
               {loading ? (
                 <LoadingState label="Loading tokens…" />
               ) : tokens.length === 0 ? (
-                <p className="py-8 text-center text-sm text-slate-500">No API tokens yet.</p>
+                <div className="flex flex-col items-center gap-3 py-10 text-center">
+                  <KeyRound className="h-8 w-8 text-slate-300" />
+                  <p className="text-sm text-slate-500">No API tokens yet. Create the first one to get started.</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      nameRef.current?.focus();
+                      nameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Create token
+                  </Button>
+                </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full table-auto text-left text-xs sm:text-sm">

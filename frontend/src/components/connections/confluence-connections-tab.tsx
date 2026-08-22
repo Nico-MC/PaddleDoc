@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
+import { Cable, CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson } from '@/lib/api';
@@ -219,7 +219,7 @@ export function ConfluenceConnectionsTab() {
     <div className="space-y-6">
       <SectionCard
         title="Confluence connections"
-        description="Connections used to import Confluence pages. Connections are private to you; stored credentials are write-only and never displayed."
+        description="Private connections used to import Confluence pages; stored credentials are never displayed."
         actions={
           <Button size="sm" onClick={() => setCreating(true)}>
             <Plus className="h-4 w-4" />
@@ -238,9 +238,14 @@ export function ConfluenceConnectionsTab() {
         {loading ? (
           <LoadingState label="Loading connections..." />
         ) : unavailable ? null : sources.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            No Confluence connections configured. Add one to start importing pages.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <Cable className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No Confluence connections yet. Add one to start importing pages.</p>
+            <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              Add connection
+            </Button>
+          </div>
         ) : (
           <ul className="space-y-4">
             {sources.map((source) => (

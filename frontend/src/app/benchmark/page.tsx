@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LoaderCircle, RefreshCcw, UploadCloud, X } from 'lucide-react';
+import { FlaskConical, LoaderCircle, RefreshCcw, UploadCloud, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
@@ -211,11 +211,11 @@ export default function BenchmarkPage() {
           </Button>
         </section>
 
-        <section className="mb-8 rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-5">
+        <section id="start-benchmark" className="mb-8 rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-white p-5">
           <h2 className="mb-3 text-lg font-semibold">Start a benchmark</h2>
 
           {connectionsError && (
-            <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {connectionsError} Benchmarks need at least one enabled VL connection.
             </p>
           )}
@@ -336,20 +336,20 @@ export default function BenchmarkPage() {
               </select>
             </label>
 
-            <p className={`text-xs ${variantsValid ? 'text-slate-500' : 'text-amber-700'}`}>
+            <p aria-live="polite" className={`text-xs ${variantsValid ? 'text-slate-500' : 'text-amber-700'}`}>
               {totalVariants} of {MIN_BENCHMARK_VARIANTS}-{MAX_BENCHMARK_VARIANTS} variants selected
               {!variantsValid &&
                 ` — select at least ${MIN_BENCHMARK_VARIANTS} combined connections and profile.`}
             </p>
 
             {startError && (
-              <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {startError}
               </p>
             )}
 
             {uploadProgress && (
-              <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+              <div aria-live="polite" className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <p className="font-medium text-slate-950">Uploading file</p>
@@ -383,12 +383,16 @@ export default function BenchmarkPage() {
           </div>
         </section>
 
-        <section className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <section className="rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
           <div className="mb-3 flex items-center justify-between gap-4">
             <h2 className="text-lg font-semibold">Runs</h2>
             <p className="text-sm text-slate-500">{runs.length} run(s)</p>
           </div>
-          {runsError && <p className="mb-3 text-sm text-red-600">{runsError}</p>}
+          {runsError && (
+            <p role="alert" className="mb-3 text-sm text-red-600">
+              {runsError}
+            </p>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full table-auto text-left text-xs sm:text-sm">
               <thead className="text-slate-500">
@@ -425,7 +429,15 @@ export default function BenchmarkPage() {
               </tbody>
             </table>
             {runs.length === 0 && !runsLoading && (
-              <p className="py-6 text-sm text-slate-600">No benchmark runs yet. Start one above.</p>
+              <div className="flex flex-col items-center gap-3 py-10 text-center">
+                <FlaskConical className="h-8 w-8 text-slate-300" aria-hidden="true" />
+                <p className="text-sm text-slate-600">No benchmark runs yet. Upload a document to compare model output.</p>
+                <a href="#start-benchmark">
+                  <Button variant="outline" size="sm">
+                    Start a benchmark
+                  </Button>
+                </a>
+              </div>
             )}
             {runsLoading && (
               <div className="flex items-center gap-2 py-6 text-sm text-slate-600">

@@ -696,7 +696,11 @@ function NewImportPageInner() {
                       </div>
                     )}
 
-                    {connectionMessage && <p className="text-sm text-slate-600">{connectionMessage}</p>}
+                    {connectionMessage && (
+                      <p aria-live="polite" className="text-sm text-slate-600">
+                        {connectionMessage}
+                      </p>
+                    )}
                     {sourcesLoadFailed && (
                       <div>
                         <Button variant="outline" onClick={retryLoadSources}>
@@ -949,7 +953,9 @@ function NewImportPageInner() {
                 </div>
 
                 {startError && (
-                  <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{startError}</p>
+                  <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {startError}
+                  </p>
                 )}
 
                 <div className="flex justify-between gap-3">

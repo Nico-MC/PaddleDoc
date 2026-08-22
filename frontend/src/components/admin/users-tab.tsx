@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Briefcase, LoaderCircle, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Briefcase, LoaderCircle, Pencil, Plus, Trash2, Users as UsersIcon } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { apiJson } from '@/lib/api';
@@ -58,7 +58,14 @@ export function UsersTab() {
         {users.loading ? (
           <LoadingState label="Loading users…" />
         ) : users.items.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">No users yet.</p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <UsersIcon className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No users yet. Create the first one to get started.</p>
+            <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              Create user
+            </Button>
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full table-auto text-left text-xs sm:text-sm">
@@ -425,7 +432,7 @@ function ClaimOwnerlessCard({ users }: { users: AuthUser[] }) {
   return (
     <SectionCard
       title="Assign ownerless jobs"
-      description="Jobs created before authentication was enabled have no owner. Assign all of them to a user so they show up in that user's job list."
+      description="Jobs created before authentication have no owner — assigning them makes them show up in that user's job list."
     >
       <div className="flex flex-wrap items-end gap-3">
         <div className="w-full max-w-xs">
@@ -444,7 +451,7 @@ function ClaimOwnerlessCard({ users }: { users: AuthUser[] }) {
             </select>
           </Field>
         </div>
-        <Button size="sm" className="h-[38px]" onClick={claim} disabled={busy || ownerId === ''}>
+        <Button variant="outline" size="sm" className="h-[38px]" onClick={claim} disabled={busy || ownerId === ''}>
           {busy ? (
             <LoaderCircle className="h-4 w-4 animate-spin" />
           ) : (
@@ -453,8 +460,10 @@ function ClaimOwnerlessCard({ users }: { users: AuthUser[] }) {
           Assign jobs
         </Button>
       </div>
-      {result && <p className="mt-3 text-sm font-medium text-emerald-700">{result}</p>}
-      {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
+      <div aria-live="polite">
+        {result && <p className="mt-3 text-sm font-medium text-emerald-700">{result}</p>}
+      </div>
+      {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
     </SectionCard>
   );
 }
