@@ -8,6 +8,13 @@ export type Job = {
   original_filename: string;
   status: JobStatus;
   tags: string[];
+  error_message?: string | null;
+  /**
+   * Added to the backend job list response in parallel with this change
+   * (see schemas/import_.py's ImportRunOwner for the shape) — read
+   * defensively, older cached payloads and pre-rollout responses omit it.
+   */
+  owner?: { id: string; username: string } | null;
   processing_info?: {
     settings?: {
       folder?: string | null;

@@ -95,10 +95,10 @@ export function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+    <section className="rounded-2xl border border-slate-200 bg-white p-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-base font-semibold text-slate-950">{title}</h2>
+          <h2 className="text-lg font-semibold text-slate-950">{title}</h2>
           {description && <p className="mt-0.5 text-sm text-slate-500">{description}</p>}
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}
@@ -111,7 +111,7 @@ export function SectionCard({
 export function ErrorNotice({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+    <div role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
       {message}
     </div>
   );
@@ -293,7 +293,7 @@ export function ConfirmDialog({
 function ErrorNoticeSpaced({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+    <div role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
       {message}
     </div>
   );

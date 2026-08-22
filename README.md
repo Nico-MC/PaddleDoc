@@ -18,7 +18,7 @@
 [![Audit](https://img.shields.io/badge/Security%20audit-Claude%20Opus%205-D97757?logo=anthropic&logoColor=white&style=flat-square)](#security)
 [![Containers](https://img.shields.io/badge/Containers-non--root%20uid%201000-0DB7ED?logo=docker&logoColor=white&style=flat-square)](backend/Dockerfile)
 [![Dependencies](https://img.shields.io/badge/Dependencies-hash--locked-8A5A07?style=flat-square)](backend/requirements.txt)
-[![Tests](https://img.shields.io/badge/Tests-445%20backend-3F6382?logo=pytest&logoColor=white&style=flat-square)](backend/tests)
+[![Tests](https://img.shields.io/badge/Tests-519%20backend-3F6382?logo=pytest&logoColor=white&style=flat-square)](backend/tests)
 
 PaddleDoc is a document processing platform powered by PaddleOCR that converts PDFs, Office files, Mails and images into structured Markdown for RAG and AI pipelines.
 
@@ -32,14 +32,15 @@ Managing OCR and document normalization at scale gets messy fast. PaddleDoc give
 
 - AI-first Markdown output with rich YAML frontmatter (source, hash, version, uploader, team, engine)
 - **Document versioning built in** — re-uploading a changed file becomes version N+1 with full history; byte-identical re-uploads are detected and skipped
-- Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible)
-- **VL benchmark** — run one document against up to 6 vision-language models plus an OCR baseline and compare the results side by side
+- Multiple OCR and vision profiles (fast OCR, layout-aware, VL, OpenAI-compatible) — **VL connections work as normal processing profiles**, not just benchmark participants: any admin-configured vision-language endpoint shows up as `VL: <name>` in the File Task wizard and every re-run picker
+- **VL Benchmark** — run one document against up to 6 vision-language models plus an OCR baseline and compare the results side by side
 - **Personal API tokens** — programmatic access via `Authorization: Bearer`, no cookie handling
-- **Mail ingestion (since v1.3.0)** — POST a raw email and PaddleDoc parses it, renders the body
+- **Mail ingestion** — POST a raw email and PaddleDoc parses it, renders the body
   to Markdown, and OCRs every attachment as its own job; idempotent by content hash
+- **Confluence import with real hierarchy** — imported pages carry breadcrumb frontmatter (`space`, `confluence_path`, `parent_title`, `depth`), navigation pages are flagged, parents get `children_titles`, and an opt-in toggle turns the breadcrumb into filterable job tags; runs can be edited and re-run from their own history
 - Folder and tag organization, search, quality grades, JSON export per job
 - Queue-based processing with backend + worker separation; worker logs live in the admin console
-- User accounts with team visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID)
+- User accounts with team visibility, local login and OIDC SSO (Keycloak, Microsoft Entra ID), with Entra-friendly claim resolution and sign-in events visible in the admin Logs tab
 
 ## Get Started
 
@@ -114,7 +115,7 @@ helm upgrade --install paddledoc ./charts/paddledoc \
 Install from GHCR OCI chart:
 
 ```bash
-helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.3.0 \
+helm install paddledoc oci://ghcr.io/bl0rb/charts/paddledoc --version 1.3.3 \
   --namespace paddledoc --create-namespace \
   --set auth.secretKey.value=$(openssl rand -hex 32)
 ```
@@ -125,59 +126,80 @@ Since chart 1.1.0 a `SECRET_KEY` is required — the chart refuses to render wit
 
 - Upload via drag and drop or file picker (PDF, DOCX, PPTX, XLSX, XLS, PNG, JPG, JPEG)
 - **Content-hash document versioning**: same-named uploads within a team become version chains with full history; identical content is deduplicated
-- Job lifecycle `PENDING -> RUNNING -> FINISHED / FAILED` with adaptive live updates
-- Folder tree navigation, tags, search and filtering, date ranges
+- Job lifecycle `PENDING -> RUNNING -> FINISHED / FAILED` with adaptive live updates, owner attribution on every row
+- Folder tree navigation, tags, search and filtering, date ranges, status chips and a job-type filter (single file / collection / Confluence import / mail)
 - A/B/C document quality gate per job
-- Versioned markdown editing on the job detail page
+- Versioned markdown editing on the job detail page, reachable straight from a jobs-table row action
 - **JSON export per job** — metadata, uploader, processing details, and markdown in one file
-- **VL benchmark** with per-variant metrics and side-by-side markdown comparison
+- **VL Benchmark** with per-variant metrics and side-by-side markdown comparison; the same VL connections double as selectable processing profiles for regular uploads
 - **Personal API tokens** for programmatic access (created on the Settings page, shown once, stored hashed)
-- **Mail ingestion (since v1.3.0)** — POST a raw RFC-822 email, body renders to Markdown, attachments become regular jobs; idempotent by content hash, with a Mail UI and manual `.eml` upload
-- **Worker logs in the admin console** — level/worker/text filters, auto-refresh, tracebacks
+- **Mail ingestion** — POST a raw RFC-822 email, body renders to Markdown, attachments become regular jobs; idempotent by content hash, with a Mail UI and manual `.eml` upload
+- **Confluence import** with hierarchy-aware frontmatter, an opt-in hierarchy-as-tags toggle, and an "Edit & run again" action that reopens a past run's settings
+- Jobs can be re-run with a different profile from either the jobs table or the job detail page
+- **Worker logs in the admin console** — level/worker/text filters, auto-refresh, tracebacks — alongside a Logs tab entry for every sign-in (OIDC and local)
 - Password-gated view/download/edit/delete per job
 - OpenAI-compatible page-by-page vision profile
 - User accounts with per-user/team data visibility, local login and OIDC SSO
-- Admin console for users, teams, identity providers, worker logs, and VL connections
+- Admin console for users, teams, identity providers, worker logs, sign-in logs, Paddle runtime settings, and VL connections
 
 ## Product Walkthrough
 
+### Navigation
+
+The sidebar is grouped by intent:
+
+- **Workspace** — Home (personal overview), Processing (the team's work center, with a collapsible submenu for **File Task**, **Jobs**, and **Imports**), and **Mail API** (messages ingested programmatically)
+- **Analyze & connect** — **VL Benchmark** and **Connections**
+
 ### Home (`/`)
 
-System health, selected runtime (CPU/GPU), queue state, and global statistics — with honest degradation: if the backend becomes unreachable, the dashboard marks data as "last known" instead of pretending it is current.
+A personal "what do I do now" landing page: a **New File Task** call to action, a **Needs attention** section (your own failed jobs first, with a counter), **Your recent jobs**, and a slim one-line stats summary. The live service readout (Paddle service, queue depth, containers, worker nodes, GPU/CPU runtime) lives in a compact, expandable **System status** card — with honest degradation: if the backend becomes unreachable, it marks data as "last known" instead of pretending it is current.
 
 ### Processing (`/processing`)
 
 ![Processing](docs/screenshots/processing.png)
 
-Guided flow: choose single-file or collection mode, add metadata (folder/subfolder, tags, department, optional password), select the OCR profile, upload. Re-entering the flow is instant — profiles and settings render from cache and revalidate in the background.
+The team's work center: stat tiles (running/finished/failed, pages processed), a type-distribution bar with four clickable cards (single file, multiple files, Confluence import, mail) that jump to the jobs list pre-filtered, and recent jobs attributed to their owner. Starting new work happens via the **File Task** and **New import** actions, centered under the header.
 
-### Tasks (`/jobs`)
+### File Task (`/processing/new`)
 
-![Tasks](docs/screenshots/jobs.png)
+The upload wizard is a four-step flow — **Metadata → Profile → Upload → Review & Start** — with a persistent, keyboard-operable stepper. Metadata covers mode (single file or collection), target folder/subfolder (via an "Add folder" dialog) and department; Profile lists the static OCR profiles alongside every enabled VL connection as `VL: <name>`; a single file uploads only when you hit Start on the Review & Start step, not the moment you pick it. Continue stays disabled with a visible reason until the current step is valid, and step-bound errors and duplicate-skip notices appear right under the element they concern.
 
-Browse all jobs with folder tree, filters, quality grades, and version badges — `v2` marks documents that were re-uploaded with changed content.
+### Jobs (`/jobs`)
+
+![Jobs](docs/screenshots/jobs.png)
+
+Browse all jobs with folder tree, All/Running/Completed/Failed filter chips with counts, a job-type filter, quality grades, and version badges — `v2` marks documents that were re-uploaded with changed content. Every row action is an icon button with a hover tooltip: download, restart, retry with a lower profile, re-run with a different profile, edit markdown, push (OpenWebUI), delete. The Used Profile column shows compact codes like `ocr6m+v3` (full name on hover), and jobs processed by a VL connection show its name.
 
 ### Job Detail (`/jobs/{id}`)
 
 ![Job detail](docs/screenshots/job-detail.png)
 
-Review metadata, quality gate, and processing info; preview or edit markdown; download the result as Markdown or JSON. The **Versions** table shows the full history of the document — who uploaded which version when, with content hashes — and links to every prior version.
+Review metadata, quality gate, and processing info; preview or edit markdown (an "Edit markdown" toolbar button jumps straight into edit mode); download the result as Markdown or JSON; re-run with a different profile. The **Versions** table shows the full history of the document — who uploaded which version when, with content hashes — and links to every prior version.
 
-### Mail (`/mail`)
+### Mail API (`/mail`)
 
-Ingested email messages, their rendered body, and the attachment jobs derived from them. Upload `.eml` files directly (drag and drop or file picker) the same way a mail gateway would, or POST them via the API — see [API Quickstart](#api-quickstart) below. The list is filterable by subject/sender, source, and date range; each message shows an aggregate status rolled up from its attachment jobs.
+Reads like an inbox: a search bar, sender/subject/parts summary on the left, date and status on the right, with the remaining filters tucked behind a Filters toggle. It shows email messages ingested programmatically via `POST /api/v1/mail/messages`; manual `.eml` upload lives on the Processing page alongside regular file uploads (drag and drop or file picker), producing a normal job. See [API Quickstart](#api-quickstart) below for programmatic ingestion.
 
-Open a message to see the full envelope, the body rendered as Markdown, and a parts table — every attachment links to its OCR job, with per-part downloads and a raw `.eml` download for the whole message. The page polls while any attachment job is still processing. Attachment jobs carry a "from mail" badge back to their source message on the Tasks list and Job Detail pages.
+Open a message to see the full envelope, the body rendered as Markdown, and a parts table — every attachment links to its OCR job, with per-part downloads and a raw `.eml` download for the whole message. The page polls while any attachment job is still processing. Attachment jobs carry a "from mail" badge back to their source message on the Jobs list and Job Detail pages.
 
-### Benchmark (`/benchmark`)
+### Imports (`/imports`)
+
+Confluence import runs, each with a status and page count. Every imported page's frontmatter carries `space`, `confluence_path` (ancestor titles down to its parent), `parent_title`, and `depth`, plus a `> Confluence: A › B › C` breadcrumb line at the top of the body — so RAG chunking keeps hierarchical context beyond the first chunk. Pages that are essentially link lists are flagged `is_navigation: true`; parents get `children_titles`. An opt-in **Use hierarchy as tags** toggle on the import wizard turns breadcrumb parts into job tags so the Jobs list can filter by section. Any run can be reopened via **Edit & run again**, which prefills the wizard with that run's connection, scope, and options and starts a fresh run — history and page-version chaining stay intact.
+
+### VL Benchmark (`/benchmark`)
 
 ![Benchmark](docs/screenshots/benchmark.png)
 
-Run one document against up to 6 admin-configured VL connections plus optionally one OCR profile (2–7 variants per run).
+Run one document against up to 6 admin-configured VL connections plus optionally one OCR profile (2–7 variants per run) — the same document through several vision-language models, compared side by side.
 
 ![Benchmark report](docs/screenshots/benchmark-report.png)
 
-The report compares duration, pages, output size, quality grade, and errors per variant — with a tabbed markdown preview, links to each variant's job, and a JSON export. Variants that silently degraded to plain-text fallback are never crowned fastest/best.
+The report compares duration, pages, output size, quality grade, and errors per variant — with Best result and Fastest badges, a tabbed markdown preview, links to each variant's job, and a JSON export. Variants that silently degraded to plain-text fallback are never crowned fastest/best.
+
+### Connections (`/connections`)
+
+Every user configures the external systems their account talks to, in two groups of tabs: **External services** (Confluence — create, test, rename, delete import sources and their auto-refresh interval; OpenWebUI — connection CRUD and recent-push history) and **AI models** (**VL Models** — administrators get the full CRUD panel, everyone else a read-only list of the enabled connections so they can see what a File Task or benchmark can run against).
 
 ### Settings (`/settings`)
 
@@ -189,7 +211,7 @@ Create personal API tokens for programmatic access. Tokens are shown exactly onc
 
 ![Admin users](docs/screenshots/admin-users.png)
 
-Admins manage users (roles, teams, activation, password resets, assigning legacy ownerless jobs), teams, and OIDC identity providers — including a per-provider connection test.
+Tabs: **Users** (roles, teams, activation, password resets, assigning legacy ownerless jobs), **Teams**, **Identity Providers**, **Logs**, **VL Connections**, and **Paddle** (default OCR profile and timeout).
 
 **Registering an OIDC provider (Keycloak, Microsoft Entra ID, ...):** add it under **Admin → Identity Providers** with the issuer URL, client ID/secret and scopes from your IdP. In the IdP's app registration, set the redirect URI / callback URL to:
 
@@ -199,13 +221,15 @@ Admins manage users (roles, teams, activation, password resets, assigning legacy
 
 `{slug}` is the URL-safe identifier you choose in the "Slug" field (e.g. `entra`), and `{PUBLIC_API_URL}` is the backend's externally reachable base URL (`PUBLIC_API_URL` above / `auth.publicApiUrl` in the Helm chart). Example for slug `entra`: `https://paddledoc.example.com/api/v1/auth/oidc/entra/callback`.
 
+For IdPs like Microsoft Entra ID whose `preferred_username` is a UPN rather than an email, a per-provider **"Use email as username"** switch makes the claimed email the account's username at provisioning (and renames existing accounts on their next login, skipped safely on a collision). Claim resolution itself falls back through `email`, `upn`, `unique_name`, and `preferred_username`, then queries the userinfo endpoint as a last resort — best effort, never blocking the login.
+
 ![VL connections](docs/screenshots/admin-vl-connections.png)
 
-**VL connections** hold OpenAI-compatible vision endpoints for the benchmark: base URL, model, API key (encrypted at rest, never displayed again), and a per-connection system prompt — with a test button that reports latency. Internal endpoints (vLLM, LiteLLM, Ollama) are first-class citizens.
+**VL Connections** hold OpenAI-compatible vision endpoints: base URL, model, API key (encrypted at rest, never displayed again), and a per-connection system prompt — with a test button that reports latency. Internal endpoints (vLLM, LiteLLM, Ollama) are first-class citizens. Every enabled connection is usable both from the VL Benchmark and, since 1.3.3, as a normal processing profile (`VL: <name>`) in the File Task wizard, re-run dialogs, mail ingestion, and Confluence attachment OCR.
 
 ![Worker logs](docs/screenshots/admin-logs.png)
 
-**Worker logs** streams the processing containers' output into the admin console — level/worker/text filtering, auto-refresh, expandable tracebacks. Works identically under Docker Compose and Kubernetes (logs are persisted via the database, no docker.sock required).
+**Logs** covers both worker output and sign-ins: worker logs stream the processing containers' output — level/worker/text filtering, auto-refresh, expandable tracebacks, identical under Docker Compose and Kubernetes (persisted via the database, no docker.sock required) — and sign-in events (OIDC and local logins, account provisioning, username/email syncs, failures and lockouts) are logged alongside them, with an OIDC claim diagnostic and no tokens, passwords, or full subject identifiers in the message text.
 
 ## OCR Profiles
 
@@ -335,7 +359,7 @@ redis     (queue/broker)
 worker    (Celery worker; mirrors its logs into Postgres for the admin console)
 ```
 
-Migrations run automatically on backend startup (Alembic, currently `0001` … `0008`).
+Migrations run automatically on backend startup (Alembic, currently `0001` … `0012`).
 
 ### GPU Runtime (Windows + NVIDIA)
 
@@ -375,7 +399,7 @@ Worker log capture (admin console): `WORKER_LOG_CAPTURE_LEVEL` (default `INFO`, 
 
 Two ways to use vision-language models:
 
-**1. VL connections (recommended, since v1.2.1)** — admins add any number of OpenAI-compatible endpoints under Admin → VL connections (base URL, model, encrypted API key, per-connection system prompt) and test them from the UI. Used by the benchmark; internal endpoints like vLLM/LiteLLM/Ollama work out of the box. The connection appends `/v1/chat/completions` to the base URL.
+**1. VL connections (recommended)** — admins add any number of OpenAI-compatible endpoints under Admin → VL Connections (base URL, model, encrypted API key, per-connection system prompt) and test them from the UI. Every enabled connection is usable both from the VL Benchmark and as a regular processing profile (`VL: <name>`) in the File Task wizard, re-run dialogs, mail ingestion, and Confluence attachment OCR — key decryption stays strictly inside the worker either way. Internal endpoints like vLLM/LiteLLM/Ollama work out of the box. The connection appends `/v1/chat/completions` to the base URL.
 
 **2. `openai_vision` profile (env-based)** — a single global endpoint for regular processing:
 
@@ -438,8 +462,8 @@ Workflow: `.github/workflows/publish-ghcr-images.yml`
 Trigger publish via git tag:
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.3.3
+git push origin v1.3.3
 ```
 
 This publishes multi-arch images (`linux/amd64`, `linux/arm64`; worker is amd64) tagged with the version and `latest`. Pre-release tags (anything with a hyphen, e.g. `v1.3.0-rc.1`) publish their version tag but deliberately do **not** move `latest`, and their GitHub release is marked as a prerelease.
@@ -506,8 +530,9 @@ npm run dev
 ### Reliability and Operations
 
 - [x] Worker logs in the admin console (portable, DB-backed)
+- [x] Sign-in audit trail (OIDC and local logins, provisioning, lockouts) in the admin Logs tab
 - [ ] Add deeper observability (queue depth, latency, retries, failures)
-- [ ] Add stronger governance (audit logs, stricter validation, RBAC)
+- [ ] Add stronger governance (stricter validation, RBAC)
 
 ### Delivery and Workflow
 
@@ -523,5 +548,7 @@ npm run dev
 - [x] Personal API tokens for programmatic pipelines
 - [x] Document versioning with content hashes
 - [x] JSON export per job
+- [x] VL connections usable as normal processing profiles, not just benchmark participants
+- [x] Confluence import hierarchy metadata (breadcrumbs, navigation flags, hierarchy-as-tags) for RAG chunking
 - [ ] Improve batch progress and operator feedback UX
 - [ ] Add vector DB export/webhook integrations

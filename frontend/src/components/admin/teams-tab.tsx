@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { Check, LoaderCircle, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Building2, Check, LoaderCircle, Pencil, Plus, Trash2, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { apiJson } from '@/lib/api';
@@ -19,6 +19,7 @@ import {
 
 export function TeamsTab() {
   const teams = useAdminList<Team>('/api/v1/auth/admin/teams');
+  const newNameRef = useRef<HTMLInputElement>(null);
 
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -81,6 +82,7 @@ export function TeamsTab() {
       <SectionCard title="Create team" description="Teams scope job visibility for their members.">
         <form onSubmit={createTeam} className="flex flex-wrap items-center gap-3">
           <input
+            ref={newNameRef}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Team name"
@@ -96,7 +98,11 @@ export function TeamsTab() {
             Create team
           </Button>
         </form>
-        {createError && <p className="mt-3 text-sm text-red-700">{createError}</p>}
+        {createError && (
+          <p role="alert" className="mt-3 text-sm text-red-700">
+            {createError}
+          </p>
+        )}
       </SectionCard>
 
       <SectionCard title="Teams" description="Rename or remove existing teams.">
@@ -104,9 +110,21 @@ export function TeamsTab() {
         {teams.loading ? (
           <LoadingState label="Loading teams…" />
         ) : teams.items.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            No teams yet. Create one above to start grouping users.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <Building2 className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No teams yet. Create the first one to group users.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                newNameRef.current?.focus();
+                newNameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              Create team
+            </Button>
+          </div>
         ) : (
           <ul className="divide-y divide-slate-100">
             {teams.items.map((team) => (
@@ -148,7 +166,11 @@ export function TeamsTab() {
                     >
                       <X className="h-4 w-4" />
                     </button>
-                    {renameError && <p className="w-full text-sm text-red-700">{renameError}</p>}
+                    {renameError && (
+                      <p role="alert" className="w-full text-sm text-red-700">
+                        {renameError}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="min-w-0">

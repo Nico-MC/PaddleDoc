@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { CircleCheck, CircleX, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
+import { CircleCheck, CircleX, KeyRound, LoaderCircle, Pencil, PlugZap, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { apiJson } from '@/lib/api';
@@ -60,7 +60,7 @@ export function ProvidersTab() {
     <div className="space-y-6">
       <SectionCard
         title="Identity providers"
-        description="OIDC providers users can sign in with. Stored client secrets are never displayed."
+        description="OIDC providers users can sign in with; stored client secrets are never displayed."
         actions={
           <Button size="sm" onClick={() => setCreating(true)}>
             <Plus className="h-4 w-4" />
@@ -72,9 +72,14 @@ export function ProvidersTab() {
         {providers.loading ? (
           <LoadingState label="Loading providers…" />
         ) : providers.items.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            No identity providers configured. Add one to enable SSO login.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <KeyRound className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No identity providers yet. Add one to enable SSO login.</p>
+            <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" />
+              Add provider
+            </Button>
+          </div>
         ) : (
           <ul className="space-y-4">
             {providers.items.map((p) => (
@@ -374,10 +379,12 @@ function ProviderModal({
             onChange={setUseEmailAsUsername}
             label="Use email as username"
           />
-          <p className="mt-1.5 text-xs text-slate-500">
-            For providers like Microsoft Entra whose preferred_username is a UPN: the account&apos;s username —
-            shown in the sidebar and usable for sign-in — becomes the email address. Applies on first login and
-            renames existing accounts on their next login.
+          <p
+            className="mt-1.5 text-xs text-slate-500"
+            title="Applies on first login and renames existing accounts on their next login."
+          >
+            For providers like Microsoft Entra whose preferred_username is a UPN, the account&apos;s username becomes
+            the email address.
           </p>
         </div>
         <ErrorNotice message={error} />

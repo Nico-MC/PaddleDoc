@@ -2,9 +2,10 @@
 
 import { useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { FilePlus } from 'lucide-react';
+import { FileInput, FilePlus, FileText, Files, Import, Mail } from 'lucide-react';
 
 import { buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { useCachedResource, useVisiblePolling } from '@/lib/data-cache';
 
@@ -21,11 +22,28 @@ type Job = {
   original_filename: string;
   status: JobStatus;
   created_at: string;
+  // Optional/defensive per contract: GET /api/v1/jobs list items carry
+  // owner (see backend schemas/import_.py ImportRunOwner), read as
+  // job.owner?.username since older cached payloads may lack it.
+  owner?: { id: string; username: string } | null;
   processing_info?: {
     settings?: Record<string, unknown>;
     execution?: Record<string, unknown>;
   } | null;
 };
+
+
+// Both creation entry points always appear together, centered, in a soft
+// emerald pair — deliberately lighter than a solid primary and never tucked
+// into the page corner (explicit user preference).
+const softCtaClass = cn(
+  buttonVariants({ variant: 'outline' }),
+  'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900',
+);
+const softCtaSmClass = cn(
+  buttonVariants({ variant: 'outline', size: 'sm' }),
+  'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:text-emerald-900',
+);
 
 const JOBS_KEY = '/api/v1/jobs';
 
@@ -127,8 +145,6 @@ function deriveStats(jobs: Job[]): Stats {
   return { running, finished, failed, pagesProcessed };
 }
 
-const JOB_TYPES: JobType[] = ['Single file', 'Multiple files', 'Mail', 'Confluence Import'];
-
 function deriveTypeCounts(jobs: Job[]): Record<JobType, number> {
   const counts: Record<JobType, number> = {
     'Single file': 0,
@@ -142,6 +158,21 @@ function deriveTypeCounts(jobs: Job[]): Record<JobType, number> {
   return counts;
 }
 
+// urlType is the ?type= value /jobs accepts as an initial client filter
+// (contract). Order and bar colors are the "By type" section's own spec:
+// single/collection/import/mail in emerald-600/emerald-400/emerald-200/slate-300.
+const TYPE_META: Array<{
+  type: JobType;
+  urlType: 'single' | 'collection' | 'import' | 'mail';
+  barColor: string;
+  icon: typeof FileText;
+}> = [
+  { type: 'Single file', urlType: 'single', barColor: 'bg-emerald-600', icon: FileText },
+  { type: 'Multiple files', urlType: 'collection', barColor: 'bg-emerald-400', icon: Files },
+  { type: 'Confluence Import', urlType: 'import', barColor: 'bg-emerald-200', icon: Import },
+  { type: 'Mail', urlType: 'mail', barColor: 'bg-slate-300', icon: Mail },
+];
+
 export function ProcessingOverview() {
   const fetch = useCallback(() => fetchJobs(), []);
   // Same cache key as HomeDashboard/DocumentBrowser: a shared in-flight
@@ -152,6 +183,10 @@ export function ProcessingOverview() {
 
   const stats = useMemo(() => deriveStats(jobs), [jobs]);
   const typeCounts = useMemo(() => deriveTypeCounts(jobs), [jobs]);
+  const typeTotal = useMemo(
+    () => TYPE_META.reduce((sum, meta) => sum + typeCounts[meta.type], 0),
+    [typeCounts],
+  );
   const recentJobs = useMemo(
     () =>
       [...jobs]
@@ -176,17 +211,27 @@ export function ProcessingOverview() {
         <div>
           <h1 className="font-serif text-3xl font-semibold tracking-tight text-slate-950">Processing</h1>
           <p className="mt-1 text-slate-600">
-            Your document pipeline at a glance — every job you and your team started.
+            The team&apos;s work center — every job, import, and mail extraction.
           </p>
         </div>
-        <Link href="/processing/new" className={buttonVariants({ variant: 'default', size: 'default' })}>
+      </div>
+
+      <div className="mb-6 flex flex-wrap items-center justify-center gap-3">
+        <Link href="/processing/new" className={softCtaClass}>
           <FilePlus className="h-4 w-4" />
           New File Task
+        </Link>
+        <Link href="/imports/new" className={softCtaClass}>
+          <FileInput className="h-4 w-4" />
+          New import
         </Link>
       </div>
 
       {jobsStale && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+        <div
+          aria-live="polite"
+          className="mb-4 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800"
+        >
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
           Showing last known jobs — reconnecting to the backend.
         </div>
@@ -205,24 +250,56 @@ export function ProcessingOverview() {
         ))}
       </section>
 
-      <section className="mb-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_18px_45px_rgba(15,23,42,0.06)]">
+      <section className="mb-8 rounded-2xl border border-slate-200 bg-white p-5">
         <h2 className="text-sm font-semibold text-slate-950">By type</h2>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {JOB_TYPES.map((type) => (
-            <span
-              key={type}
-              className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700"
-            >
-              {type}
-              <span className="rounded-full bg-white px-1.5 py-0.5 text-[11px] font-semibold text-slate-950">
-                {typeCounts[type]}
-              </span>
-            </span>
-          ))}
+
+        {/* Decorative — the counts it visualizes are the accessible text in
+            the stat cards below, so the bar itself is hidden from AT. */}
+        <div aria-hidden="true" className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+          {typeTotal === 0 ? (
+            <div className="h-full w-full bg-slate-100" />
+          ) : (
+            TYPE_META.map((meta) => {
+              const count = typeCounts[meta.type];
+              if (count === 0) {
+                return null;
+              }
+              return (
+                <div
+                  key={meta.type}
+                  className={meta.barColor}
+                  style={{ width: `${(count / typeTotal) * 100}%` }}
+                />
+              );
+            })
+          )}
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {TYPE_META.map((meta) => {
+            const Icon = meta.icon;
+            return (
+              <Link
+                key={meta.type}
+                href={`/jobs?type=${meta.urlType}`}
+                className="group flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white p-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <Icon className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-emerald-700" />
+                  <span className="truncate text-sm font-medium text-slate-700 group-hover:text-emerald-900">
+                    {meta.type}
+                  </span>
+                </span>
+                <span className="shrink-0 tabular-nums text-sm font-semibold text-slate-950">
+                  {typeCounts[meta.type]}
+                </span>
+              </Link>
+            );
+          })}
         </div>
       </section>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_18px_45px_rgba(15,23,42,0.06)]">
+      <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-950">Recent jobs</h2>
           <Link href="/jobs" className="text-sm font-medium text-emerald-700 hover:text-emerald-800">
@@ -231,7 +308,20 @@ export function ProcessingOverview() {
         </div>
 
         {recentJobs.length === 0 ? (
-          <p className="mt-4 text-sm text-slate-500">No jobs yet — start a file task or an import to see it here.</p>
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <FileText className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">No jobs yet. Start a file task or an import to see it here.</p>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Link href="/processing/new" className={softCtaSmClass}>
+                <FilePlus className="h-4 w-4" />
+                New File Task
+              </Link>
+              <Link href="/imports/new" className={softCtaSmClass}>
+                <FileInput className="h-4 w-4" />
+                New import
+              </Link>
+            </div>
+          </div>
         ) : (
           <ul className="mt-4 divide-y divide-slate-100">
             {recentJobs.map((job) => (
@@ -243,7 +333,10 @@ export function ProcessingOverview() {
                   >
                     {job.original_filename}
                   </Link>
-                  <p className="mt-0.5 text-xs text-slate-500">{formatTimestamp(job.created_at)}</p>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {formatTimestamp(job.created_at)}
+                    {job.owner?.username && <span className="text-slate-400"> · by {job.owner.username}</span>}
+                  </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">

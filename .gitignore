@@ -25,3 +25,6 @@ pictures/
 *-result.txt
 _out.txt
 backend/paddledoc.db
+
+# Local UI mockup (published as a Claude artifact, not part of releases)
+docs/ui-mockup.html

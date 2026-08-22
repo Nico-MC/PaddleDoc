@@ -56,6 +56,13 @@ class JobSaveResponse(BaseModel):
     updated_at: datetime
 
 
+class JobOwner(BaseModel):
+    id: str
+    username: str
+
+    model_config = {'from_attributes': True}
+
+
 class JobResponse(BaseModel):
     id: str
     original_filename: str
@@ -69,6 +76,8 @@ class JobResponse(BaseModel):
     benchmark_run_id: str | None = None
     created_at: datetime
     updated_at: datetime
+    # None for legacy jobs (owner_id IS NULL) -- see Job.owner_id / _owner_visible.
+    owner: JobOwner | None = None
 
 
 class JobListResponse(BaseModel):

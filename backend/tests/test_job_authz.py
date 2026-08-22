@@ -104,6 +104,24 @@ def test_owner_can_see_own_job():
     assert resp.json()['id'] == job.id
 
 
+# --- owner field on list/detail responses --------------------------------------
+
+def test_job_list_and_detail_include_owner_for_own_job():
+    owner = create_test_user(username='authz-owner-field', email='authz-owner-field@example.com')
+    job = _make_job(owner_id=owner.id)
+
+    client = login_as('authz-owner-field')
+
+    detail_resp = client.get(f'/api/v1/jobs/{job.id}')
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()['owner'] == {'id': owner.id, 'username': 'authz-owner-field'}
+
+    list_resp = client.get('/api/v1/jobs')
+    assert list_resp.status_code == 200
+    items_by_id = {item['id']: item for item in list_resp.json()['items']}
+    assert items_by_id[job.id]['owner'] == {'id': owner.id, 'username': 'authz-owner-field'}
+
+
 # --- team-based visibility ----------------------------------------------------
 
 def test_team_members_share_job_visibility():
@@ -118,7 +136,10 @@ def test_team_members_share_job_visibility():
     assert resp.json()['id'] == job.id
 
     list_resp = teammate_client.get('/api/v1/jobs')
-    assert job.id in {item['id'] for item in list_resp.json()['items']}
+    items_by_id = {item['id']: item for item in list_resp.json()['items']}
+    assert job.id in items_by_id
+    # Owner attribution is the job's actual owner, not the viewing teammate.
+    assert items_by_id[job.id]['owner'] == {'id': owner.id, 'username': 'authz-team-owner'}
 
 
 def test_different_teams_do_not_share_visibility():
@@ -145,12 +166,20 @@ def test_admin_sees_all_jobs_including_legacy_null_owner():
 
     admin_client = login_as('authz-admin-1')
 
-    assert admin_client.get(f'/api/v1/jobs/{owned_job.id}').status_code == 200
-    assert admin_client.get(f'/api/v1/jobs/{legacy_job.id}').status_code == 200
+    owned_detail = admin_client.get(f'/api/v1/jobs/{owned_job.id}')
+    assert owned_detail.status_code == 200
+    assert owned_detail.json()['owner'] == {'id': other_user.id, 'username': 'authz-admin-other'}
 
-    visible_ids = {item['id'] for item in admin_client.get('/api/v1/jobs').json()['items']}
-    assert owned_job.id in visible_ids
-    assert legacy_job.id in visible_ids
+    legacy_detail = admin_client.get(f'/api/v1/jobs/{legacy_job.id}')
+    assert legacy_detail.status_code == 200
+    assert legacy_detail.json()['owner'] is None
+
+    items_by_id = {item['id']: item for item in admin_client.get('/api/v1/jobs').json()['items']}
+    assert owned_job.id in items_by_id
+    assert legacy_job.id in items_by_id
+    assert items_by_id[owned_job.id]['owner'] == {'id': other_user.id, 'username': 'authz-admin-other'}
+    # Legacy owner_id IS NULL -> owner is null, never fabricated.
+    assert items_by_id[legacy_job.id]['owner'] is None
 
     del admin
 

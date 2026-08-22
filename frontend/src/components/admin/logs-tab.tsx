@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { LoaderCircle, RefreshCcw } from 'lucide-react';
+import { LoaderCircle, RefreshCcw, ScrollText } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ApiError, apiJson, type LogLevel, type WorkerLogEntry, type WorkerLogsResponse } from '@/lib/api';
@@ -237,9 +237,12 @@ export function LogsTab() {
       {loading ? (
         <LoadingState label="Loading logs…" />
       ) : unavailable ? null : entries.length === 0 ? (
-        <p className="py-8 text-center text-sm text-slate-500">
-          {hasFilters ? 'No log entries match the current filters.' : 'No log entries yet.'}
-        </p>
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <ScrollText className="h-8 w-8 text-slate-300" />
+          <p className="text-sm text-slate-500">
+            {hasFilters ? 'No log entries match the current filters.' : 'No log entries yet.'}
+          </p>
+        </div>
       ) : (
         <>
           <div className="max-h-[32rem] overflow-y-auto overflow-x-hidden rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs">

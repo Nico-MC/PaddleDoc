@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, Settings2, Trash2, TrendingDown, UploadCloud } from 'lucide-react';
+import { Download, Inbox, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, SearchX, Settings2, Trash2, TrendingDown, UploadCloud } from 'lucide-react';
 
 import { Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
@@ -30,6 +30,20 @@ type Job = {
   } | null;
   created_at: string;
   updated_at?: string;
+  // Mirrors ImportRunOwner in backend/app/schemas/import_.py. Not rendered
+  // here yet (no UI need in this view) — kept optional/defensive since the
+  // field is landing on GET /api/v1/jobs items independently of this change.
+  owner?: { id: string; username: string } | null;
+};
+
+/** The `?type=` deep-link values this view accepts (see app/jobs/page.tsx). */
+type JobTypeFilter = 'single' | 'collection' | 'import' | 'mail';
+
+const JOB_TYPE_FILTER_LABELS: Record<JobTypeFilter, string> = {
+  import: 'Confluence Import',
+  mail: 'Mail',
+  collection: 'Multiple files',
+  single: 'Single file',
 };
 
 type SortKey = 'document' | 'status' | 'profile' | 'pages' | 'created';
@@ -46,6 +60,13 @@ type DocumentBrowserProps = {
    * the server page without remounting this client component, still applies.
    */
   initialFolder?: string;
+  /**
+   * Preselects the type filter (e.g. from a ?type= deep link, contract:
+   * single|collection|import|mail — see app/jobs/page.tsx). Same
+   * initializer-only / remount-via-key contract as initialFolder above. An
+   * unrecognized or missing value leaves the type filter off.
+   */
+  initialType?: string;
 };
 
 const API = API_BASE_URL;
@@ -110,6 +131,28 @@ function isImportJob(job: Job): boolean {
  */
 function isMailAttachmentJob(job: Job): boolean {
   return job.processing_info?.settings?.mode === 'mail_attachment';
+}
+
+/**
+ * Canonical job-type derivation for the `?type=` deep-link filter, mirroring
+ * dashboard/processing-overview.tsx's jobType() (single/collection/import/
+ * mail per the contract). Builds on isImportJob/isMailAttachmentJob above
+ * rather than re-deriving from settings.mode independently — 'import' here
+ * additionally covers 'import_attachment' (the per-page jobs an import run
+ * spawns), which isImportJob deliberately excludes since only 'import' jobs
+ * get the restart-disabled treatment.
+ */
+function typeForJob(job: Job): JobTypeFilter {
+  if (isImportJob(job) || job.processing_info?.settings?.mode === 'import_attachment') {
+    return 'import';
+  }
+  if (isMailAttachmentJob(job)) {
+    return 'mail';
+  }
+  if (job.processing_info?.settings?.mode === 'collection') {
+    return 'collection';
+  }
+  return 'single';
 }
 
 /** Defensive read of settings.mail.mail_message_id, mirroring the backend's isinstance() guards on processing_info. */
@@ -227,11 +270,14 @@ function qualityForJob(job: Job): { grade: string; score: number | null } | null
   return { grade, score };
 }
 
+const JOB_TYPE_FILTER_VALUES: JobTypeFilter[] = ['single', 'collection', 'import', 'mail'];
+
 export function DocumentBrowser({
   endpoint,
   allowDelete = false,
   includeDateFilters = true,
   initialFolder,
+  initialType,
 }: DocumentBrowserProps) {
   const pageSize = 50;
   // Shared with the Home/Processing views' jobs fetch: seeding from it here
@@ -242,12 +288,20 @@ export function DocumentBrowser({
   const [items, setItems] = useState<Job[]>(() => peekCached<Job[]>(cacheKey) ?? []);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState('');
-  const [statusFilter, setStatusFilter] = useState<JobStatus | ''>('');
+  // Grouped status chip filter (Running = PENDING+RUNNING, Completed =
+  // FINISHED, Failed = FAILED) — applied client-side over the loaded items,
+  // separate from the server-side search/tag/date filters below, since the
+  // backend's status param only matches a single exact status.
+  const [chipFilter, setChipFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [loading, setLoading] = useState(false);
   const [restartingPending, setRestartingPending] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string>(initialFolder?.trim() || 'all');
+  const [typeFilter, setTypeFilter] = useState<JobTypeFilter | null>(() => {
+    const trimmed = initialType?.trim() as JobTypeFilter | undefined;
+    return trimmed && JOB_TYPE_FILTER_VALUES.includes(trimmed) ? trimmed : null;
+  });
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
   const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
   const [restartingFolder, setRestartingFolder] = useState<string | null>(null);
@@ -292,21 +346,17 @@ export function DocumentBrowser({
   const loadItems = async (filters?: {
     query: string;
     tag: string;
-    statusFilter: JobStatus | '';
     fromDate: string;
     toDate: string;
   }) => {
     setLoading(true);
-    const active = filters ?? { query, tag, statusFilter, fromDate, toDate };
+    const active = filters ?? { query, tag, fromDate, toDate };
     const params = new URLSearchParams();
     if (active.query.trim()) {
       params.set('q', active.query.trim());
     }
     if (active.tag.trim()) {
       params.set('tag', active.tag.trim());
-    }
-    if (active.statusFilter) {
-      params.set('status', active.statusFilter);
     }
     if (includeDateFilters && active.fromDate) {
       params.set('from_date', active.fromDate);
@@ -569,15 +619,63 @@ export function DocumentBrowser({
       .sort((left, right) => left.path.localeCompare(right.path));
   }, [items]);
 
-  const visibleItems = useMemo(() => {
-    if (selectedFolder === 'all') {
-      return items;
-    }
+  // Filter stages, applied in order:
+  //   1. items          — server-side search/tag/date filters (loadItems).
+  //   2. typeAndFolder   — client-side ?type= deep link + sidebar folder
+  //                        selection, independent of status.
+  //   3. visibleItems    — typeAndFolder further narrowed by the status chip
+  //                        (Running/Completed/Failed).
+  // folderItems' counts (sidebar, above) intentionally stay on the raw
+  // `items` set — they're navigation targets for picking a folder, not a
+  // reflection of the active type/status filters. statusCounts below,
+  // however, is scoped to typeAndFolderFilteredItems so the chip counts
+  // match what selecting Running/Completed/Failed would actually show while
+  // a type or folder filter is active.
+  const typeAndFolderFilteredItems = useMemo(() => {
     return items.filter((job) => {
-      const folder = jobFolderPath(job);
-      return folder === selectedFolder || folder.startsWith(`${selectedFolder}/`);
+      if (typeFilter && typeForJob(job) !== typeFilter) {
+        return false;
+      }
+      if (selectedFolder !== 'all') {
+        const folder = jobFolderPath(job);
+        if (!(folder === selectedFolder || folder.startsWith(`${selectedFolder}/`))) {
+          return false;
+        }
+      }
+      return true;
     });
-  }, [items, selectedFolder]);
+  }, [items, typeFilter, selectedFolder]);
+
+  const statusCounts = useMemo(() => {
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    for (const job of typeAndFolderFilteredItems) {
+      if (job.status === 'PENDING' || job.status === 'RUNNING') {
+        running += 1;
+      } else if (job.status === 'FINISHED') {
+        completed += 1;
+      } else if (job.status === 'FAILED') {
+        failed += 1;
+      }
+    }
+    return { all: typeAndFolderFilteredItems.length, running, completed, failed };
+  }, [typeAndFolderFilteredItems]);
+
+  const visibleItems = useMemo(() => {
+    return typeAndFolderFilteredItems.filter((job) => {
+      if (chipFilter === 'running' && !(job.status === 'PENDING' || job.status === 'RUNNING')) {
+        return false;
+      }
+      if (chipFilter === 'completed' && job.status !== 'FINISHED') {
+        return false;
+      }
+      if (chipFilter === 'failed' && job.status !== 'FAILED') {
+        return false;
+      }
+      return true;
+    });
+  }, [typeAndFolderFilteredItems, chipFilter]);
 
   const sortedItems = useMemo(() => {
     const sorted = [...visibleItems];
@@ -638,7 +736,7 @@ export function DocumentBrowser({
   return (
     <div className="w-full text-slate-900">
 
-      <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+      <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <label className="text-sm text-slate-700 xl:col-span-2">
             Search filename
@@ -663,23 +761,6 @@ export function DocumentBrowser({
               className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
               placeholder="finance"
             />
-          </label>
-          <label className="text-sm text-slate-700">
-            Status
-            <select
-              value={statusFilter}
-              onChange={(event) => {
-                setStatusFilter(event.target.value as JobStatus | '');
-                setCurrentPage(1);
-              }}
-              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
-            >
-              <option value="">All</option>
-              <option value="PENDING">PENDING</option>
-              <option value="RUNNING">RUNNING</option>
-              <option value="FINISHED">FINISHED</option>
-              <option value="FAILED">FAILED</option>
-            </select>
           </label>
           {includeDateFilters && (
             <>
@@ -711,7 +792,9 @@ export function DocumentBrowser({
           )}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={() => void loadItems()}>Apply Filters</Button>
+          <Button variant="outline" onClick={() => void loadItems()}>
+            Apply Filters
+          </Button>
           <Button variant="outline" onClick={() => void loadItems()}>
             <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
           </Button>
@@ -725,13 +808,12 @@ export function DocumentBrowser({
             onClick={() => {
               setQuery('');
               setTag('');
-              setStatusFilter('');
               setFromDate('');
               setToDate('');
               // The setters above only land on the next render, and this
               // closure's `loadItems` still sees the old state — pass the
               // cleared values explicitly.
-              void loadItems({ query: '', tag: '', statusFilter: '', fromDate: '', toDate: '' });
+              void loadItems({ query: '', tag: '', fromDate: '', toDate: '' });
             }}
           >
             Reset
@@ -740,7 +822,7 @@ export function DocumentBrowser({
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
-        <aside className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <aside className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-4">
           <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-700">Folders</h2>
           <div className="mt-3 space-y-1">
             <button
@@ -809,12 +891,68 @@ export function DocumentBrowser({
           </div>
         </aside>
 
-        <div className="min-w-0 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <div className="min-w-0 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
             <h2 className="text-lg font-semibold">Results</h2>
             <p className="text-sm text-slate-500">
               {sortedItems.length} document(s) · Page {displayPage} / {totalPages}
             </p>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
+              {(
+                [
+                  { key: 'all', label: 'All', count: statusCounts.all },
+                  { key: 'running', label: 'Running', count: statusCounts.running },
+                  { key: 'completed', label: 'Completed', count: statusCounts.completed },
+                  { key: 'failed', label: 'Failed', count: statusCounts.failed },
+                ] as const
+              ).map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  aria-pressed={chipFilter === chip.key}
+                  onClick={() => {
+                    setChipFilter(chip.key);
+                    setCurrentPage(1);
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${
+                    chipFilter === chip.key
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {chip.label}
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                      chipFilter === chip.key ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {chip.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {typeFilter && (
+              // The one type chip shown is always the active ?type= deep
+              // link — there's no full chip set to pick a type from here (by
+              // design, per app/jobs/page.tsx's contract), only a clear
+              // affordance for the filter that arrived via the URL. Kept as
+              // a sibling of (not inside) the status chips' role="group" —
+              // it's a different filter dimension, not another status.
+              <button
+                type="button"
+                onClick={() => {
+                  setTypeFilter(null);
+                  setCurrentPage(1);
+                }}
+                aria-label={`Clear type filter: ${JOB_TYPE_FILTER_LABELS[typeFilter]}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 transition hover:bg-emerald-100"
+              >
+                Type: {JOB_TYPE_FILTER_LABELS[typeFilter]}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto">
           <table className="w-full table-auto text-left text-xs sm:text-sm">
@@ -1035,9 +1173,41 @@ export function DocumentBrowser({
               </div>
             </div>
           )}
-          {sortedItems.length === 0 && !loading && (
-            <div className="flex items-center gap-2 py-6 text-sm text-slate-600">
-              <LoaderCircle className="h-4 w-4 animate-spin" /> No documents found.
+          {sortedItems.length === 0 && !loading && items.length === 0 && (
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <Inbox className="h-8 w-8 text-slate-300" />
+              <div>
+                <p className="text-sm font-medium text-slate-700">No documents yet</p>
+                <p className="mt-1 text-sm text-slate-500">Upload a document to start processing it.</p>
+              </div>
+              <Link href="/processing/new">
+                <Button>Upload your first document</Button>
+              </Link>
+            </div>
+          )}
+          {sortedItems.length === 0 && !loading && items.length > 0 && (
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <SearchX className="h-8 w-8 text-slate-300" />
+              <div>
+                <p className="text-sm font-medium text-slate-700">No documents match these filters</p>
+                <p className="mt-1 text-sm text-slate-500">Try a different search, folder, or status.</p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setQuery('');
+                  setTag('');
+                  setFromDate('');
+                  setToDate('');
+                  setSelectedFolder('all');
+                  setChipFilter('all');
+                  setTypeFilter(null);
+                  setCurrentPage(1);
+                  void loadItems({ query: '', tag: '', fromDate: '', toDate: '' });
+                }}
+              >
+                Clear filters
+              </Button>
             </div>
           )}
           {loading && (

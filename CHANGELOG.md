@@ -5,9 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.3] - 2026-08-22
 
 ### Added
+- Job lists and job details name their owner: every job row carries `owner` ({id, username},
+  batch-loaded in one query; legacy pre-auth jobs show none) — the foundation for the
+  personal home dashboard and the "by <username>" attribution on the Processing work center
 - VL connections power normal processing, not just benchmarks: every enabled connection
   now appears as a selectable profile (`VL: <name>`) in the File Task wizard, the
   re-run-with-profile dialog, mail-API ingestion, and Confluence attachment OCR. Selecting
@@ -71,6 +74,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark can run against
 
 ### Changed
+- Creating work is one centered gesture everywhere: Home, Processing, and Imports show the
+  pair **New File Task** + **New import** together, centered under the page header in a soft
+  emerald style — no more lone primary button tucked into the top corner, and the empty
+  states offer the same pair
+- Home and Processing now have distinct jobs: Home is a personal overview — "Welcome back",
+  quick actions, a **Needs attention** section (failed jobs, your own first, with a counter),
+  **Your recent jobs**, and a slim one-line stats summary instead of the four big tiles —
+  while Processing is the team's work center with the full stat tiles, a type distribution
+  bar plus four clickable type cards that jump to the jobs list pre-filtered
+  (`/jobs?type=…`, shown there as a clearable filter chip), and recent jobs attributed to
+  their owner
+- The File Task wizard's Continue is context-aware: disabled with a visible reason until the
+  step is valid (step 3 needs a chosen file or at least one uploaded collection file), the
+  active step carries a ring and emphasized label on top of the existing checkmarks, and
+  step-bound errors appear right under the element they concern instead of only in a global
+  banner
+- Mail reads like an inbox now: one prominent search bar (Enter applies), sender, subject
+  and parts summary on the left with date and status on the right, the whole row linking to
+  the message, and the remaining filters tucked behind a Filters toggle
+- A UI polish pass across the whole app: the home dashboard leads with "what do I do now"
+  (New File Task, stats with errors surfaced, five most recent jobs) and demotes the system
+  readout to a compact strip with expandable details; the File Task wizard became a real
+  four-step flow (Metadata → Profile → Upload → Review & Start) with a persistent, keyboard-
+  operable stepper — a single file now uploads when you hit Start, not when you pick it; the
+  jobs list gained All/Running/Completed/Failed filter chips with counts; the sidebar groups
+  entries under Workspace and Analyze & connect, moves Mail API out of Processing as its own
+  input channel, renames Confluence Import to Imports, marks Admin as privileged, and
+  strengthens the active state; Connections separates External services from AI models (the
+  VL tab is now "VL Models"); benchmark results compare side by side with Best result and
+  Fastest badges; and throughout: one primary action per screen, a consistent type scale,
+  lighter cards, empty states that say what to do next, aria-current/aria-controls/aria-live
+  wiring, and arrow-key tab navigation
 - The File Task wizard sheds its email, tags, and password fields; folder creation
   (folder + subfolder) moved into an "Add folder" dialog. The department field remains for
   multi-file batches
