@@ -12,10 +12,13 @@ services:
     ports:
       - '3000:3000'
     environment:
+      NODE_ENV: development
       PADDLEDOC_PUBLIC_API_URL: http://localhost:8000
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/postcss.config.mjs:/app/postcss.config.mjs
     command: npm run dev
     depends_on:
       - backend
