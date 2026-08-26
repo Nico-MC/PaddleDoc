@@ -35,6 +35,12 @@ _PDF_CHUNK_PAGE_SIZE_BY_PROFILE: dict[str, int] = {
 }
 
 _PADDLE_PROFILES: dict[str, dict[str, str]] = {
+    'no_profile': {
+        'value': 'no_profile',
+        'label': 'No profile (native extraction)',
+        'description': 'Skip OCR and use native text extraction for DOCX, PDF, and spreadsheets.',
+        'pipeline': 'native',
+    },
     'ppocrv6_tiny': {
         'value': 'ppocrv6_tiny',
         'label': 'PP-OCRv6 tiny det + rec',
@@ -244,23 +250,322 @@ def _fallback_docx_to_markdown(source: Path) -> tuple[str, int]:
 
     root = ET.fromstring(xml_bytes)
     namespace = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-    paragraphs = root.findall('.//w:p', namespace)
+    body = root.find('./w:body', namespace)
+    if body is None:
+        raise RuntimeError('DOCX fallback extraction could not find document body')
+    body_items = list(body)
+    numbering = _load_docx_numbering(source, namespace)
+    styles = _load_docx_styles(source, namespace)
 
     lines: list[str] = []
     paragraph_count = 0
-    for paragraph in paragraphs:
-        text_runs = [run.text or '' for run in paragraph.findall('.//w:t', namespace)]
-        text = re.sub(r'\s+', ' ', ''.join(text_runs)).strip()
+    counters: dict[tuple[str, int], int] = {}
+    section_index = 0
+    section_child_index = 0
+    section_subchild_index = 0
+    section_subsubchild_index = 0
+    for item in body_items:
+        local_name = item.tag.rsplit('}', 1)[-1]
+        if local_name == 'tbl':
+            table = _docx_table_to_markdown(item, namespace)
+            if table:
+                lines.append(table)
+            continue
+        if local_name != 'p':
+            continue
+
+        textbox_lines = _docx_textbox_markdown(item, namespace)
+        if textbox_lines:
+            lines.extend(textbox_lines)
+            continue
+
+        text = _docx_paragraph_text(item, namespace)
         if not text:
             continue
-        lines.append(text)
+
+        style_element = item.find('./w:pPr/w:pStyle', namespace)
+        style_id = style_element.get(f'{{{namespace["w"]}}}val', '') if style_element is not None else ''
+        style = styles.get(style_id, style_id)
+        num_element = item.find('./w:pPr/w:numPr', namespace)
+        num_id, level = _docx_numbering_info(num_element, namespace)
+        has_explicit_numbering = (num_id, level) in numbering
+        is_heading = _is_docx_major_heading(style)
+        if is_heading:
+            section_index += 1
+            section_child_index = 0
+            section_subchild_index = 0
+            section_subsubchild_index = 0
+            prefix = f'{_roman(section_index)}. '
+            lines.append(f'# {prefix}{text}')
+        elif _is_docx_bullet_style(style) and num_id is None:
+            lines.append(f'- {text}')
+        elif has_explicit_numbering and level == 0 and _is_docx_numbered_heading(style, text):
+            section_child_index += 1
+            section_subchild_index = 0
+            section_subsubchild_index = 0
+            lines.append(f'## {section_child_index}. {text}')
+        elif has_explicit_numbering and level == 1 and _is_docx_numbered_heading(style, text):
+            section_subchild_index += 1
+            section_subsubchild_index = 0
+            lines.append(f'### {section_child_index}.{section_subchild_index}. {text}')
+        elif has_explicit_numbering and level == 2 and _is_docx_inline_number(style, item, namespace):
+            section_subsubchild_index += 1
+            lines.append(
+                f'{section_child_index}.{section_subchild_index}.{section_subsubchild_index}. '
+                f'{_docx_inline_markdown(item, namespace)}'
+                f'{_DOCX_NO_PARAGRAPH_GAP if _docx_spacing_after_is_zero(item, namespace) else ""}'
+            )
+        elif _is_docx_subheading(text, style, num_id, level):
+            section_child_index += 1
+            section_subchild_index = 0
+            section_subsubchild_index = 0
+            lines.append(f'## {section_child_index}. {text}')
+        else:
+            lines.append(_docx_inline_markdown(item, namespace))
         paragraph_count += 1
 
     if not lines:
         raise RuntimeError('DOCX fallback extraction produced no text')
 
-    markdown = '\n\n'.join(lines)
+    markdown = '\n\n'.join(lines).replace(f'{_DOCX_NO_PARAGRAPH_GAP}\n\n', '  \n')
     return markdown, paragraph_count
+
+
+_DOCX_NO_PARAGRAPH_GAP = '\x00DOCX_NO_PARAGRAPH_GAP\x00'
+
+
+def _load_docx_styles(source: Path, namespace: dict[str, str]) -> dict[str, str]:
+    styles: dict[str, str] = {}
+    with zipfile.ZipFile(source, 'r') as archive:
+        try:
+            root = ET.fromstring(archive.read('word/styles.xml'))
+        except KeyError:
+            return styles
+    key = f'{{{namespace["w"]}}}val'
+    style_key = f'{{{namespace["w"]}}}styleId'
+    for style in root.findall('./w:style', namespace):
+        style_id = style.get(style_key)
+        name = style.find('./w:name', namespace)
+        if style_id and name is not None:
+            styles[style_id] = name.get(key, style_id)
+    return styles
+
+
+def _load_docx_numbering(source: Path, namespace: dict[str, str]) -> dict[tuple[str, int], str]:
+    numbering: dict[tuple[str, int], str] = {}
+    with zipfile.ZipFile(source, 'r') as archive:
+        try:
+            root = ET.fromstring(archive.read('word/numbering.xml'))
+        except KeyError:
+            return numbering
+
+    abstract_formats: dict[tuple[str, int], tuple[str, str]] = {}
+    for abstract in root.findall('./w:abstractNum', namespace):
+        abstract_id = abstract.get(f'{{{namespace["w"]}}}abstractNumId', '')
+        for level in abstract.findall('./w:lvl', namespace):
+            ilvl = int(level.get(f'{{{namespace["w"]}}}ilvl', '0'))
+            fmt = level.find('./w:numFmt', namespace)
+            text = level.find('./w:lvlText', namespace)
+            abstract_formats[(abstract_id, ilvl)] = (
+                fmt.get(f'{{{namespace["w"]}}}val', 'decimal') if fmt is not None else 'decimal',
+                text.get(f'{{{namespace["w"]}}}val', '%1.') if text is not None else '%1.',
+            )
+    for num in root.findall('./w:num', namespace):
+        num_id = num.get(f'{{{namespace["w"]}}}numId', '')
+        abstract = num.find('./w:abstractNumId', namespace)
+        abstract_id = abstract.get(f'{{{namespace["w"]}}}val', '') if abstract is not None else ''
+        for (mapped_abstract, level), (fmt, pattern) in abstract_formats.items():
+            if mapped_abstract == abstract_id:
+                numbering[(num_id, level)] = f'{fmt}:{pattern}'
+    return numbering
+
+
+def _docx_numbering_info(num_element, namespace: dict[str, str]) -> tuple[str | None, int]:
+    if num_element is None:
+        return None, 0
+    key = f'{{{namespace["w"]}}}val'
+    num_id = num_element.find('./w:numId', namespace)
+    level = num_element.find('./w:ilvl', namespace)
+    return (
+        num_id.get(key) if num_id is not None else None,
+        int(level.get(key, '0')) if level is not None else 0,
+    )
+
+
+def _docx_spacing_after_is_zero(paragraph, namespace: dict[str, str]) -> bool:
+    spacing = paragraph.find('./w:pPr/w:spacing', namespace)
+    if spacing is None:
+        return False
+    value = spacing.get(f'{{{namespace["w"]}}}after')
+    return value in {'0', '0.0'}
+
+
+def _is_docx_major_heading(style: str) -> bool:
+    normalized = style.lower().replace('ü', 'u')
+    return 'heading' in normalized or 'berschrift' in normalized
+
+
+def _is_docx_numbered_heading(style: str, text: str) -> bool:
+    normalized = style.lower().replace('ä', 'a').replace('ö', 'o').replace('ü', 'u')
+    return ('list' in normalized or 'aufzahlung' in normalized or 'aufzaehlung' in normalized) and len(text) < 160
+
+
+def _is_docx_inline_number(style: str, paragraph, namespace: dict[str, str]) -> bool:
+    return _is_docx_numbered_heading(style, _docx_paragraph_text(paragraph, namespace))
+
+
+def _is_docx_bullet_style(style: str) -> bool:
+    normalized = style.lower().replace('ü', 'u')
+    return any(token in normalized for token in ('bullet', 'bullets', 'spiegelstrich', 'bulletpoint'))
+
+
+def _docx_number_prefix(
+    num_id: str,
+    level: int,
+    numbering: dict[tuple[str, int], str],
+    counters: dict[tuple[str, int], int],
+) -> str:
+    for previous_level in range(level + 1):
+        key = (num_id, previous_level)
+        if previous_level == level:
+            counters[key] = counters.get(key, 0) + 1
+        elif key not in counters:
+            counters[key] = 1
+    counters = {key: value for key, value in counters.items() if key[0] != num_id or key[1] <= level}
+    definition = numbering.get((num_id, level), 'decimal:%1.')
+    fmt, pattern = definition.split(':', 1)
+    values = [counters.get((num_id, index), 1) for index in range(level + 1)]
+    prefix = pattern
+    for index, value in enumerate(values, start=1):
+        replacement = _format_docx_number(value, fmt if index == level + 1 else 'decimal')
+        prefix = prefix.replace(f'%{index}', replacement)
+    return prefix
+
+
+def _format_docx_number(value: int, fmt: str) -> str:
+    if fmt == 'lowerLetter':
+        return chr(ord('a') + value - 1)
+    if fmt == 'lowerRoman':
+        numerals = ((1000, 'm'), (900, 'cm'), (500, 'd'), (400, 'cd'), (100, 'c'), (90, 'xc'), (50, 'l'), (40, 'xl'), (10, 'x'), (9, 'ix'), (5, 'v'), (4, 'iv'), (1, 'i'))
+        result = ''
+        for unit, numeral in numerals:
+            result += numeral * (value // unit)
+            value %= unit
+        return result
+    return str(value)
+
+
+def _roman(value: int) -> str:
+    return _format_docx_number(value, 'lowerRoman').upper()
+
+
+def _is_docx_subheading(text: str, style: str, num_id: str | None, level: int) -> bool:
+    return _is_docx_numbered_heading(style, text) and num_id is None and len(text) < 100
+
+
+def _docx_paragraph_text(paragraph, namespace: dict[str, str]) -> str:
+    raw_text = ''.join(_iter_docx_text_nodes(paragraph))
+    text = '\n'.join(re.sub(r'[ \t]+', ' ', line).strip() for line in raw_text.splitlines()).strip()
+    text = text.replace('\n', '  \n')
+    return text
+
+
+def _docx_inline_markdown(paragraph, namespace: dict[str, str]) -> str:
+    parts: list[str] = []
+    for run in paragraph.findall('./w:r', namespace):
+        tokens: list[str] = []
+        for node in run.iter():
+            local_name = node.tag.rsplit('}', 1)[-1]
+            if local_name == 't':
+                tokens.append(node.text or '')
+            elif local_name == 'tab':
+                tokens.append(' ')
+            elif local_name == 'br':
+                tokens.append('\n')
+        raw_text = ''.join(tokens)
+        text = '\n'.join(re.sub(r'[ \t]+', ' ', line) for line in raw_text.split('\n'))
+        if not text:
+            continue
+        bold_element = run.find('./w:rPr/w:b', namespace)
+        bold = bold_element is not None and bold_element.get(
+            f'{{{namespace["w"]}}}val', 'true'
+        ) not in {'0', 'false', 'off'}
+        fonts = run.find('./w:rPr/w:rFonts', namespace)
+        if fonts is not None:
+            font_names = ' '.join(fonts.attrib.values()).lower()
+            bold = bold or 'semibold' in font_names or 'bold' in font_names
+        if bold:
+            leading = text[: len(text) - len(text.lstrip())]
+            trailing = text[len(text.rstrip()) :]
+            parts.append(f'{leading}**{text.strip()}**{trailing}')
+        else:
+            parts.append(text)
+    return ''.join(parts).replace('\n', '  \n').strip() or _docx_paragraph_text(paragraph, namespace)
+
+
+def _docx_table_to_markdown(table, namespace: dict[str, str]) -> str:
+    rows: list[list[str]] = []
+    for row in table.findall('./w:tr', namespace):
+        cells = []
+        for cell in row.findall('./w:tc', namespace):
+            value = _docx_paragraph_text(cell, namespace).replace('|', '\\|')
+            cells.append(value)
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return ''
+    width = max(len(row) for row in rows)
+    rows = [row + [''] * (width - len(row)) for row in rows]
+    rendered = ['| ' + ' | '.join(rows[0]) + ' |', '| ' + ' | '.join(['---'] * width) + ' |']
+    rendered.extend('| ' + ' | '.join(row) + ' |' for row in rows[1:])
+    return '\n'.join(rendered)
+
+
+def _docx_textbox_markdown(paragraph, namespace: dict[str, str]) -> list[str]:
+    """Extract the visible paragraph structure from an embedded Word text box."""
+    lines: list[str] = []
+    key = f'{{{namespace["w"]}}}val'
+
+    def visit(element, inside_choice: bool = False) -> None:
+        local_name = element.tag.rsplit('}', 1)[-1]
+        if local_name == 'Fallback':
+            return
+        if local_name == 'Choice':
+            inside_choice = True
+        if local_name == 'txbxContent' and inside_choice:
+            for child in element.findall('./w:p', namespace):
+                style_element = child.find('./w:pPr/w:pStyle', namespace)
+                style = style_element.get(key, '') if style_element is not None else ''
+                text = _docx_paragraph_text(child, namespace)
+                if not text:
+                    continue
+                if style == 'KastenAVBberschrift':
+                    lines.append(f'# {text}')
+                elif style == 'KastenAVBFlietext' and child.find('.//w:rPr/w:rFonts', namespace) is not None:
+                    lines.append(f'**{text}**')
+                else:
+                    lines.append(text)
+            return
+        for child in element:
+            visit(child, inside_choice)
+
+    visit(paragraph)
+    return lines
+
+
+def _iter_docx_text_nodes(element):
+    """Yield DOCX text nodes once, excluding duplicate AlternateContent fallbacks."""
+    for child in element:
+        local_name = child.tag.rsplit('}', 1)[-1]
+        if local_name == 'Fallback':
+            continue
+        if local_name == 't':
+            yield child.text or ''
+            continue
+        if local_name == 'br':
+            yield '\n'
+            continue
+        yield from _iter_docx_text_nodes(child)
 
 
 def _clean_block_text(value: str) -> str:
@@ -780,6 +1085,7 @@ def update_paddle_settings(*, default_profile: str, timeout_seconds: int) -> Non
 
 def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
     profile_order = [
+        'no_profile',
         'ppocrv6_tiny',
         'ppocrv6_tiny_structurev3',
         'ppocrv6_small',
@@ -805,6 +1111,69 @@ def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
     return requested_profile, _PADDLE_PROFILES[requested_profile]
 
 
+def _convert_with_native_extractors(
+    source: Path,
+    *,
+    selected_profile_id: str,
+    selected_profile: dict[str, str],
+    capability: dict,
+    fallback_reason: str,
+    used_fallback: bool,
+) -> tuple[str, dict]:
+    suffix = source.suffix.lower()
+
+    if suffix == '.pdf':
+        markdown = _fallback_pdf_to_markdown(source)
+        page_count = _pdf_page_count(source)
+        quality_gate = evaluate_document_quality(markdown)
+        return markdown, {
+            'engine': 'pypdf-native' if not used_fallback else 'pypdf-fallback',
+            'used_fallback': used_fallback,
+            'fallback_reason': fallback_reason,
+            'profile_id': selected_profile_id,
+            'profile_label': selected_profile['label'],
+            'page_count': page_count,
+            'quality_gate': quality_gate,
+            **capability,
+        }
+
+    if suffix in {'.xls', '.xlsx'}:
+        markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+        quality_gate = evaluate_document_quality(markdown) 
+        return markdown, {
+            'engine': 'spreadsheet-native' if not used_fallback else 'spreadsheet-fallback',
+            'used_fallback': used_fallback,
+            'fallback_reason': fallback_reason,
+            'profile_id': selected_profile_id,
+            'profile_label': selected_profile['label'],
+            'page_count': max(1, sheet_count),
+            'sheet_count': sheet_count,
+            'row_count': row_count,
+            'quality_gate': quality_gate,
+            **capability,
+        }
+
+    if suffix == '.docx':
+        markdown, paragraph_count = _fallback_docx_to_markdown(source)
+        quality_gate = evaluate_document_quality(markdown)
+        return markdown, {
+            'engine': 'docx-native' if not used_fallback else 'docx-fallback',
+            'used_fallback': used_fallback,
+            'fallback_reason': fallback_reason,
+            'profile_id': selected_profile_id,
+            'profile_label': selected_profile['label'],
+            'page_count': 1,
+            'paragraph_count': paragraph_count,
+            'quality_gate': quality_gate,
+            **capability,
+        }
+
+    raise RuntimeError(
+        'Native extraction supports only .pdf, .docx, .xls, and .xlsx. '
+        'Use an OCR profile for images and other formats.'
+    )
+
+
 def convert_to_markdown_with_details(
     input_path: str,
     profile_id: str | None = None,
@@ -817,51 +1186,25 @@ def convert_to_markdown_with_details(
     selected_profile_id, selected_profile = _resolve_profile(profile_id)
     capability = _runtime_capability()
 
+    if selected_profile_id == 'no_profile':
+        return _convert_with_native_extractors(
+            source,
+            selected_profile_id=selected_profile_id,
+            selected_profile=selected_profile,
+            capability=capability,
+            fallback_reason='OCR disabled by profile selection',
+            used_fallback=False,
+        )
+
     if not _paddleocr_available():
-        if source.suffix.lower() == '.pdf':
-            markdown = _fallback_pdf_to_markdown(source)
-            page_count = _pdf_page_count(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'pypdf-fallback',
-                'used_fallback': True,
-                'fallback_reason': 'PaddleOCR is not installed in this worker image',
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': page_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() in {'.xls', '.xlsx'}:
-            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'spreadsheet-fallback',
-                'used_fallback': True,
-                'fallback_reason': 'PaddleOCR is not installed in this worker image',
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': max(1, sheet_count),
-                'sheet_count': sheet_count,
-                'row_count': row_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() == '.docx':
-            markdown, paragraph_count = _fallback_docx_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'docx-fallback',
-                'used_fallback': True,
-                'fallback_reason': 'PaddleOCR is not installed in this worker image',
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': 1,
-                'paragraph_count': paragraph_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        raise RuntimeError('PaddleOCR is not installed in this worker image')
+        return _convert_with_native_extractors(
+            source,
+            selected_profile_id=selected_profile_id,
+            selected_profile=selected_profile,
+            capability=capability,
+            fallback_reason='PaddleOCR is not installed in this worker image',
+            used_fallback=True,
+        )
 
     try:
         selected_pipeline = selected_profile.get('pipeline', 'ppstructurev3')
@@ -909,50 +1252,14 @@ def convert_to_markdown_with_details(
             **capability,
         }
     except Exception as exc:
-        if source.suffix.lower() == '.pdf':
-            markdown = _fallback_pdf_to_markdown(source)
-            page_count = _pdf_page_count(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'pypdf-fallback',
-                'used_fallback': True,
-                'fallback_reason': str(exc),
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': page_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() in {'.xls', '.xlsx'}:
-            markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'spreadsheet-fallback',
-                'used_fallback': True,
-                'fallback_reason': str(exc),
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': max(1, sheet_count),
-                'sheet_count': sheet_count,
-                'row_count': row_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        if source.suffix.lower() == '.docx':
-            markdown, paragraph_count = _fallback_docx_to_markdown(source)
-            quality_gate = evaluate_document_quality(markdown)
-            return markdown, {
-                'engine': 'docx-fallback',
-                'used_fallback': True,
-                'fallback_reason': str(exc),
-                'profile_id': selected_profile_id,
-                'profile_label': selected_profile['label'],
-                'page_count': 1,
-                'paragraph_count': paragraph_count,
-                'quality_gate': quality_gate,
-                **capability,
-            }
-        raise
+        return _convert_with_native_extractors(
+            source,
+            selected_profile_id=selected_profile_id,
+            selected_profile=selected_profile,
+            capability=capability,
+            fallback_reason=str(exc),
+            used_fallback=True,
+        )
 
 
 def convert_to_markdown(input_path: str, profile_id: str | None = None) -> str:

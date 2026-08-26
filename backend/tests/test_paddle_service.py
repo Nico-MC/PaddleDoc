@@ -130,6 +130,31 @@ def test_convert_to_markdown_falls_back_to_docx_when_paddle_missing(monkeypatch,
     assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 
+def test_target_docx_preserves_native_structure():
+    candidates = [
+        Path(__file__).resolve().parents[2] / 'docs' / 'TypischeDokumente' / 'AZS 2512[87].docx',
+        Path('/app/docs/TypischeDokumente/AZS 2512[87].docx'),
+    ]
+    source = next((candidate for candidate in candidates if candidate.exists()), None)
+    if source is None:
+        pytest.skip('Target DOCX fixture is not available')
+
+    markdown, paragraph_count = paddle_service._fallback_docx_to_markdown(source)
+
+    assert paragraph_count > 100
+    assert markdown.count('# Tarif AZS') == 1
+    assert '**für ambulante und zahnärztliche Heilbehandlung**' in markdown
+    assert '1.5.2. Sehhilfen.' in markdown
+    assert '1.5.3. Sehschärfenkorrektur mittels Lasertechnologie.' in markdown
+
+    section_start = markdown.index('### 1.6. Digitale Gesundheitsanwendungen')
+    section_end = markdown.index('### 1.7.', section_start)
+    section = markdown[section_start:section_end]
+    assert section.count('\n- ') == 3
+    assert '## 2. durch vorherige' not in section
+    assert '- Die digitalen Gesundheitsanwendungen müssen' not in section
+
+
 def test_non_pdf_uses_paddle_profile(monkeypatch, tmp_path):
     source = tmp_path / 'sample.docx'
     source.write_bytes(b'test')
