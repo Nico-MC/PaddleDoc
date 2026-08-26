@@ -18,10 +18,27 @@ spec:
         {{- include "paddledoc.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: redis
     spec:
+      {{- with .Values.redis.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
           imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          {{- with .Values.redis.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if include "paddledoc.redisAuthEffective" . }}
+          command: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379

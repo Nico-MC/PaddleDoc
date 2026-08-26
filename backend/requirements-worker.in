@@ -1,0 +1,15 @@
+# Direct extra dependencies of the worker image (see worker.Dockerfile).
+# The pinned + hashed lock lives in requirements-worker.txt. Regenerate it
+# from the backend/ directory with (linux/amd64 matches the published image):
+#
+#   docker run --rm --platform linux/amd64 -v "$PWD":/work python:3.13-slim sh -c \
+#     "pip install -q pip-tools && cd /work && pip-compile requirements-worker.in \
+#        -o requirements-worker.txt --generate-hashes --allow-unsafe --no-strip-extras"
+#
+# paddleocr is intentionally left unpinned here: pip resolves the newest
+# internally consistent release into the lock (currently 3.7.0 — 3.7.x metadata
+# conflicts with paddlex on pyyaml, so strict resolvers may need backtracking).
+# Review major version bumps in the lock diff deliberately.
+onnxruntime==1.28.0
+pypdfium2==5.13.0
+paddleocr[doc-parser]

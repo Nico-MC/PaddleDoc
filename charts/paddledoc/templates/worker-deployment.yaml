@@ -2,6 +2,7 @@
 {{- if not .Values.database.useExternal }}
 {{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
 {{- end }}
+{{- include "paddledoc.requireSecretKey" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,6 +12,16 @@ metadata:
     app.kubernetes.io/component: worker
 spec:
   replicas: {{ ternary .Values.autoscaling.worker.minReplicas .Values.worker.replicaCount .Values.autoscaling.worker.enabled }}
+  {{- if .Values.worker.updateStrategy }}
+  strategy:
+    {{- toYaml .Values.worker.updateStrategy | nindent 4 }}
+  {{- else if and .Values.worker.modelCache.enabled .Values.worker.modelCache.persistence.enabled (not (has "ReadWriteMany" .Values.worker.modelCache.persistence.accessModes)) }}
+  # With a ReadWriteOnce model-cache PVC the default RollingUpdate wedges
+  # upgrades on attach-limited storage (EBS): the surge pod on another node
+  # can never attach the volume, so the old pod is never terminated.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "paddledoc.selectorLabels" . | nindent 6 }}
@@ -33,10 +44,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.worker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          {{- with .Values.worker.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: DATABASE_PASSWORD
               valueFrom:
@@ -47,26 +66,128 @@ spec:
               value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
             - name: DATABASE_SCHEMA
               value: {{ .Values.database.schema | quote }}
-            - name: REDIS_URL
+            {{- if include "paddledoc.secretKeyEffective" . }}
+            # The worker imports app/core/config.py (directly, and via
+            # alembic/env.py if it ever ran migrations) same as the backend,
+            # which fails fast at import time if SECRET_KEY is unset for a
+            # non-sqlite database -- set here for parity even though the
+            # worker itself doesn't sign anything today.
+            - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledoc.fullname" . }}-env
-                  key: REDIS_URL
+                  name: {{ include "paddledoc.secretKeySecretName" . }}
+                  key: {{ include "paddledoc.secretKeySecretKey" . }}
+            {{- end }}
+            {{- if include "paddledoc.redisAuthEffective" . }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "paddledoc.redisUrl" . | quote }}
             - name: PADDLE_DEFAULT_PROFILE
               value: {{ .Values.worker.paddleDefaultProfile | quote }}
+            {{- if .Values.worker.modelCache.enabled }}
+            - name: HOME
+              value: /home/paddledoc
+            {{- end }}
+            - name: CELERY_TASK_SOFT_TIME_LIMIT_SECONDS
+              value: {{ .Values.worker.celery.taskSoftTimeLimitSeconds | quote }}
+            - name: CELERY_TASK_TIME_LIMIT_SECONDS
+              value: {{ .Values.worker.celery.taskTimeLimitSeconds | quote }}
+            - name: CELERY_BROKER_VISIBILITY_TIMEOUT_SECONDS
+              value: {{ .Values.worker.celery.visibilityTimeoutSeconds | quote }}
+            - name: WORKER_LOG_CAPTURE_LEVEL
+              value: {{ .Values.worker.log.captureLevel | quote }}
+            - name: WORKER_LOG_RETENTION_MAX_ROWS
+              value: {{ .Values.worker.log.retentionMaxRows | int64 | quote }}
+            {{- if .Values.mail.maxMessageBytes }}
+            # Mail ingestion itself runs entirely in the backend process; set
+            # here only for parity with SECRET_KEY above -- the worker
+            # imports the same app/core/config.py module and this setting is
+            # otherwise inert on this side.
+            - name: MAX_MAIL_MESSAGE_BYTES
+              value: {{ .Values.mail.maxMessageBytes | quote }}
+            {{- end }}
+            # Confluence import: the crawl (and its outbound egress) runs on
+            # this worker, so it needs the same IMPORT_* settings as the
+            # backend. Credential decryption additionally relies on the
+            # SECRET_KEY env already set above.
+            - name: IMPORT_ENABLED
+              value: {{ .Values.importer.enabled | quote }}
+            - name: IMPORT_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.importer.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 20971520 as "2.097152e+07", which the app's int
+            # settings reject.
+            - name: IMPORT_MAX_PAGES
+              value: {{ .Values.importer.maxPages | int64 | quote }}
+            - name: IMPORT_ATTACHMENT_MAX_BYTES
+              value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
+            - name: IMPORT_RUN_MAX_TOTAL_BYTES
+              value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
+            - name: OPENWEBUI_ENABLED
+              value: {{ .Values.openwebui.enabled | quote }}
+            - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            # Webhook delivery: the deliver_webhook task runs on this worker,
+            # so it needs the same WEBHOOK_* settings as the backend. The
+            # pending-cap is also enforced here, not just by the backend's
+            # POST /webhooks/send -- app/workers/webhook_tasks.py's
+            # _dispatch() (the automatic job.finished/job.failed/
+            # import_run.finished hooks) checks the same cap before creating
+            # a delivery, and that runs in this worker process.
+            - name: WEBHOOKS_ENABLED
+              value: {{ .Values.webhooks.enabled | quote }}
+            - name: WEBHOOK_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.webhooks.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 50 as "5e+01", which the app's int settings
+            # reject.
+            - name: WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER
+              value: {{ .Values.webhooks.maxPendingPerUser | int64 | quote }}
+            # `openai_vision` profile: the outbound call to the VL endpoint is
+            # made here.
+            - name: VL_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.vl.privateHostAllowlist | toJson | quote }}
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: shared-storage
               mountPath: /app/backend/storage
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
+            {{- if .Values.worker.modelCache.enabled }}
+            - name: model-cache
+              mountPath: /home/paddledoc
+            {{- end }}
       volumes:
+        # Always mount shared-storage: the worker runs as non-root and cannot
+        # create /app/backend/storage inside the root-owned image filesystem.
         - name: shared-storage
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-storage" (include "paddledoc.fullname" .)) .Values.persistence.existingClaim }}
-      {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.worker.modelCache.enabled }}
+        - name: model-cache
+          {{- if .Values.worker.modelCache.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-worker-model-cache" (include "paddledoc.fullname" .)) .Values.worker.modelCache.persistence.existingClaim }}
+          {{- else }}
+          emptyDir:
+            {{- if .Values.worker.modelCache.sizeLimit }}
+            sizeLimit: {{ .Values.worker.modelCache.sizeLimit }}
+            {{- else }}
+            {}
+            {{- end }}
+          {{- end }}
+        {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -30,6 +30,11 @@ class CollectionResponse(BaseModel):
 
 class CollectionStartRequest(BaseModel):
     profile_id: str = Field(min_length=1)
+    # Delivery target for every job started in this batch (job.finished /
+    # job.failed); None = no webhook. Validated against the caller's own
+    # enabled connections once, up front, in start_collection_processing --
+    # see app/api/routes.py's _validated_webhook_connection.
+    webhook_connection_id: str | None = Field(default=None, min_length=1)
 
 
 class CollectionStartResponse(BaseModel):
@@ -42,11 +47,25 @@ class JobSaveRequest(BaseModel):
     markdown: str = Field(min_length=1)
 
 
+class JobRestartRequest(BaseModel):
+    profile_id: str | None = None
+
+
 class JobSaveResponse(BaseModel):
     job_id: str
     version: int
-    path: str
+    # Editor versions are now stored as job_markdown_versions rows rather
+    # than on-disk '.v{n}.md' files (no shared volume between backend and
+    # worker), so there is no longer a filesystem path to report here.
+    path: str | None = None
     updated_at: datetime
+
+
+class JobOwner(BaseModel):
+    id: str
+    username: str
+
+    model_config = {'from_attributes': True}
 
 
 class JobResponse(BaseModel):
@@ -56,8 +75,14 @@ class JobResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     error_message: str | None = None
     processing_info: dict | None = None
+    content_sha256: str | None = None
+    document_version: int = 1
+    previous_job_id: str | None = None
+    benchmark_run_id: str | None = None
     created_at: datetime
     updated_at: datetime
+    # None for legacy jobs (owner_id IS NULL) -- see Job.owner_id / _owner_visible.
+    owner: JobOwner | None = None
 
 
 class JobListResponse(BaseModel):
@@ -66,6 +91,20 @@ class JobListResponse(BaseModel):
 
 class JobSearchResponse(JobListResponse):
     total: int
+
+
+class JobVersionEntry(BaseModel):
+    job_id: str
+    document_version: int
+    content_sha256: str | None = None
+    status: JobStatus
+    created_at: datetime
+    uploaded_by: str | None = None
+    is_current: bool
+
+
+class JobVersionsResponse(BaseModel):
+    items: list[JobVersionEntry]
 
 
 class DashboardStatsResponse(BaseModel):
@@ -119,6 +158,11 @@ class PaddleOption(BaseModel):
     value: str
     label: str
     description: str
+    # 'ocr' for the static presets, 'vl' for a dynamic 'vl:<connection_id>'
+    # entry (one per enabled VlConnection) -- see
+    # paddle_service.get_paddle_capabilities. Defaulted for forward
+    # compatibility, though the service always sets it explicitly now.
+    kind: str = 'ocr'
     text_detection_model_name: str | None = None
     text_recognition_model_name: str | None = None
 

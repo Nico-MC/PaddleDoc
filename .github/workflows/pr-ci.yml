@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+  # Erlaubt den Publish-Workflows, diese Checks als Release-Gate aufzurufen.
+  workflow_call:
 
 permissions:
   contents: read
@@ -16,10 +18,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: npm
@@ -27,6 +29,12 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+        working-directory: frontend
+
+      # Fails the build on a known-vulnerable dependency instead of leaving it
+      # to whoever happens to run `npm audit` by hand.
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
         working-directory: frontend
 
       - name: Lint frontend
@@ -43,20 +51,27 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
       - name: Install backend dependencies
-        run: python -m pip install -r backend/requirements.txt
+        run: python -m pip install --require-hashes -r backend/requirements.txt
 
       - name: Run backend test suite
         run: pytest -q backend/tests
+
+      # Same intent as the frontend audit: a CVE in a pinned dependency should
+      # turn the build red, not wait to be noticed.
+      - name: Audit backend dependencies
+        run: |
+          python -m pip install pip-audit==2.10.1
+          pip-audit --strict --requirement backend/requirements.txt
 
   build-checks:
     name: Compose + Image + Chart Build Checks
@@ -64,7 +79,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The compose files have no fallback secrets any more, so generate a
+      # throwaway set first. Doubles as a smoke test for the script itself.
+      - name: Generate throwaway secrets
+        run: ./scripts/init-env.sh
 
       - name: Validate docker-compose files
         run: |
@@ -80,9 +100,24 @@ jobs:
       - name: Install Helm
         run: |
           curl -fsSL https://get.helm.sh/helm-v3.16.2-linux-amd64.tar.gz -o helm.tgz
+          echo "9318379b847e333460d33d291d4c088156299a26cd93d570a7f5d0c36e50b5bb  helm.tgz" | sha256sum -c -
           tar -xzf helm.tgz
           sudo mv linux-amd64/helm /usr/local/bin/helm
           helm version --short
 
       - name: Lint Helm chart
         run: helm lint charts/paddledoc
+
+      - name: Render Helm chart
+        run: |
+          helm template test charts/paddledoc \
+            -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml \
+            --set auth.secretKey.value=ci-render-check-secret > /dev/null
+
+      - name: Render Helm chart fails without SECRET_KEY
+        run: |
+          if helm template test charts/paddledoc \
+               -f charts/paddledoc/examples/nas-cpu-external-postgres.yaml > /dev/null 2>&1; then
+            echo "expected render to fail when auth.required=true and no SECRET_KEY is set"
+            exit 1
+          fi

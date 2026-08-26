@@ -1,9 +1,9 @@
-import { PaddleDashboard } from '@/components/paddle-dashboard';
+import { HomeDashboard } from '@/components/dashboard/home-dashboard';
 
 export default function Home() {
   return (
     <main className="min-h-screen">
-      <PaddleDashboard view="home" />
+      <HomeDashboard />
     </main>
   );
 }

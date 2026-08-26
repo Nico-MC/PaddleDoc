@@ -2,6 +2,7 @@
 {{- if not .Values.database.useExternal }}
 {{- fail "database.useExternal must be true. This chart supports only external PostgreSQL." }}
 {{- end }}
+{{- include "paddledoc.requireSecretKey" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,10 +34,18 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.backend.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: backend
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
           imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          {{- with .Values.backend.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8000
@@ -51,15 +60,71 @@ spec:
               value: postgresql+psycopg://{{ required "database.user is required" .Values.database.user }}:$(DATABASE_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ required "database.database is required" .Values.database.database }}
             - name: DATABASE_SCHEMA
               value: {{ .Values.database.schema | quote }}
-            - name: REDIS_URL
+            {{- if include "paddledoc.redisAuthEffective" . }}
+            - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "paddledoc.fullname" . }}-env
-                  key: REDIS_URL
+                  name: {{ include "paddledoc.redisAuthSecretName" . }}
+                  key: {{ include "paddledoc.redisAuthSecretKey" . }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "paddledoc.redisUrl" . | quote }}
             - name: CORS_ORIGINS
               value: {{ .Values.backend.corsOrigins | quote }}
+            - name: TRUSTED_PROXY_IPS
+              value: {{ .Values.backend.trustedProxyIps | quote }}
+            - name: TRUSTED_PROXY_HOPS
+              value: {{ .Values.backend.trustedProxyHops | quote }}
+            {{- if include "paddledoc.secretKeyEffective" . }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paddledoc.secretKeySecretName" . }}
+                  key: {{ include "paddledoc.secretKeySecretKey" . }}
+            {{- end }}
+            - name: PUBLIC_API_URL
+              value: {{ include "paddledoc.publicApiUrl" . | quote }}
             - name: RUN_ALEMBIC_ON_STARTUP
               value: {{ .Values.backend.runAlembicOnStartup | quote }}
+            {{- if .Values.backend.maxUploadBytes }}
+            - name: MAX_UPLOAD_BYTES
+              value: {{ .Values.backend.maxUploadBytes | quote }}
+            {{- end }}
+            {{- if .Values.mail.maxMessageBytes }}
+            - name: MAX_MAIL_MESSAGE_BYTES
+              value: {{ .Values.mail.maxMessageBytes | quote }}
+            {{- end }}
+            - name: IMPORT_ENABLED
+              value: {{ .Values.importer.enabled | quote }}
+            - name: IMPORT_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.importer.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 20971520 as "2.097152e+07", which the app's int
+            # settings reject.
+            - name: IMPORT_MAX_PAGES
+              value: {{ .Values.importer.maxPages | int64 | quote }}
+            - name: IMPORT_ATTACHMENT_MAX_BYTES
+              value: {{ .Values.importer.attachmentMaxBytes | int64 | quote }}
+            - name: IMPORT_RUN_MAX_TOTAL_BYTES
+              value: {{ .Values.importer.runMaxTotalBytes | int64 | quote }}
+            - name: OPENWEBUI_ENABLED
+              value: {{ .Values.openwebui.enabled | quote }}
+            - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            - name: WEBHOOKS_ENABLED
+              value: {{ .Values.webhooks.enabled | quote }}
+            - name: WEBHOOK_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.webhooks.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 50 as "5e+01", which the app's int settings
+            # reject.
+            - name: WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER
+              value: {{ .Values.webhooks.maxPendingPerUser | int64 | quote }}
+            # Admin "test VL connection" probe (POST /auth/admin/vl-connections/
+            # {id}/test) runs here; the OCR call using the same endpoint runs
+            # on the worker, which sets this too.
+            - name: VL_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.vl.privateHostAllowlist | toJson | quote }}
           livenessProbe:
             httpGet:
               path: /api/v1/health
@@ -74,17 +139,19 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
-          {{- if .Values.persistence.enabled }}
           volumeMounts:
             - name: shared-storage
               mountPath: /app/backend/storage
-          {{- end }}
-      {{- if .Values.persistence.enabled }}
       volumes:
+        # Always mount shared-storage: the backend runs as non-root and cannot
+        # create /app/backend/storage inside the root-owned image filesystem.
         - name: shared-storage
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-storage" (include "paddledoc.fullname" .)) .Values.persistence.existingClaim }}
-      {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.backend.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

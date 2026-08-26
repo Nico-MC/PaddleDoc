@@ -7,7 +7,11 @@ __pycache__/
 .env
 venv/
 backend/.venv/
+test.db
 backend/test.db
+# Running pytest from inside backend/ resolves the relative UPLOADS_DIR/
+# RESULTS_DIR against that directory, so test runs leave a nested copy.
+backend/backend/
 backend/storage/uploads/*
 backend/storage/results/*
 backend/storage/mlflow/*
@@ -23,3 +27,7 @@ pictures/
 _out.txt
 
 docs/TypischeDokumente
+backend/paddledoc.db
+
+# Local UI mockup (published as a Claude artifact, not part of releases)
+docs/ui-mockup.html

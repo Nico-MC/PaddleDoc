@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Was jede Schicht abfängt — und was übrig bleibt</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f8fafc;
+      --color-ink:     #0f172a;
+      --color-muted:   #475569;
+      --color-accent:  #4f46e5;
+      --font-sans:     'Inter', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+    .frame { max-width: 1000px; width: 100%; }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+    svg { width: 100%; min-width: 900px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Kompensierende Schichten · Supply-Chain-Blueprint</p>
+    <h1>Was jede Schicht abfängt — und was übrig bleibt</h1>
+
+    <svg viewBox="0 0 1000 456" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="restrisiko-title restrisiko-desc">
+      <title id="restrisiko-title">Was jede Schicht abfängt — und was übrig bleibt</title>
+      <desc id="restrisiko-desc">Schichten-Diagramm der Risikokompensation: Die Bedrohung eines kompromittierten Zulieferers läuft an den fünf Maßnahmen M1 bis M5 vorbei; jede Schicht nennt, was sie blockiert und welcher Restpfad ihr entkommt, und mündet in ein explizites Restrisiko mit der zugehörigen Antwort — sorgfältiges Review sowie die Ausbaustufen Signierung und Tag-Schutz.</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#475569"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f46e5"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f8fafc"/>
+
+      <!-- Bedrohungs-Label oben -->
+      <text x="128" y="32" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">BEDROHUNG · KOMPROMITTIERTER ZULIEFERER</text>
+
+      <!-- Risikofaden (gestrichelt = Transit) — vor den Boxen gezeichnet -->
+      <path d="M112,40 V372 Q112,380 120,380 H156" fill="none" stroke="#475569" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+      <!-- Schichten-Silhouette -->
+      <rect x="160" y="48" width="760" height="280" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+      <line x1="160" y1="104" x2="920" y2="104" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+      <line x1="160" y1="160" x2="920" y2="160" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+      <line x1="160" y1="216" x2="920" y2="216" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+      <line x1="160" y1="272" x2="920" y2="272" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+
+      <!-- M1 -->
+      <rect x="172" y="64" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="182" y="73" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M1</text>
+      <text x="200" y="74" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Unveränderliche Verweise</text>
+      <text x="200" y="90" fill="#475569" font-size="10" font-family="'Inter', sans-serif">blockt umgehängte Versions-Etiketten</text>
+      <text x="908" y="82" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ENTKOMMT: SCHON VERGIFTETER PIN</text>
+
+      <!-- M2 -->
+      <rect x="172" y="120" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="182" y="129" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M2</text>
+      <text x="200" y="130" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Werkzeug-Prüfsummen</text>
+      <text x="200" y="146" fill="#475569" font-size="10" font-family="'Inter', sans-serif">blockt manipulierte Binär-Downloads</text>
+      <text x="908" y="138" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ENTKOMMT: FALSCHE HERSTELLER-SUMME</text>
+
+      <!-- M3 -->
+      <rect x="172" y="176" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="182" y="185" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M3</text>
+      <text x="200" y="186" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Hash-Lock</text>
+      <text x="200" y="202" fill="#475569" font-size="10" font-family="'Inter', sans-serif">blockt neue und ausgetauschte Paket-Artefakte, inkl. transitiver</text>
+      <text x="908" y="194" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ENTKOMMT: GIFT IM GELOCKTEN BAUM</text>
+
+      <!-- M4 -->
+      <rect x="172" y="232" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="182" y="241" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M4</text>
+      <text x="200" y="242" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Qualitäts-Gate</text>
+      <text x="200" y="258" fill="#475569" font-size="10" font-family="'Inter', sans-serif">blockt die Veröffentlichung ungeprüfter Stände</text>
+      <text x="908" y="250" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ENTKOMMT: TESTS SCHLAGEN NICHT AN</text>
+
+      <!-- M5 -->
+      <rect x="172" y="288" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="182" y="297" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M5</text>
+      <text x="200" y="298" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Review-Pflicht</text>
+      <text x="200" y="314" fill="#475569" font-size="10" font-family="'Inter', sans-serif">blockt die ungeprüfte Übernahme von Aktualisierungen</text>
+      <text x="908" y="306" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ENTKOMMT: UNGELESENES REVIEW</text>
+
+      <!-- Restrisiko (fokal) -->
+      <rect x="160" y="352" width="760" height="56" rx="6" fill="#f8fafc"/>
+      <rect x="160" y="352" width="760" height="56" rx="6" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1.2"/>
+      <text x="176" y="374" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif">Restrisiko</text>
+      <text x="176" y="392" fill="#475569" font-size="10" font-family="'Inter', sans-serif">Stände, die schon vor dem Einfrieren vergiftet waren · ungelesen bestätigte Reviews</text>
+      <text x="908" y="382" fill="#4f46e5" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.06em">ANTWORT: REVIEW-SORGFALT · SIGNIERUNG · TAG-SCHUTZ</text>
+
+      <!-- Legende -->
+      <line x1="30" y1="424" x2="970" y2="424" stroke="rgba(15,23,42,0.10)" stroke-width="0.8"/>
+      <text x="30" y="440" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGENDE</text>
+      <line x1="112" y1="436" x2="144" y2="436" stroke="#475569" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <text x="152" y="440" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">Risikopfad — wird pro Schicht schmaler, aber nie null</text>
+      <rect x="520" y="428" width="12" height="12" rx="2" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1"/>
+      <text x="540" y="440" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">Restrisiko + Antwort (fokal)</text>
+    </svg>
+  </div>
+</body>
+</html>

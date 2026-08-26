@@ -1,9 +1,9 @@
-import { PaddleDashboard } from '@/components/paddle-dashboard';
+import { ProcessingOverview } from '@/components/dashboard/processing-overview';
 
 export default function ProcessingPage() {
   return (
     <main className="min-h-screen">
-      <PaddleDashboard view="processing" />
+      <ProcessingOverview />
     </main>
   );
 }

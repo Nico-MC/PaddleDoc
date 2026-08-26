@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="massnahmen-en-title massnahmen-en-desc">
+      <title id="massnahmen-en-title">Five Measures, Four Enforcement Points</title>
+      <desc id="massnahmen-en-desc">Layer diagram of the control catalog: the five blueprint measures M1 through M5 map to the four enforcement points pipeline definition, build, release, and maintenance, each with its enforcing party and timing; the build layer with checksum verification and hash lock is highlighted as the core of the hardening.</desc>
+      <defs>
+        <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Inter:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#475569"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f46e5"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f8fafc"/>
+
+      <!-- Richtungsindikator links außerhalb des Stapels -->
+      <text x="72" y="44" fill="#64748b" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">CODE</text>
+      <line x1="72" y1="56" x2="72" y2="320" stroke="#475569" stroke-width="1" marker-end="url(#arrow)"/>
+      <text x="72" y="336" fill="#64748b" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">OPS</text>
+
+      <!-- Stapel-Silhouette -->
+      <rect x="120" y="48" width="800" height="280" rx="6" fill="#ffffff" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+      <line x1="120" y1="112" x2="920" y2="112" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+      <line x1="120" y1="200" x2="920" y2="200" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+      <line x1="120" y1="264" x2="920" y2="264" stroke="rgba(15,23,42,0.12)" stroke-width="1"/>
+
+      <!-- Ebene 1: Pipeline-Definition -->
+      <text x="132" y="80" fill="#64748b" font-size="9" font-family="'Geist Mono', monospace" letter-spacing="0.14em">L1</text>
+      <text x="180" y="76" fill="#0f172a" font-size="14" font-weight="600" font-family="'Inter', sans-serif">Pipeline definition</text>
+      <rect x="400" y="80" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="410" y="89" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M1</text>
+      <text x="428" y="90" fill="#475569" font-size="11" font-family="'Inter', sans-serif">Immutable references: CI building blocks by commit fingerprint</text>
+      <text x="908" y="76" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.08em">PLATFORM · EVERY RUN</text>
+
+      <!-- Ebene 2: Build — FOKAL -->
+      <rect x="120" y="112" width="800" height="88" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1.2"/>
+      <text x="132" y="144" fill="#4f46e5" font-size="9" font-family="'Geist Mono', monospace" letter-spacing="0.14em">L2</text>
+      <text x="180" y="140" fill="#0f172a" font-size="14" font-weight="600" font-family="'Inter', sans-serif">Build</text>
+      <rect x="400" y="144" width="20" height="12" rx="2" fill="rgba(79,70,229,0.18)"/>
+      <text x="410" y="153" fill="#4f46e5" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M2</text>
+      <text x="428" y="154" fill="#0f172a" font-size="11" font-family="'Inter', sans-serif">Tool downloads only after checksum verification</text>
+      <rect x="400" y="168" width="20" height="12" rx="2" fill="rgba(79,70,229,0.18)"/>
+      <text x="410" y="177" fill="#4f46e5" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M3</text>
+      <text x="428" y="178" fill="#0f172a" font-size="11" font-family="'Inter', sans-serif">Dependencies version- and hash-locked, incl. transitive packages</text>
+      <text x="908" y="140" fill="#4f46e5" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.08em">CODE · BUILD FAILS</text>
+
+      <!-- Ebene 3: Release -->
+      <text x="132" y="232" fill="#64748b" font-size="9" font-family="'Geist Mono', monospace" letter-spacing="0.14em">L3</text>
+      <text x="180" y="228" fill="#0f172a" font-size="14" font-weight="600" font-family="'Inter', sans-serif">Release</text>
+      <rect x="400" y="232" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="410" y="241" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M4</text>
+      <text x="428" y="242" fill="#475569" font-size="11" font-family="'Inter', sans-serif">Quality gate: publish only after a green verification run</text>
+      <text x="908" y="228" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.08em">PLATFORM · PRE-RELEASE</text>
+
+      <!-- Ebene 4: Pflege & Betrieb -->
+      <text x="132" y="296" fill="#64748b" font-size="9" font-family="'Geist Mono', monospace" letter-spacing="0.14em">L4</text>
+      <text x="180" y="292" fill="#0f172a" font-size="14" font-weight="600" font-family="'Inter', sans-serif">Maintenance &amp; operations</text>
+      <rect x="400" y="296" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="410" y="305" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M5</text>
+      <text x="428" y="306" fill="#475569" font-size="11" font-family="'Inter', sans-serif">Updates as review-required proposals — no auto-merge</text>
+      <text x="908" y="292" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="end" letter-spacing="0.08em">HUMAN · WEEKLY</text>
+
+      <!-- Editorial-Callout -->
+      <text x="120" y="348" fill="#475569" font-size="13" font-style="italic" font-family="'Instrument Serif', serif">“Every bypass is itself a visible, review-required code change.”</text>
+
+      <!-- Legende -->
+      <line x1="30" y1="364" x2="970" y2="364" stroke="rgba(15,23,42,0.10)" stroke-width="0.8"/>
+      <text x="30" y="380" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+      <rect x="112" y="372" width="12" height="12" rx="2" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1"/>
+      <text x="132" y="380" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">focal layer: core of the hardening (hash lock)</text>
+      <rect x="440" y="372" width="20" height="12" rx="2" fill="rgba(15,23,42,0.10)"/>
+      <text x="450" y="381" fill="#475569" font-size="7" font-weight="600" font-family="'Geist Mono', monospace" text-anchor="middle">M2</text>
+      <text x="468" y="380" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">measure number in the blueprint</text>
+      <text x="720" y="380" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">right column: enforcement · timing</text>
+    </svg>

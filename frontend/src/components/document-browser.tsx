@@ -2,10 +2,18 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, LoaderCircle, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import { Download, Inbox, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, SearchX, Settings2, Trash2, TrendingDown, UploadCloud, Webhook } from 'lucide-react';
 
+import { Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
+import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
+import { WebhookSendDialog } from '@/components/webhook-send-dialog';
+import type { PaddleCapabilities } from '@/components/dashboard/shared';
+import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
+import { peekCached, setCached, useVisiblePolling } from '@/lib/data-cache';
+
+const CAPABILITIES_PATH = '/api/v1/paddle/capabilities';
 
 type JobStatus = 'PENDING' | 'RUNNING' | 'FINISHED' | 'FAILED';
 
@@ -15,6 +23,7 @@ type Job = {
   status: JobStatus;
   tags: string[];
   error_message?: string | null;
+  document_version?: number;
   processing_info?: {
     settings?: Record<string, unknown>;
     execution?: Record<string, unknown>;
@@ -22,19 +31,43 @@ type Job = {
   } | null;
   created_at: string;
   updated_at?: string;
+  // Mirrors ImportRunOwner in backend/app/schemas/import_.py. Not rendered
+  // here yet (no UI need in this view) — kept optional/defensive since the
+  // field is landing on GET /api/v1/jobs items independently of this change.
+  owner?: { id: string; username: string } | null;
+};
+
+/** The `?type=` deep-link values this view accepts (see app/jobs/page.tsx). */
+type JobTypeFilter = 'single' | 'collection' | 'import' | 'mail';
+
+const JOB_TYPE_FILTER_LABELS: Record<JobTypeFilter, string> = {
+  import: 'Confluence Import',
+  mail: 'Mail',
+  collection: 'Multiple files',
+  single: 'Single file',
 };
 
 type SortKey = 'document' | 'status' | 'profile' | 'pages' | 'created';
 type SortDirection = 'asc' | 'desc';
 
 type DocumentBrowserProps = {
-  title: string;
-  description: string;
   endpoint: 'jobs' | 'search';
   allowDelete?: boolean;
   includeDateFilters?: boolean;
-  compact?: boolean;
-  hideHeader?: boolean;
+  /**
+   * Preselects the folder filter (e.g. from a ?folder= deep link). Read only
+   * by the state initializer — pass a `key` derived from it (see
+   * app/jobs/page.tsx) so a searchParams-only navigation, which re-renders
+   * the server page without remounting this client component, still applies.
+   */
+  initialFolder?: string;
+  /**
+   * Preselects the type filter (e.g. from a ?type= deep link, contract:
+   * single|collection|import|mail — see app/jobs/page.tsx). Same
+   * initializer-only / remount-via-key contract as initialFolder above. An
+   * unrecognized or missing value leaves the type filter off.
+   */
+  initialType?: string;
 };
 
 const API = API_BASE_URL;
@@ -86,9 +119,68 @@ function jobFolderPath(job: Job): string {
   return parts.slice(0, -1).join('/');
 }
 
+function isImportJob(job: Job): boolean {
+  // Confluence-import page jobs must not be restarted (the backend 409s:
+  // a restart would wipe the converted markdown and OCR the raw HTML).
+  return job.processing_info?.settings?.mode === 'import';
+}
+
+/**
+ * Mail-attachment jobs are normal `process_job` jobs (upload_content is
+ * present, unlike import page jobs) — they are NOT added to isImportJob's
+ * exclusion, so Restart stays enabled for them.
+ */
+function isMailAttachmentJob(job: Job): boolean {
+  return job.processing_info?.settings?.mode === 'mail_attachment';
+}
+
+/**
+ * Canonical job-type derivation for the `?type=` deep-link filter, mirroring
+ * dashboard/processing-overview.tsx's jobType() (single/collection/import/
+ * mail per the contract). Builds on isImportJob/isMailAttachmentJob above
+ * rather than re-deriving from settings.mode independently — 'import' here
+ * additionally covers 'import_attachment' (the per-page jobs an import run
+ * spawns), which isImportJob deliberately excludes since only 'import' jobs
+ * get the restart-disabled treatment.
+ */
+function typeForJob(job: Job): JobTypeFilter {
+  if (isImportJob(job) || job.processing_info?.settings?.mode === 'import_attachment') {
+    return 'import';
+  }
+  if (isMailAttachmentJob(job)) {
+    return 'mail';
+  }
+  if (job.processing_info?.settings?.mode === 'collection') {
+    return 'collection';
+  }
+  return 'single';
+}
+
+/** Defensive read of settings.mail.mail_message_id, mirroring the backend's isinstance() guards on processing_info. */
+function mailMessageIdForJob(job: Job): string | null {
+  const settings = job.processing_info?.settings;
+  if (!settings || typeof settings !== 'object') {
+    return null;
+  }
+  const mail = (settings as Record<string, unknown>).mail;
+  if (!mail || typeof mail !== 'object') {
+    return null;
+  }
+  const id = (mail as Record<string, unknown>).mail_message_id;
+  return typeof id === 'string' ? id : null;
+}
+
 function profileForJob(job: Job): string {
   const settings = job.processing_info?.settings;
   const execution = job.processing_info?.execution;
+  // A 'vl:<connection-id>' selection wins over the execution record: the
+  // execution always carries the real pipeline id (e.g. openai_vision), but
+  // the user-facing identity of such a job is the VL connection it ran
+  // against.
+  const configuredVlProfile = typeof settings?.profile_id === 'string' ? settings.profile_id : '';
+  if (configuredVlProfile.startsWith('vl:')) {
+    return configuredVlProfile;
+  }
   const executionProfile = typeof execution?.profile_id === 'string' ? execution.profile_id : '';
   if (executionProfile) {
     return executionProfile;
@@ -99,6 +191,65 @@ function profileForJob(job: Job): string {
   }
   const requestedProfile = typeof settings?.requested_profile_id === 'string' ? settings.requested_profile_id : '';
   return requestedProfile || '-';
+}
+
+function usedFallbackForJob(job: Job): boolean {
+  // Only trust used_fallback on FINISHED jobs: requeue paths keep the
+  // previous run's execution fields until a worker claims the job.
+  return job.status === 'FINISHED' && job.processing_info?.execution?.used_fallback === true;
+}
+
+function profileSortValue(job: Job): string {
+  return usedFallbackForJob(job) ? 'fallback (no OCR)' : profileForJob(job);
+}
+
+/**
+ * Short chip label + full human label per profile id, mirroring
+ * backend/app/services/paddle_service.py's _PADDLE_PROFILES. Labels are
+ * hardcoded (rather than sourced from the capabilities API) because this
+ * table doesn't otherwise load capabilities.
+ */
+const PROFILE_ABBREVIATIONS: Record<string, { short: string; label: string }> = {
+  ppocrv6_tiny: { short: 'ocr6t', label: 'PP-OCRv6 tiny det + rec' },
+  ppocrv6_tiny_structurev3: { short: 'ocr6t+v3', label: 'PP-StructureV3 + PP-OCRv6 tiny det + rec' },
+  ppocrv6_small: { short: 'ocr6s', label: 'PP-OCRv6 small det + rec' },
+  ppocrv6_small_structurev3: { short: 'ocr6s+v3', label: 'PP-StructureV3 + PP-OCRv6 small det + rec' },
+  ppocrv6_medium: { short: 'ocr6m', label: 'PP-OCRv6 medium det + rec' },
+  ppocrv6_medium_structurev3: { short: 'ocr6m+v3', label: 'PP-StructureV3 + PP-OCRv6 medium det + rec' },
+  paddlevl_1_6_0_9b: { short: 'vl9b', label: 'PaddleOCR-VL 1.6 (0.9B)' },
+  openai_vision: { short: 'oai', label: 'OpenAI-compatible Vision API' },
+};
+
+/**
+ * Regular (non-benchmark) jobs run through a `vl:<connection-id>` profile
+ * stamp the same `variant_label` companion field that benchmark variant
+ * jobs use for the VL connection's display name (see
+ * backend/app/api/benchmarks.py's variant_specs/extra_settings -- 'label'
+ * becomes 'variant_label'). Older jobs, or a job whose settings predate
+ * this field, simply have no variant_label -- callers fall back to the raw
+ * connection id in that case.
+ */
+function vlConnectionNameFromSettings(settings: Record<string, unknown> | undefined): string | null {
+  const label = settings?.variant_label;
+  return typeof label === 'string' && label.trim() ? label.trim() : null;
+}
+
+/**
+ * Falls back to the raw id (as both short label and tooltip) for unknown
+ * static profiles. `vl:<connection-id>` profiles (dynamic VL connections,
+ * see GET /api/v1/paddle/capabilities) get a dedicated 'vl' chip instead of
+ * the raw uuid -- with the connection's name appended when settings carry
+ * one, else the raw id is still available via the tooltip.
+ */
+function profileAbbreviation(profileId: string, settings?: Record<string, unknown>): { short: string; label: string } {
+  if (profileId.startsWith('vl:')) {
+    const connectionId = profileId.slice('vl:'.length);
+    const name = vlConnectionNameFromSettings(settings);
+    return name
+      ? { short: `vl:${name}`, label: `VL connection "${name}" (${connectionId})` }
+      : { short: 'vl', label: `VL connection ${connectionId}` };
+  }
+  return PROFILE_ABBREVIATIONS[profileId] ?? { short: profileId, label: profileId };
 }
 
 function qualityForJob(job: Job): { grade: string; score: number | null } | null {
@@ -120,25 +271,38 @@ function qualityForJob(job: Job): { grade: string; score: number | null } | null
   return { grade, score };
 }
 
+const JOB_TYPE_FILTER_VALUES: JobTypeFilter[] = ['single', 'collection', 'import', 'mail'];
+
 export function DocumentBrowser({
-  title,
-  description,
   endpoint,
   allowDelete = false,
   includeDateFilters = true,
-  compact = false,
-  hideHeader = false,
+  initialFolder,
+  initialType,
 }: DocumentBrowserProps) {
   const pageSize = 50;
-  const [items, setItems] = useState<Job[]>([]);
+  // Shared with the Home/Processing views' jobs fetch: seeding from it here
+  // means returning to /jobs (or /jobs?folder=...) paints the last-known
+  // list immediately instead of an empty table while the network round
+  // trip is in flight.
+  const cacheKey = `/api/v1/${endpoint}`;
+  const [items, setItems] = useState<Job[]>(() => peekCached<Job[]>(cacheKey) ?? []);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState('');
-  const [statusFilter, setStatusFilter] = useState<JobStatus | ''>('');
+  // Grouped status chip filter (Running = PENDING+RUNNING, Completed =
+  // FINISHED, Failed = FAILED) — applied client-side over the loaded items,
+  // separate from the server-side search/tag/date filters below, since the
+  // backend's status param only matches a single exact status.
+  const [chipFilter, setChipFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [loading, setLoading] = useState(false);
   const [restartingPending, setRestartingPending] = useState(false);
-  const [selectedFolder, setSelectedFolder] = useState<string>('all');
+  const [selectedFolder, setSelectedFolder] = useState<string>(initialFolder?.trim() || 'all');
+  const [typeFilter, setTypeFilter] = useState<JobTypeFilter | null>(() => {
+    const trimmed = initialType?.trim() as JobTypeFilter | undefined;
+    return trimmed && JOB_TYPE_FILTER_VALUES.includes(trimmed) ? trimmed : null;
+  });
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
   const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
   const [restartingFolder, setRestartingFolder] = useState<string | null>(null);
@@ -146,10 +310,12 @@ export function DocumentBrowser({
   const [retryingLowerJobId, setRetryingLowerJobId] = useState<string | null>(null);
   const [protectedJobId, setProtectedJobId] = useState<string | null>(null);
   const [protectedJobPassword, setProtectedJobPassword] = useState('');
-  const [passwordAttempt, setPasswordAttempt] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('created');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
+  const [pushDialogJob, setPushDialogJob] = useState<Job | null>(null);
+  const [webhookDialogJob, setWebhookDialogJob] = useState<Job | null>(null);
+  const [restartProfileJob, setRestartProfileJob] = useState<Job | null>(null);
 
   const markJobsQueued = (predicate: (job: Job) => boolean) => {
     setItems((current) =>
@@ -176,67 +342,86 @@ export function DocumentBrowser({
     );
   };
 
-  const loadItems = async () => {
+  // `filters` lets a caller fetch with values other than this render's
+  // state (needed by the Reset button below, whose setters only land on
+  // the next render — same pattern as admin/logs-tab.tsx's `load`).
+  const loadItems = async (filters?: {
+    query: string;
+    tag: string;
+    fromDate: string;
+    toDate: string;
+  }) => {
     setLoading(true);
+    const active = filters ?? { query, tag, fromDate, toDate };
     const params = new URLSearchParams();
-    if (query.trim()) {
-      params.set('q', query.trim());
+    if (active.query.trim()) {
+      params.set('q', active.query.trim());
     }
-    if (tag.trim()) {
-      params.set('tag', tag.trim());
+    if (active.tag.trim()) {
+      params.set('tag', active.tag.trim());
     }
-    if (statusFilter) {
-      params.set('status', statusFilter);
+    if (includeDateFilters && active.fromDate) {
+      params.set('from_date', active.fromDate);
     }
-    if (includeDateFilters && fromDate) {
-      params.set('from_date', fromDate);
-    }
-    if (includeDateFilters && toDate) {
-      params.set('to_date', toDate);
+    if (includeDateFilters && active.toDate) {
+      params.set('to_date', active.toDate);
     }
 
-    const response = await fetch(`${API}/api/v1/${endpoint}${params.toString() ? `?${params.toString()}` : ''}`, {
+    const hasActiveFilters = params.toString() !== '';
+    const response = await apiFetch(`/api/v1/${endpoint}${hasActiveFilters ? `?${params.toString()}` : ''}`, {
       cache: 'no-store',
     });
     if (response.ok) {
       const payload = await response.json();
-      setItems(payload.items ?? []);
+      const nextItems = (payload.items ?? []) as Job[];
+      setItems(nextItems);
+      if (!hasActiveFilters) {
+        // Only the canonical (unfiltered) list is safe to publish to the
+        // shared cache — a filtered subset would otherwise leak into other
+        // views (e.g. Home's job counts) as if it were the full list.
+        setCached(cacheKey, nextItems);
+      }
     }
     setLoading(false);
   };
 
   useEffect(() => {
     const run = async () => {
-      const response = await fetch(`${API}/api/v1/${endpoint}`, {
+      const response = await apiFetch(`/api/v1/${endpoint}`, {
         cache: 'no-store',
       });
       if (!response.ok) {
         return;
       }
       const payload = await response.json();
-      setItems(payload.items ?? []);
+      const nextItems = (payload.items ?? []) as Job[];
+      setItems(nextItems);
+      setCached(cacheKey, nextItems);
     };
     void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    const pollMs = endpoint === 'jobs' ? 5000 : 15000;
-    const interval = setInterval(() => {
-      void loadItems();
-    }, pollMs);
-    return () => {
-      clearInterval(interval);
-    };
-  }, [endpoint, query, tag, statusFilter, fromDate, toDate]);
+  // Poll briskly while something is actually queued/running, back off once
+  // everything visible is settled, and pause outright while the tab is
+  // hidden — a large jobs table has no business re-sorting/re-rendering
+  // itself every few seconds for a backgrounded tab.
+  const hasActiveJobs = items.some((job) => job.status === 'PENDING' || job.status === 'RUNNING');
+  const pollMs = endpoint === 'jobs' ? (hasActiveJobs ? 5000 : 20000) : 30000;
+  useVisiblePolling(() => void loadItems(), pollMs);
 
   const removeJob = async (id: string, password?: string) => {
     const url = new URL(`${API}/api/v1/jobs/${id}`);
     if (password) {
       url.searchParams.set('password', password);
     }
-    const response = await fetch(url, { method: 'DELETE' });
+    const response = await apiFetch(url.toString(), { method: 'DELETE', skipAuthRedirect: true });
     if (response.status === 401) {
+      // A 401 here can also mean the session expired — don't show a
+      // document-password prompt that can never succeed in that case.
+      if (await redirectIfSessionExpired()) {
+        return;
+      }
       setProtectedJobId(id);
       setProtectedJobPassword('');
       return;
@@ -252,7 +437,7 @@ export function DocumentBrowser({
   const removeFolder = async (folderPath: string) => {
     setDeletingFolder(folderPath);
     const url = new URL(`${API}/api/v1/folders/${encodeURI(folderPath)}`);
-    await fetch(url, { method: 'DELETE' });
+    await apiFetch(url.toString(), { method: 'DELETE' });
     if (selectedFolder === folderPath || selectedFolder.startsWith(`${folderPath}/`)) {
       setSelectedFolder('all');
     }
@@ -263,7 +448,7 @@ export function DocumentBrowser({
   const downloadFolder = async (folderPath: string) => {
     setDownloadingFolder(folderPath);
     try {
-      const response = await fetch(`${API}/api/v1/folders/${encodeURI(folderPath)}/download`);
+      const response = await apiFetch(`/api/v1/folders/${encodeURI(folderPath)}/download`);
       if (!response.ok) {
         alert('No downloadable markdown files found in this folder.');
         return;
@@ -289,7 +474,7 @@ export function DocumentBrowser({
     }
     setRestartingFolder(folderPath);
     try {
-      const response = await fetch(`${API}/api/v1/folders/${encodeURI(folderPath)}/restart`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/folders/${encodeURI(folderPath)}/restart`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart folder jobs.';
@@ -321,7 +506,7 @@ export function DocumentBrowser({
     }
     setRestartingPending(true);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/restart-pending`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/restart-pending`, { method: 'POST' });
       if (!response.ok) {
         alert('Failed to restart pending jobs.');
         return;
@@ -340,7 +525,7 @@ export function DocumentBrowser({
     }
     setRestartingJobId(jobId);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/${jobId}/restart`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/${jobId}/restart`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart job.';
@@ -349,6 +534,32 @@ export function DocumentBrowser({
       }
       markJobsQueued((job) => job.id === jobId);
       await loadItems();
+    } finally {
+      setRestartingJobId(null);
+    }
+  };
+
+  /** Same requeue + refresh flow as {@link restartJob}, but pins a specific profile via the request body. */
+  const restartJobWithProfile = async (jobId: string, profileId: string): Promise<boolean> => {
+    if (endpoint !== 'jobs') {
+      return false;
+    }
+    setRestartingJobId(jobId);
+    try {
+      const response = await apiFetch(`/api/v1/jobs/${jobId}/restart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileId }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to restart job.';
+        alert(detail);
+        return false;
+      }
+      markJobsQueued((job) => job.id === jobId);
+      await loadItems();
+      return true;
     } finally {
       setRestartingJobId(null);
     }
@@ -380,7 +591,7 @@ export function DocumentBrowser({
 
     setRetryingLowerJobId(job.id);
     try {
-      const response = await fetch(`${API}/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
+      const response = await apiFetch(`/api/v1/jobs/${job.id}/retry-lower-profile`, { method: 'POST' });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const detail = typeof payload?.detail === 'string' ? payload.detail : 'Failed to retry with lower profile.';
@@ -410,15 +621,63 @@ export function DocumentBrowser({
       .sort((left, right) => left.path.localeCompare(right.path));
   }, [items]);
 
-  const visibleItems = useMemo(() => {
-    if (selectedFolder === 'all') {
-      return items;
-    }
+  // Filter stages, applied in order:
+  //   1. items          — server-side search/tag/date filters (loadItems).
+  //   2. typeAndFolder   — client-side ?type= deep link + sidebar folder
+  //                        selection, independent of status.
+  //   3. visibleItems    — typeAndFolder further narrowed by the status chip
+  //                        (Running/Completed/Failed).
+  // folderItems' counts (sidebar, above) intentionally stay on the raw
+  // `items` set — they're navigation targets for picking a folder, not a
+  // reflection of the active type/status filters. statusCounts below,
+  // however, is scoped to typeAndFolderFilteredItems so the chip counts
+  // match what selecting Running/Completed/Failed would actually show while
+  // a type or folder filter is active.
+  const typeAndFolderFilteredItems = useMemo(() => {
     return items.filter((job) => {
-      const folder = jobFolderPath(job);
-      return folder === selectedFolder || folder.startsWith(`${selectedFolder}/`);
+      if (typeFilter && typeForJob(job) !== typeFilter) {
+        return false;
+      }
+      if (selectedFolder !== 'all') {
+        const folder = jobFolderPath(job);
+        if (!(folder === selectedFolder || folder.startsWith(`${selectedFolder}/`))) {
+          return false;
+        }
+      }
+      return true;
     });
-  }, [items, selectedFolder]);
+  }, [items, typeFilter, selectedFolder]);
+
+  const statusCounts = useMemo(() => {
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    for (const job of typeAndFolderFilteredItems) {
+      if (job.status === 'PENDING' || job.status === 'RUNNING') {
+        running += 1;
+      } else if (job.status === 'FINISHED') {
+        completed += 1;
+      } else if (job.status === 'FAILED') {
+        failed += 1;
+      }
+    }
+    return { all: typeAndFolderFilteredItems.length, running, completed, failed };
+  }, [typeAndFolderFilteredItems]);
+
+  const visibleItems = useMemo(() => {
+    return typeAndFolderFilteredItems.filter((job) => {
+      if (chipFilter === 'running' && !(job.status === 'PENDING' || job.status === 'RUNNING')) {
+        return false;
+      }
+      if (chipFilter === 'completed' && job.status !== 'FINISHED') {
+        return false;
+      }
+      if (chipFilter === 'failed' && job.status !== 'FAILED') {
+        return false;
+      }
+      return true;
+    });
+  }, [typeAndFolderFilteredItems, chipFilter]);
 
   const sortedItems = useMemo(() => {
     const sorted = [...visibleItems];
@@ -433,7 +692,7 @@ export function DocumentBrowser({
           comparison = left.status.localeCompare(right.status);
           break;
         case 'profile':
-          comparison = profileForJob(left).localeCompare(profileForJob(right), undefined, { sensitivity: 'base' });
+          comparison = profileSortValue(left).localeCompare(profileSortValue(right), undefined, { sensitivity: 'base' });
           break;
         case 'pages':
           comparison = Number(pageCountForJob(left)) - Number(pageCountForJob(right));
@@ -479,7 +738,7 @@ export function DocumentBrowser({
   return (
     <div className="w-full text-slate-900">
 
-      <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+      <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <label className="text-sm text-slate-700 xl:col-span-2">
             Search filename
@@ -504,23 +763,6 @@ export function DocumentBrowser({
               className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-emerald-300 focus:bg-white"
               placeholder="finance"
             />
-          </label>
-          <label className="text-sm text-slate-700">
-            Status
-            <select
-              value={statusFilter}
-              onChange={(event) => {
-                setStatusFilter(event.target.value as JobStatus | '');
-                setCurrentPage(1);
-              }}
-              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 outline-none transition focus:border-emerald-300 focus:bg-white"
-            >
-              <option value="">All</option>
-              <option value="PENDING">PENDING</option>
-              <option value="RUNNING">RUNNING</option>
-              <option value="FINISHED">FINISHED</option>
-              <option value="FAILED">FAILED</option>
-            </select>
           </label>
           {includeDateFilters && (
             <>
@@ -552,8 +794,10 @@ export function DocumentBrowser({
           )}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={loadItems}>Apply Filters</Button>
-          <Button variant="outline" onClick={loadItems}>
+          <Button variant="outline" onClick={() => void loadItems()}>
+            Apply Filters
+          </Button>
+          <Button variant="outline" onClick={() => void loadItems()}>
             <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
           </Button>
           {endpoint === 'jobs' && (
@@ -566,10 +810,12 @@ export function DocumentBrowser({
             onClick={() => {
               setQuery('');
               setTag('');
-              setStatusFilter('');
               setFromDate('');
               setToDate('');
-              window.setTimeout(() => void loadItems(), 0);
+              // The setters above only land on the next render, and this
+              // closure's `loadItems` still sees the old state — pass the
+              // cleared values explicitly.
+              void loadItems({ query: '', tag: '', fromDate: '', toDate: '' });
             }}
           >
             Reset
@@ -578,7 +824,7 @@ export function DocumentBrowser({
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(220px,280px)_minmax(0,1fr)]">
-        <aside className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-4 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <aside className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-4">
           <h2 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-700">Folders</h2>
           <div className="mt-3 space-y-1">
             <button
@@ -647,53 +893,123 @@ export function DocumentBrowser({
           </div>
         </aside>
 
-        <div className="min-w-0 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
+        <div className="min-w-0 rounded-3xl border border-slate-200 bg-white p-4 sm:p-5">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
             <h2 className="text-lg font-semibold">Results</h2>
             <p className="text-sm text-slate-500">
               {sortedItems.length} document(s) · Page {displayPage} / {totalPages}
             </p>
           </div>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
+              {(
+                [
+                  { key: 'all', label: 'All', count: statusCounts.all },
+                  { key: 'running', label: 'Running', count: statusCounts.running },
+                  { key: 'completed', label: 'Completed', count: statusCounts.completed },
+                  { key: 'failed', label: 'Failed', count: statusCounts.failed },
+                ] as const
+              ).map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  aria-pressed={chipFilter === chip.key}
+                  onClick={() => {
+                    setChipFilter(chip.key);
+                    setCurrentPage(1);
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition ${
+                    chipFilter === chip.key
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {chip.label}
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                      chipFilter === chip.key ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {chip.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {typeFilter && (
+              // The one type chip shown is always the active ?type= deep
+              // link — there's no full chip set to pick a type from here (by
+              // design, per app/jobs/page.tsx's contract), only a clear
+              // affordance for the filter that arrived via the URL. Kept as
+              // a sibling of (not inside) the status chips' role="group" —
+              // it's a different filter dimension, not another status.
+              <button
+                type="button"
+                onClick={() => {
+                  setTypeFilter(null);
+                  setCurrentPage(1);
+                }}
+                aria-label={`Clear type filter: ${JOB_TYPE_FILTER_LABELS[typeFilter]}`}
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 transition hover:bg-emerald-100"
+              >
+                Type: {JOB_TYPE_FILTER_LABELS[typeFilter]}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
+          </div>
           <div className="overflow-x-auto">
           <table className="w-full table-auto text-left text-xs sm:text-sm">
             <thead className="text-slate-500">
               <tr>
-                <th className="pb-2">
+                <th className="pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('document')}>
                     Document{sortIndicator('document')}
                   </button>
                 </th>
-                <th className="pb-2">
+                <th className="w-24 pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('status')}>
                     Status{sortIndicator('status')}
                   </button>
                 </th>
-                <th className="hidden pb-2 lg:table-cell">
+                <th className="hidden w-32 pb-2 pr-4 lg:table-cell">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('profile')}>
                     Used Profile{sortIndicator('profile')}
                   </button>
                 </th>
-                <th className="pb-2">
+                <th className="w-16 pb-2 pr-4">
                   <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('pages')}>
                     Pages{sortIndicator('pages')}
                   </button>
                 </th>
-                <th className="hidden pb-2 sm:table-cell">Quality</th>
-                <th className="hidden pb-2 md:table-cell">
-                  <button type="button" className="font-medium hover:text-slate-800" onClick={() => setSort('created')}>
-                    Created{sortIndicator('created')}
-                  </button>
-                </th>
-                <th className="pb-2 text-right">Actions</th>
+                <th className="hidden w-28 pb-2 pr-4 sm:table-cell">Quality</th>
+                <th className="w-40 pb-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {paginatedItems.map((job) => (
                 <tr key={job.id} className="border-t border-slate-100">
-                  <td className="py-3">
-                    <Link href={`/jobs/${job.id}`} className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700">
-                      {job.original_filename}
-                    </Link>
+                  <td className="py-3.5 pr-4">
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/jobs/${job.id}`}
+                        className="line-clamp-2 font-medium text-slate-950 hover:text-emerald-700"
+                        title={`Uploaded ${new Date(job.created_at).toLocaleString()}`}
+                      >
+                        {job.original_filename}
+                      </Link>
+                      {typeof job.document_version === 'number' && job.document_version > 1 && (
+                        <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                          v{job.document_version}
+                        </span>
+                      )}
+                      {isMailAttachmentJob(job) && mailMessageIdForJob(job) && (
+                        <Link
+                          href={`/mail/${mailMessageIdForJob(job)}`}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-100"
+                        >
+                          <Mail className="h-3 w-3" /> from mail
+                        </Link>
+                      )}
+                    </div>
                     {job.status === 'FAILED' && (
                       <p className="mt-1 text-xs text-amber-700">
                         {typeof job.processing_info?.execution?.warning === 'string'
@@ -701,13 +1017,38 @@ export function DocumentBrowser({
                           : job.error_message || 'Processing stopped. Retry with a lower profile.'}
                       </p>
                     )}
+                    {usedFallbackForJob(job) && (
+                      <p className="mt-1 text-xs font-medium text-red-700">
+                        No OCR ran — plain-text fallback output (selected profile had no effect)
+                      </p>
+                    )}
                   </td>
-                  <td className="py-3">
+                  <td className="whitespace-nowrap py-3.5 pr-4">
                     <span className={`rounded px-2 py-1 text-xs ${statusBadge[job.status]}`}>{job.status}</span>
                   </td>
-                  <td className="hidden py-3 text-slate-700 lg:table-cell">{profileForJob(job)}</td>
-                  <td className="py-3 text-slate-700">{pageCountForJob(job)}</td>
-                  <td className="hidden py-3 text-slate-700 sm:table-cell">
+                  <td className="hidden whitespace-nowrap py-3.5 pr-4 lg:table-cell">
+                    {usedFallbackForJob(job) ? (
+                      <span className="text-red-700">fallback (no OCR)</span>
+                    ) : (
+                      (() => {
+                        const rawProfile = profileForJob(job);
+                        if (rawProfile === '-') {
+                          return <span className="text-slate-700">-</span>;
+                        }
+                        const { short, label } = profileAbbreviation(rawProfile, job.processing_info?.settings);
+                        return (
+                          <span
+                            className="inline-block max-w-[10rem] truncate rounded bg-slate-100 px-1.5 py-0.5 align-bottom font-mono text-xs text-slate-700"
+                            title={label}
+                          >
+                            {short}
+                          </span>
+                        );
+                      })()
+                    )}
+                  </td>
+                  <td className="whitespace-nowrap py-3.5 pr-4 text-slate-700">{pageCountForJob(job)}</td>
+                  <td className="hidden whitespace-nowrap py-3.5 pr-4 text-slate-700 sm:table-cell">
                     {(() => {
                       const quality = qualityForJob(job);
                       if (!quality) {
@@ -718,39 +1059,109 @@ export function DocumentBrowser({
                         : quality.grade;
                     })()}
                   </td>
-                  <td className="hidden py-3 text-slate-700 md:table-cell">{new Date(job.created_at).toLocaleString()}</td>
-                  <td className="py-3 text-right">
+                  <td className="py-3.5 pl-2 text-right">
                     {endpoint === 'jobs' && (
-                      <div className="flex flex-wrap justify-end gap-2">
+                      <div className="flex flex-wrap justify-end gap-1">
                         {job.status === 'FAILED' && suggestedLowerProfile(job) && (
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={retryingLowerJobId === job.id}
                             onClick={() => void retryJobLowerProfile(job)}
+                            aria-label="Retry with lower profile"
+                            title="Retry with lower profile"
                           >
-                            <RotateCcw className="mr-2 h-4 w-4" />
-                            {retryingLowerJobId === job.id ? 'Retrying...' : 'Retry Lower'}
+                            {retryingLowerJobId === job.id ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin text-amber-700" />
+                            ) : (
+                              <TrendingDown className="h-4 w-4 text-amber-700" />
+                            )}
                           </Button>
                         )}
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={job.status === 'RUNNING' || restartingJobId === job.id}
-                          onClick={() => void restartJob(job.id)}
-                        >
-                          <RotateCcw className="mr-2 h-4 w-4" />
-                          {restartingJobId === job.id ? 'Restarting...' : 'Restart'}
-                        </Button>
+                        {!isImportJob(job) && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            disabled={job.status === 'RUNNING' || restartingJobId === job.id}
+                            onClick={() => void restartJob(job.id)}
+                            aria-label="Restart"
+                            title="Restart"
+                          >
+                            {restartingJobId === job.id ? (
+                              <LoaderCircle className="h-4 w-4 animate-spin text-slate-700" />
+                            ) : (
+                              <RotateCcw className="h-4 w-4 text-slate-700" />
+                            )}
+                          </Button>
+                        )}
+                        {!isImportJob(job) && (job.status === 'FINISHED' || job.status === 'FAILED') && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            disabled={restartingJobId === job.id}
+                            onClick={() => setRestartProfileJob(job)}
+                            aria-label="Re-run with profile"
+                            title="Re-run with profile"
+                          >
+                            <Settings2 className="h-4 w-4 text-slate-700" />
+                          </Button>
+                        )}
+                        {job.status === 'FINISHED' && (
+                          <Link href={`/jobs/${job.id}?edit=1`}>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-8 w-8 px-0"
+                              aria-label="Edit markdown"
+                              title="Edit markdown"
+                            >
+                              <Pencil className="h-4 w-4 text-slate-700" />
+                            </Button>
+                          </Link>
+                        )}
+                        {job.status === 'FINISHED' && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            onClick={() => setPushDialogJob(job)}
+                            aria-label={`Push ${job.original_filename} to OpenWebUI`}
+                            title="Push to OpenWebUI"
+                          >
+                            <UploadCloud className="h-4 w-4 text-emerald-700" />
+                          </Button>
+                        )}
+                        {job.status === 'FINISHED' && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            onClick={() => setWebhookDialogJob(job)}
+                            aria-label={`Send ${job.original_filename} to webhook`}
+                            title="Send to webhook"
+                          >
+                            <Webhook className="h-4 w-4 text-emerald-700" />
+                          </Button>
+                        )}
                         {allowDelete && (
                           <Button
                             type="button"
                             size="sm"
                             variant="ghost"
+                            className="h-8 w-8 px-0"
                             disabled={job.status === 'RUNNING'}
                             onClick={() => void removeJob(job.id)}
+                            aria-label="Delete"
+                            title="Delete"
                           >
                             <Trash2 className="h-4 w-4 text-red-600" />
                           </Button>
@@ -777,9 +1188,41 @@ export function DocumentBrowser({
               </div>
             </div>
           )}
-          {sortedItems.length === 0 && !loading && (
-            <div className="flex items-center gap-2 py-6 text-sm text-slate-600">
-              <LoaderCircle className="h-4 w-4 animate-spin" /> No documents found.
+          {sortedItems.length === 0 && !loading && items.length === 0 && (
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <Inbox className="h-8 w-8 text-slate-300" />
+              <div>
+                <p className="text-sm font-medium text-slate-700">No documents yet</p>
+                <p className="mt-1 text-sm text-slate-500">Upload a document to start processing it.</p>
+              </div>
+              <Link href="/processing/new">
+                <Button>Upload your first document</Button>
+              </Link>
+            </div>
+          )}
+          {sortedItems.length === 0 && !loading && items.length > 0 && (
+            <div className="flex flex-col items-center gap-3 py-12 text-center">
+              <SearchX className="h-8 w-8 text-slate-300" />
+              <div>
+                <p className="text-sm font-medium text-slate-700">No documents match these filters</p>
+                <p className="mt-1 text-sm text-slate-500">Try a different search, folder, or status.</p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setQuery('');
+                  setTag('');
+                  setFromDate('');
+                  setToDate('');
+                  setSelectedFolder('all');
+                  setChipFilter('all');
+                  setTypeFilter(null);
+                  setCurrentPage(1);
+                  void loadItems({ query: '', tag: '', fromDate: '', toDate: '' });
+                }}
+              >
+                Clear filters
+              </Button>
             </div>
           )}
           {loading && (
@@ -792,7 +1235,7 @@ export function DocumentBrowser({
       </section>
 
       {protectedJobId && (
-        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-lg">
             <h2 className="mb-3 text-lg font-semibold">Password Required</h2>
             <p className="mb-4 text-sm text-slate-600">This job is password protected.</p>
@@ -814,6 +1257,125 @@ export function DocumentBrowser({
           </div>
         </div>
       )}
+
+      {pushDialogJob && (
+        <OpenWebUIPushDialog
+          jobs={[{ id: pushDialogJob.id, label: pushDialogJob.original_filename }]}
+          onClose={() => setPushDialogJob(null)}
+        />
+      )}
+
+      {webhookDialogJob && (
+        <WebhookSendDialog
+          job={{ id: webhookDialogJob.id, label: webhookDialogJob.original_filename }}
+          onClose={() => setWebhookDialogJob(null)}
+        />
+      )}
+
+      {restartProfileJob && (
+        <RestartWithProfileDialog
+          job={restartProfileJob}
+          busy={restartingJobId === restartProfileJob.id}
+          onClose={() => setRestartProfileJob(null)}
+          onStart={(profileId) => restartJobWithProfile(restartProfileJob.id, profileId)}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Profile picker for the "Re-run with profile…" row action. Capabilities are
+ * lazy-loaded on first open (this browser doesn't otherwise fetch them) and
+ * shared via the same module-level cache key other pages use, so a dialog
+ * opened after visiting e.g. the Paddle admin tab paints instantly.
+ */
+function RestartWithProfileDialog({
+  job,
+  busy,
+  onClose,
+  onStart,
+}: {
+  job: Job;
+  busy: boolean;
+  onClose: () => void;
+  onStart: (profileId: string) => Promise<boolean>;
+}) {
+  const [capabilities, setCapabilities] = useState<PaddleCapabilities | null>(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH) ?? null
+  );
+  const [profileId, setProfileId] = useState(
+    () => peekCached<PaddleCapabilities>(CAPABILITIES_PATH)?.profiles[0]?.value ?? ''
+  );
+  const [loading, setLoading] = useState(!capabilities);
+
+  useEffect(() => {
+    if (capabilities) {
+      return;
+    }
+    let active = true;
+    (async () => {
+      const response = await apiFetch(CAPABILITIES_PATH, { cache: 'no-store' });
+      if (!active) {
+        return;
+      }
+      if (response.ok) {
+        const data = (await response.json()) as PaddleCapabilities;
+        if (!active) {
+          return;
+        }
+        setCapabilities(data);
+        setCached(CAPABILITIES_PATH, data);
+        setProfileId((current) => current || data.profiles[0]?.value || '');
+      }
+      setLoading(false);
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selectedDescription = capabilities?.profiles.find((option) => option.value === profileId)?.description;
+
+  const handleStart = () => {
+    void onStart(profileId).then((ok) => {
+      if (ok) {
+        onClose();
+      }
+    });
+  };
+
+  return (
+    <Modal title={`Re-run "${job.original_filename}" with a different profile`} onClose={onClose}>
+      <div className="space-y-4">
+        {loading && <LoadingState label="Loading profiles..." />}
+        {!loading && capabilities && capabilities.profiles.length > 0 && (
+          <Field label="Profile">
+            <select className={inputClass} value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+              {capabilities.profiles.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {selectedDescription && (
+              <span className="mt-1 block text-xs font-normal text-slate-400">{selectedDescription}</span>
+            )}
+          </Field>
+        )}
+        {!loading && (!capabilities || capabilities.profiles.length === 0) && (
+          <p className="text-sm text-slate-600">No profiles available.</p>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" disabled={busy || !profileId} onClick={handleStart}>
+            {busy ? 'Starting...' : 'Start'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

@@ -27,6 +27,16 @@ frontend:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 backend:
   enabled: true
@@ -39,11 +49,41 @@ backend:
     type: ClusterIP
     port: 8000
   corsOrigins: '["http://localhost:3000"]'
+  # X-Forwarded-For/X-Real-IP are only trusted (to key the rate limiter) when
+  # the backend's direct TCP peer matches one of these IPs/CIDRs -- e.g. your
+  # cluster's pod CIDR (so the in-cluster ingress-controller/LB pod that
+  # proxies requests is trusted) or an internal NLB/ALB range. Empty
+  # (default) means the headers are never trusted and the limiter keys off
+  # the direct TCP peer instead -- safe against spoofing, but shares one
+  # bucket across every client behind that peer until this is set for your
+  # cluster/ingress. JSON array string, same convention as corsOrigins.
+  trustedProxyIps: '[]'
+  # How many trusted-proxy hops are expected to have appended to
+  # X-Forwarded-For (1 = a single ingress-controller/ALB in front of the
+  # pod). Only relevant once trustedProxyIps is non-empty.
+  trustedProxyHops: 1
   runAlembicOnStartup: true
+  # Maximum accepted upload size in bytes. Empty string (default) leaves
+  # MAX_UPLOAD_BYTES unset so the app default (100 MiB) applies. When set,
+  # also raise your ingress controller's body-size limit to match (see the
+  # chart README's "Running without shared storage" section).
+  maxUploadBytes: ""
   resources: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 worker:
   enabled: true
@@ -53,14 +93,217 @@ worker:
     tag: "latest"
     pullPolicy: IfNotPresent
   paddleDefaultProfile: ppocrv6_tiny
+  # Celery task time limits + matching broker visibility_timeout -- see the
+  # comments on the matching settings in app/core/config.py. visibilityTimeoutSeconds
+  # must stay >= taskTimeLimitSeconds (celery_app.py also clamps this
+  # defensively even if misconfigured here).
+  celery:
+    taskSoftTimeLimitSeconds: 1500
+    taskTimeLimitSeconds: 1800
+    visibilityTimeoutSeconds: 1800
+  # Worker log capture into worker_log_entries for the admin UI's log tail
+  # (GET /api/v1/auth/admin/worker-logs) -- see
+  # app/workers/log_capture.py / app/core/config.py. Independent of
+  # --loglevel (stdout, still CELERY_LOG_LEVEL via worker.extraEnv): if set
+  # MORE verbose than --loglevel, log_capture.py lowers the worker's root
+  # logger floor to match while pinning the console handler(s) at
+  # --loglevel so console verbosity doesn't change.
+  log:
+    captureLevel: INFO
+    # Row-count retention cap; pruned opportunistically by the handler
+    # itself (no beat/cron worker in this deployment).
+    retentionMaxRows: 20000
   resources: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # PaddleOCR downloads models at runtime into $HOME/.paddlex and
+  # $HOME/.paddleocr. Since the container runs as a non-root, non-writable
+  # image user, an emptyDir is mounted as $HOME so model downloads succeed.
+  modelCache:
+    enabled: true
+    # Maximum size of the emptyDir model cache (e.g. "10Gi"). Empty string
+    # means unlimited (no sizeLimit is rendered on the emptyDir). Ignored
+    # when persistence.enabled is true.
+    sizeLimit: ""
+    # Back the model cache with a PVC instead of an emptyDir. Without this,
+    # every pod restart/rollout/scale-up starts with an empty cache and must
+    # re-download all model weights from the internet -- on clusters with
+    # restricted egress that download fails and jobs silently degrade to the
+    # plain-text fallback (no OCR). With more than one worker replica the
+    # accessModes must be ReadWriteMany (like the shared-storage PVC): with
+    # ReadWriteOnce, replicas scheduled to other nodes fail to attach the
+    # volume and never start. When accessModes has no ReadWriteMany entry the
+    # chart also defaults the Deployment to strategy Recreate (see
+    # worker.updateStrategy) so image upgrades cannot wedge on the volume
+    # attachment. Note that common ReadWriteMany providers (e.g. AWS EFS)
+    # ignore fsGroup -- provision storage whose root is writable by uid/gid
+    # 1000 (e.g. an EFS access point), or the model download fails and jobs
+    # degrade to the plain-text fallback again.
+    persistence:
+      enabled: false
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 10Gi
+      # Use a pre-existing PVC instead of creating one.
+      existingClaim: ""
+  # Deployment update strategy (rendered verbatim as spec.strategy). Empty
+  # map means: Kubernetes default (RollingUpdate), except when the model
+  # cache uses a PVC without ReadWriteMany -- then the chart falls back to
+  # Recreate to avoid rollouts deadlocking on the volume attachment.
+  updateStrategy: {}
+  # Extra environment variables for the worker container, rendered verbatim.
+  # Typical uses: route the runtime model download through a corporate proxy
+  # (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) or point PaddleX at an alternative
+  # model source/mirror (PADDLE_PDX_MODEL_SOURCE, e.g. "BOS" or "HuggingFace").
+  # extraEnv:
+  #   - name: HTTPS_PROXY
+  #     value: http://proxy.corp.internal:3128
+  #   - name: PADDLE_PDX_MODEL_SOURCE
+  #     value: HuggingFace
+  extraEnv: []
+
+# Confluence -> Markdown import. Wired as IMPORT_* env vars into BOTH the
+# backend (validates sources, runs synchronous test probes) and the worker
+# (performs the crawl -- import egress originates from worker pods: Cloud
+# Confluence needs NAT egress to *.atlassian.net:443; an internal Server/DC
+# instance needs pod-network reachability plus an allowlist entry below).
+mail:
+  # Hard cap on the raw .eml body accepted by POST /api/v1/mail/messages,
+  # enforced by streaming reads in the backend (there is no ingress/uvicorn
+  # body-size limit otherwise). Empty string (default) leaves
+  # MAX_MAIL_MESSAGE_BYTES unset so the app default (100 MiB, same as
+  # backend.maxUploadBytes) applies. When set, also raise your ingress
+  # controller's body-size limit to match (see the chart README's "Running
+  # without shared storage" section). Passed through to the worker too, for
+  # parity with SECRET_KEY/IMPORT_* -- it isn't consumed there today (mail
+  # ingest runs entirely in the backend process), but the worker imports the
+  # same config module.
+  maxMessageBytes: ""
+
+importer:
+  # Kill-switch; when false the /import API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network Confluence servers
+  # import fetches may reach, e.g. ["confluence.corp.internal:8090"].
+  # Enforced per redirect hop inside the backend's SSRF-safe fetcher;
+  # cloud-metadata IPs stay blocked unconditionally. Rendered as a JSON list
+  # into IMPORT_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+  # Hard server-side clamp on pages per run (clients can only go lower).
+  maxPages: 200
+  # Per-attachment download cap in bytes (default 20 MiB).
+  attachmentMaxBytes: 20971520
+  # Cap in bytes on stored page HTML + artifacts per run (default 500 MiB).
+  # Import-heavy installs inflate the database (artifacts and page HTML are
+  # stored as BYTEA rows) -- watch DB volume/backup sizing accordingly.
+  runMaxTotalBytes: 524288000
+
+openwebui:
+  # Kill-switch; when false the /openwebui API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network OpenWebUI servers
+  # pushes may reach, e.g. ["openwebui.corp.internal:8080"]. Enforced per
+  # redirect hop inside the backend's SSRF-safe fetcher; cloud-metadata IPs
+  # stay blocked unconditionally. Rendered as a JSON list into
+  # OPENWEBUI_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+
+webhooks:
+  # Kill-switch; when false the /webhooks API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network webhook targets
+  # (e.g. a LAN-hosted n8n) deliveries may reach, e.g.
+  # ["n8n.corp.internal:5678"]. Enforced per redirect hop inside the
+  # worker's SSRF-safe fetcher; cloud-metadata IPs stay blocked
+  # unconditionally. Rendered as a JSON list into
+  # WEBHOOK_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+  # Cap on pending webhook deliveries per user -- enforced both by the
+  # backend API at manual send time and by the worker's automatic
+  # job.finished/job.failed/import_run.finished dispatch (see
+  # app/workers/webhook_tasks.py's _dispatch()), so it is wired to both
+  # deployments. Same purpose as openwebui.enabled's push cap
+  # (OPENWEBUI_PUSH_MAX_PENDING_PER_USER), just not yet exposed as its own
+  # values key there.
+  maxPendingPerUser: 50
+
+vl:
+  # Hostnames ("host" or "host:port") of private-network OpenAI-compatible
+  # vision endpoints (self-hosted vLLM/Ollama/LiteLLM) that the `openai_vision`
+  # profile and the admin "test VL connection" probe may reach, e.g.
+  # ["vl.corp.internal:8000"]. Self-hosted endpoints are the normal case here
+  # and live on private addresses, which the SSRF-safe fetcher blocks by
+  # default. Same enforcement as the two allowlists above (per redirect hop;
+  # cloud-metadata IPs stay blocked unconditionally). Rendered as a JSON list
+  # into VL_PRIVATE_HOST_ALLOWLIST on BOTH deployments -- the test probe runs
+  # in the backend, the OCR call itself in the worker.
+  privateHostAllowlist: []
+
+auth:
+  # SECRET_KEY signs session cookies and the OIDC state cookie, and derives
+  # the key used to encrypt stored OIDC provider client secrets. Required by
+  # the app itself for any non-sqlite (i.e. any real, external-PostgreSQL)
+  # deployment -- this chart only ever deploys against external PostgreSQL,
+  # so in practice it is always required. required=true (the default) makes
+  # the chart fail template/install immediately with a clear message instead
+  # of deploying pods that crash-loop at startup; set required=false only for
+  # trusted, non-production use (the app still fails fast at its own startup
+  # if SECRET_KEY ends up unset).
+  required: true
+  secretKey:
+    # Name of a pre-existing Secret holding SECRET_KEY. Must already exist
+    # before `helm install`/`upgrade`. Takes priority over `value` below.
+    existingSecret: ""
+    existingSecretKey: secret-key
+    # Plaintext value, mainly for local/CI use. When set (and existingSecret
+    # is empty) the chart creates and manages a "<release>-auth" Secret from
+    # it. Prefer existingSecret in real deployments so SECRET_KEY doesn't
+    # live in plaintext values/Helm release history. Unlike redis.auth.password,
+    # this is never auto-generated -- an operator must supply it explicitly,
+    # since a value that silently changed between renders would invalidate
+    # every session and break OIDC client-secret decryption.
+    value: ""
+  # Base URL the backend is publicly/externally reachable at; used to build
+  # the OIDC redirect_uri (`{publicApiUrl}/api/v1/auth/oidc/{slug}/callback`).
+  # Empty string (default) derives it from ingress.backend.hosts[0] (https if
+  # ingress.backend.tls is set, else http) when ingress.backend.enabled=true,
+  # else falls back to http://localhost:<backend.service.port>. Set this
+  # explicitly if your externally visible hostname differs from the ingress
+  # host configured here (e.g. a separate DNS/load-balancer front-end), or
+  # OIDC login redirects will target the wrong host.
+  publicApiUrl: ""
 
 migrationJob:
   enabled: false
   backoffLimit: 2
+  # Defaults mirror backend.podSecurityContext/containerSecurityContext since
+  # this job runs the backend image.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 persistence:
   enabled: true
@@ -90,7 +333,40 @@ redis:
     pullPolicy: IfNotPresent
   host: ""
   port: 6379
+  # Redis is both the Celery broker/result backend and (via the paddledoc
+  # OIDC-discovery fetcher's SSRF surface) reachable from backend/worker
+  # pods, so it should not sit open on the network. Optional/back-compatible:
+  # - redis.enabled=true (bundled redis, the default): auth is on by default
+  #   and a password is auto-generated into "<release>-redis-auth" the first
+  #   time it's installed (preserved across upgrades).
+  # - redis.enabled=false (external redis): auth stays off by default (same
+  #   unauthenticated REDIS_URL as before) unless you explicitly set
+  #   auth.password or auth.existingSecret below.
+  auth:
+    enabled: true
+    # Name of a pre-existing secret holding the redis password. Must already
+    # exist before `helm install`/`upgrade` (its value is read via `lookup`,
+    # which only sees resources already applied to the cluster -- it cannot
+    # see a Secret created earlier in the same install). Leave empty to have
+    # the chart generate and manage "<release>-redis-auth" itself.
+    existingSecret: ""
+    existingSecretKey: password
+    # Plaintext password, mainly for local/CI use. Takes priority over both
+    # existingSecret and auto-generation when set. Prefer existingSecret (or
+    # leaving both empty for auto-generation) in real deployments so the
+    # password doesn't live in plaintext values/Helm release history.
+    password: ""
   resources: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 autoscaling:
   backend:

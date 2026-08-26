@@ -1,23 +1,37 @@
 import base64
+from collections.abc import Sequence
+from datetime import datetime, timezone
 import html
 import importlib.util
 import json as _json
+import logging
 import platform
 import re
-import urllib.error
-import urllib.request
-import zipfile
-from xml.etree import ElementTree as ET
+import time
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
+from fastapi import HTTPException, status
 from pypdf import PdfReader, PdfWriter
 from redis import Redis
+from sqlalchemy.orm import Session
+import yaml
 
 from app.core.config import settings
+from app.models.models import VlConnection
+from app.services import safe_fetch as safe_fetch_module
 from app.services.quality_gate import evaluate_document_quality
+from app.services.mail_ingest import (
+    _parse_bytes as _parse_eml_bytes,
+    _walk_tree,
+    _render_body,
+    _extract_envelope,
+)
+
+logger = logging.getLogger(__name__)
 
 _RUNTIME_SETTINGS_KEY = 'paddle:runtime_settings'
 _DEFAULT_PROFILE_ID = 'ppocrv6_tiny'
@@ -62,10 +76,10 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
     'ppocrv6_small': {
         'value': 'ppocrv6_small',
         'label': 'PP-OCRv6 small det + rec',
-        'description': 'Balanced OCR preset (det+rec). Mapped to the standard PP-OCRv6 model family.',
+        'description': 'Balanced OCR preset (det+rec) using the PP-OCRv6 small models.',
         'pipeline': 'ppstructurev3',
-        'text_detection_model_name': 'PP-OCRv6_det',
-        'text_recognition_model_name': 'PP-OCRv6_rec',
+        'text_detection_model_name': 'PP-OCRv6_small_det',
+        'text_recognition_model_name': 'PP-OCRv6_small_rec',
         'use_table_recognition': 'false',
     },
     'ppocrv6_small_structurev3': {
@@ -73,8 +87,8 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'label': 'PP-StructureV3 + PP-OCRv6 small det + rec',
         'description': 'Small det+rec with PP-StructureV3 for richer structured output.',
         'pipeline': 'ppstructurev3',
-        'text_detection_model_name': 'PP-OCRv6_det',
-        'text_recognition_model_name': 'PP-OCRv6_rec',
+        'text_detection_model_name': 'PP-OCRv6_small_det',
+        'text_recognition_model_name': 'PP-OCRv6_small_rec',
         'use_table_recognition': 'true',
     },
     'ppocrv6_medium': {
@@ -111,6 +125,20 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
         'pipeline': 'openai_vision',
     },
 }
+# Every static preset is a 'kind': 'ocr' entry, set in one place rather than
+# repeated per literal above -- distinguishes them from the 'kind': 'vl'
+# entries get_paddle_capabilities appends per enabled VlConnection (see
+# resolve_profile_selection / the 'vl:<connection_id>' profile_id contract).
+for _profile in _PADDLE_PROFILES.values():
+    _profile['kind'] = 'ocr'
+del _profile
+
+# Prefix marking a profile_id as "use this admin-configured VlConnection
+# instead of a static preset" (value shape: 'vl:<connection_id>') -- see
+# get_paddle_capabilities, resolve_profile_selection, and
+# effective_pipeline_profile_id below, plus app/api/benchmarks.py's variant
+# generation, whose settings shape this mirrors.
+_VL_PROFILE_PREFIX = 'vl:'
 
 
 def _default_runtime_settings() -> dict[str, str | int]:
@@ -638,33 +666,69 @@ def _build_rag_frontmatter(
     source_name: str,
     page_count: int,
     profile_label: str,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> str:
-    safe_name = source_name.replace('"', "'")
-    metadata = metadata or {}
-    mode = (metadata.get('mode') or 'single').replace('"', "'")
-    email = (metadata.get('email') or '').replace('"', "'")
-    department = (metadata.get('department') or '').replace('"', "'")
+    """Render the YAML frontmatter block prepended to every generated
+    markdown document (both the PP-StructureV3 path and the pypdf/spreadsheet
+    fallback paths -- see `_fallback_convert_with_frontmatter`).
 
-    lines = [
-        '---',
-        f'source: "{safe_name}"',
-        f'pages: {page_count}',
-        f'profile: "{profile_label}"',
-        f'mode: "{mode}"',
-        f'email: "{email}"',
-    ]
+    `metadata` carries everything the caller already knows about this
+    conversion: the worker (app/workers/tasks.py) enriches it from the Job
+    row (job_id, document_version, content_sha256, previous_job_id,
+    uploaded_by, team, tags) before calling convert_to_markdown_with_details;
+    profile_id/engine/used_fallback are set by this module's own call sites,
+    which are the only ones that actually know which pipeline/fallback ran.
+
+    yaml.safe_dump (never f-string interpolation) so attacker-controlled
+    values (filenames, emails, tags, ...) can't break out of the YAML block
+    or inject sibling keys -- same discipline as
+    app/services/confluence_markdown.render_frontmatter.
+    """
+    metadata = metadata or {}
+
+    mode = str(metadata.get('mode') or 'single')
+    email = str(metadata.get('email') or '')
+    department = str(metadata.get('department') or '')
+    document_version = metadata.get('document_version')
+    tags = metadata.get('tags')
+    used_fallback = bool(metadata.get('used_fallback'))
+
+    data: dict[str, object] = {
+        'source': source_name,
+        'pages': page_count,
+        'profile': profile_label,
+        'profile_id': metadata.get('profile_id'),
+        'mode': mode,
+    }
+    if email:
+        data['email'] = email
     if department:
-        lines.append(f'department: "{department}"')
-    lines.append('---')
-    return '\n'.join(lines)
+        data['department'] = department
+    data['job_id'] = metadata.get('job_id')
+    data['document_version'] = document_version if isinstance(document_version, int) else 1
+    data['content_sha256'] = metadata.get('content_sha256')
+    if metadata.get('previous_job_id'):
+        data['previous_job_id'] = metadata['previous_job_id']
+    if metadata.get('uploaded_by'):
+        data['uploaded_by'] = metadata['uploaded_by']
+    if metadata.get('team'):
+        data['team'] = metadata['team']
+    if isinstance(tags, list) and tags:
+        data['tags'] = tags
+    data['processed_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    data['engine'] = metadata.get('engine')
+    if used_fallback:
+        data['used_fallback'] = True
+
+    dumped = yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return f'---\n{dumped}---\n'
 
 
 def _convert_structure_to_markdown(
     page_structures: list[dict],
     source_name: str = '',
     profile_label: str = '',
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> tuple[str, dict]:
     sections: list[str] = []
     block_count = 0
@@ -834,31 +898,182 @@ def _paddleocr_to_structure(
     }
 
 
+_OPENAI_VISION_DEFAULT_SYSTEM_PROMPT = (
+    'You are a precise document OCR and layout extraction assistant. '
+    'Given an image of a document page, extract all text and structure faithfully. '
+    'Return only well-structured Markdown. '
+    'Preserve headings, bullet lists, numbered lists, and tables (as GFM tables). '
+    'Do not add commentary, preamble, or explanation outside the Markdown.'
+)
+
+
+def _call_vision_chat_api(
+    *,
+    api_base: str,
+    bearer_token: str,
+    model_name: str,
+    system_prompt: str,
+    image_b64: str,
+    page_num: int,
+    connection_label: str,
+) -> str:
+    """POST one page image to an OpenAI-compatible /v1/chat/completions
+    endpoint and return the extracted Markdown. Shared by
+    `_openai_vision_to_structure` (explicit params rather than a closure over
+    `settings`/`profile` so the same code path serves both the env-based
+    profile and an admin-configured VlConnection override).
+
+    `connection_label` (the VlConnection's admin-assigned name, or a generic
+    label for the env-based profile -- see `_openai_vision_to_structure`) is
+    what error messages raised here show the caller. `api_base` itself is a
+    secret-adjacent, admin-configured value (may point at an internal/VPC-only
+    host) that regular team members must never see: raised RuntimeErrors
+    propagate straight into `job.error_message` / `processing_info.execution`
+    (job detail response, `_fallback_convert_with_frontmatter`'s
+    fallback_reason) and the benchmark report/export (`_variant_metrics_from_job`
+    reads `job.error_message` verbatim) -- both readable by any teammate who
+    can see the job/run, not just admins. The full `api_base` is logged here
+    instead, for operators with worker log access.
+    """
+    payload = {
+        'model': model_name,
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': f'data:image/png;base64,{image_b64}'},
+                    },
+                    {
+                        'type': 'text',
+                        'text': f'Extract the full text and layout of page {page_num} as Markdown.',
+                    },
+                ],
+            },
+        ],
+        'max_tokens': 4096,
+    }
+    try:
+        response = _vl_chat_completion(api_base, bearer_token, payload, timeout=120)
+    except safe_fetch_module.SafeFetchError as exc:
+        # SafeFetchError embeds the URL it was fetching, and api_base may be an
+        # internal/VPC-only host that must not reach job.error_message or the
+        # log stream (see the api_base note in this function's docstring). The
+        # detail goes to the chained exception; the message stays label-only.
+        logger.warning('VL endpoint "%s" unreachable', connection_label)
+        raise RuntimeError(f'VL endpoint "{connection_label}" unreachable') from exc
+
+    if response.status_code >= 400:
+        error_body = response.body.decode(errors='replace')
+        logger.warning(
+            'VL endpoint "%s" returned HTTP %s for page %s: %s',
+            connection_label, response.status_code, page_num, error_body[:400],
+        )
+        raise RuntimeError(
+            f'VL endpoint "{connection_label}" returned HTTP {response.status_code} '
+            f'for page {page_num}: {error_body[:400]}'
+        )
+
+    try:
+        body = _json.loads(response.body.decode())
+    except ValueError as exc:
+        logger.warning('VL endpoint "%s" returned invalid JSON for page %s', connection_label, page_num)
+        raise RuntimeError(
+            f'VL endpoint "{connection_label}" returned invalid JSON for page {page_num}'
+        ) from exc
+
+    choices = body.get('choices') or []
+    if not choices:
+        logger.warning('VL endpoint "%s" returned no choices for page %s', connection_label, page_num)
+        raise RuntimeError(f'VL endpoint "{connection_label}" returned no choices for page {page_num}')
+    content = (choices[0].get('message') or {}).get('content') or ''
+    return content.strip()
+
+
+# Cap on a VL response body. A page of extracted Markdown is far smaller;
+# this only stops a hostile/broken endpoint from streaming unbounded data
+# into the worker.
+_VL_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _vl_chat_completion(
+    api_base: str,
+    bearer_token: str,
+    payload: dict,
+    timeout: float,
+) -> 'safe_fetch_module.SafeFetchResponse':
+    """POST a chat-completion request to a VL endpoint through safe_fetch.
+
+    Routed through safe_fetch rather than urlopen so these outbound calls get
+    the same treatment as every other admin-supplied URL in this codebase:
+    the connection is pinned to the validated IP (no DNS rebinding), every
+    redirect hop is re-checked, the Authorization header is dropped if a hop
+    leaves the original origin, and cloud-metadata addresses stay blocked no
+    matter what. Self-hosted endpoints on private networks -- the normal case
+    here -- are permitted via VL_PRIVATE_HOST_ALLOWLIST.
+    """
+    return safe_fetch_module.safe_fetch(
+        f'{api_base}/v1/chat/completions',
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {bearer_token}',
+        },
+        body=_json.dumps(payload).encode(),
+        timeout=timeout,
+        max_bytes=_VL_MAX_RESPONSE_BYTES,
+        allowed_private_hosts=frozenset(settings.vl_private_host_allowlist),
+    )
+
+
+def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
+    import pypdfium2 as pdfium  # noqa: PLC0415
+
+    doc = pdfium.PdfDocument(str(pdf_path))
+    page = doc[page_index]
+    bitmap = page.render(scale=2.0)  # 144 dpi — good quality / reasonable token cost
+    pil_image = bitmap.to_pil()
+    import io  # noqa: PLC0415
+    buf = io.BytesIO()
+    pil_image.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _openai_vision_to_structure(
     source: Path,
     profile: dict[str, str],
+    *,
+    vl_override: dict[str, str] | None = None,
 ) -> tuple[list[dict], dict]:
     """Convert a document to structured pages by sending each page as a base64
     PNG to an OpenAI-compatible vision endpoint.
 
-    Requires:
+    Absent `vl_override`, requires:
         OPENAI_API_BASE_URL  – e.g. https://api.openai.com or http://localhost:11434
         OPENAI_API_BEARER_TOKEN – API key / bearer token
 
+    `vl_override` (base_url/api_key/model/system_prompt, all optional keys)
+    lets an admin-configured VlConnection (see app/api/benchmarks.py,
+    app/workers/tasks.py) take priority over the env-based profile on a
+    per-job basis, without touching the env-based path when absent (`None`
+    is a no-op -- byte-identical to the pre-override behavior).
+
     The endpoint is expected to be compatible with the OpenAI chat-completions API
-    (POST /v1/chat/completions). The model name is taken from the profile's
-    'vision_model' key (default: 'gpt-4o').
+    (POST /v1/chat/completions). The model name falls back to the profile's
+    'vision_model' key, then 'gpt-4o'.
     """
     try:
-        from pypdf import PdfReader, PdfWriter  # noqa: PLC0415
-        import pypdfium2 as pdfium  # noqa: PLC0415
+        from pypdf import PdfReader  # noqa: PLC0415
+        import pypdfium2  # noqa: F401,PLC0415
     except ImportError as exc:
         raise RuntimeError(
             f'pypdfium2 is required for the OpenAI vision pipeline: {exc}'
         ) from exc
 
-    api_base = (settings.openai_api_base_url or '').rstrip('/')
-    bearer_token = settings.openai_api_bearer_token or ''
+    api_base = ((vl_override or {}).get('base_url') or settings.openai_api_base_url or '').rstrip('/')
+    bearer_token = (vl_override or {}).get('api_key') or settings.openai_api_bearer_token or ''
     if not api_base:
         raise RuntimeError(
             'OPENAI_API_BASE_URL is not configured. '
@@ -870,74 +1085,25 @@ def _openai_vision_to_structure(
             'Set it via environment variable before using the openai_vision profile.'
         )
 
-    model_name = profile.get('vision_model') or 'gpt-4o'
-    system_prompt = (
-        'You are a precise document OCR and layout extraction assistant. '
-        'Given an image of a document page, extract all text and structure faithfully. '
-        'Return only well-structured Markdown. '
-        'Preserve headings, bullet lists, numbered lists, and tables (as GFM tables). '
-        'Do not add commentary, preamble, or explanation outside the Markdown.'
-    )
-
-    def _page_to_base64_png(pdf_path: Path, page_index: int) -> str:
-        doc = pdfium.PdfDocument(str(pdf_path))
-        page = doc[page_index]
-        bitmap = page.render(scale=2.0)  # 144 dpi — good quality / reasonable token cost
-        pil_image = bitmap.to_pil()
-        import io  # noqa: PLC0415
-        buf = io.BytesIO()
-        pil_image.save(buf, format='PNG')
-        return base64.b64encode(buf.getvalue()).decode()
+    model_name = (vl_override or {}).get('model') or profile.get('vision_model') or 'gpt-4o'
+    system_prompt = ((vl_override or {}).get('system_prompt') or '').strip() or _OPENAI_VISION_DEFAULT_SYSTEM_PROMPT
+    # Shown to any teammate who can see the job/benchmark run (error
+    # messages, fallback_reason, report/export -- see _call_vision_chat_api's
+    # docstring); the connection's admin-assigned name, never its base_url.
+    # No VlConnection is attached on the env-based (non-benchmark) path, so
+    # there's no name to borrow -- fall back to a generic, non-secret label.
+    connection_label = (vl_override or {}).get('name') or 'OpenAI vision (env-configured)'
 
     def _call_vision_api(image_b64: str, page_num: int) -> str:
-        payload = {
-            'model': model_name,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {
-                    'role': 'user',
-                    'content': [
-                        {
-                            'type': 'image_url',
-                            'image_url': {'url': f'data:image/png;base64,{image_b64}'},
-                        },
-                        {
-                            'type': 'text',
-                            'text': f'Extract the full text and layout of page {page_num} as Markdown.',
-                        },
-                    ],
-                },
-            ],
-            'max_tokens': 4096,
-        }
-        data = _json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f'{api_base}/v1/chat/completions',
-            data=data,
-            method='POST',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {bearer_token}',
-            },
+        return _call_vision_chat_api(
+            api_base=api_base,
+            bearer_token=bearer_token,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            image_b64=image_b64,
+            page_num=page_num,
+            connection_label=connection_label,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
-                body = _json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode(errors='replace')
-            raise RuntimeError(
-                f'OpenAI vision API returned HTTP {exc.code} for page {page_num}: {error_body[:400]}'
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f'OpenAI vision API unreachable ({api_base}): {exc.reason}'
-            ) from exc
-
-        choices = body.get('choices') or []
-        if not choices:
-            raise RuntimeError(f'OpenAI vision API returned no choices for page {page_num}')
-        content = (choices[0].get('message') or {}).get('content') or ''
-        return content.strip()
 
     suffix = source.suffix.lower()
     page_structures: list[dict] = []
@@ -991,6 +1157,66 @@ def _openai_vision_to_structure(
         'vision_model': model_name,
         'api_base': api_base,
     }
+
+
+def test_vl_connection(
+    base_url: str,
+    model: str,
+    api_key: str,
+    system_prompt: str,
+    timeout_seconds: float = 20.0,
+) -> dict[str, object]:
+    """Probe an OpenAI-compatible vision endpoint with one minimal,
+    text-only chat-completion request (no image) -- just enough to confirm
+    the endpoint is reachable and the credential is accepted, without the
+    cost/latency of a real page render. Used by
+    POST /api/v1/auth/admin/vl-connections/{id}/test.
+
+    Goes through safe_fetch like every other outbound call to an
+    admin-supplied URL; private endpoints (self-hosted vLLM/Ollama/etc.) are
+    permitted via VL_PRIVATE_HOST_ALLOWLIST, while DNS-rebinding protection,
+    per-hop redirect checks and the unconditional cloud-metadata block stay
+    in force.
+
+    The result deliberately reports only status and latency, never the remote
+    response body: echoing it back would turn this endpoint into a probe for
+    mapping internal services from the outside.
+    """
+    normalized_base = (base_url or '').rstrip('/')
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': system_prompt or _OPENAI_VISION_DEFAULT_SYSTEM_PROMPT},
+            {'role': 'user', 'content': 'Reply with a single word to confirm connectivity.'},
+        ],
+        'max_tokens': 16,
+    }
+    started = time.monotonic()
+    try:
+        response = _vl_chat_completion(normalized_base, api_key, payload, timeout=timeout_seconds)
+    except safe_fetch_module.SafeFetchError as exc:
+        # Covers unreachable hosts, blocked/private targets and size caps.
+        latency_ms = int((time.monotonic() - started) * 1000)
+        # Same reasoning as _call_vision_chat_api: the URL stays out of the
+        # log stream, which the admin Logs tab renders.
+        logger.warning('VL connection test failed: endpoint unreachable or not permitted')
+        return {'ok': False, 'detail': 'Endpoint unreachable or not permitted', 'latency_ms': latency_ms}
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        latency_ms = int((time.monotonic() - started) * 1000)
+        logger.warning('VL connection test raised %s', type(exc).__name__)
+        return {'ok': False, 'detail': 'Connection test failed', 'latency_ms': latency_ms}
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    if response.status_code >= 400:
+        # Body intentionally logged, not returned -- see the docstring.
+        logger.warning(
+            'VL connection test returned HTTP %s: %s',
+            response.status_code, response.body.decode(errors='replace')[:400],
+        )
+        return {'ok': False, 'detail': f'HTTP {response.status_code}', 'latency_ms': latency_ms}
+
+    return {'ok': True, 'detail': 'Connected', 'latency_ms': latency_ms}
 
 
 def _paddlevl_to_structure(
@@ -1083,7 +1309,22 @@ def update_paddle_settings(*, default_profile: str, timeout_seconds: int) -> Non
         settings.paddle_timeout_seconds = timeout_seconds
 
 
-def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
+def get_paddle_capabilities(
+    vl_connections: Sequence[VlConnection] = (),
+) -> dict[str, list[dict[str, str]]]:
+    """Static presets (unchanged, 'kind': 'ocr') plus one dynamic 'kind':
+    'vl' entry per already-enabled VlConnection the caller passes in --
+    static entries always first, per the profile_id contract used across
+    upload/collections-start/restart/mail/import (see
+    resolve_profile_selection).
+
+    Takes already-loaded connections rather than a db session/query itself:
+    this module has never had a DB dependency (Redis for runtime settings,
+    nothing else), and callers (routes.py's /paddle/capabilities endpoint
+    and its restart-time profile validator) already need a Session for
+    other things, so loading the enabled-connections list is cheapest done
+    once there and handed in -- see routes.py's _enabled_vl_connections.
+    """
     profile_order = [
         'no_profile',
         'ppocrv6_tiny',
@@ -1095,13 +1336,103 @@ def get_paddle_capabilities() -> dict[str, list[dict[str, str]]]:
         'paddlevl_1_6_0_9b',
         'openai_vision',
     ]
-    return {
-        'profiles': [
-            _PADDLE_PROFILES[profile_id]
-            for profile_id in profile_order
-            if profile_id in _PADDLE_PROFILES
-        ],
-    }
+    profiles = [
+        _PADDLE_PROFILES[profile_id]
+        for profile_id in profile_order
+        if profile_id in _PADDLE_PROFILES
+    ]
+    profiles.extend(
+        {
+            'value': f'{_VL_PROFILE_PREFIX}{connection.id}',
+            'label': f'VL: {connection.name}',
+            'description': f'{connection.model} — vision-language connection',
+            'kind': 'vl',
+        }
+        for connection in vl_connections
+    )
+    return {'profiles': profiles}
+
+
+def _vl_connection_settings(db: Session, connection_id: str) -> tuple[dict[str, str], VlConnection | None]:
+    """Shared lookup behind resolve_profile_selection and
+    vl_settings_for_worker: settings fields always carry vl_connection_id
+    (even when the connection is missing/disabled) plus variant_label when
+    the connection still exists, so a caller either raises on a bad
+    connection (resolve_profile_selection, for API endpoints) or lets
+    process_job's own disabled/missing-connection check fail just that one
+    job later (vl_settings_for_worker, for background workers -- see its
+    docstring)."""
+    connection = db.get(VlConnection, connection_id)
+    fields: dict[str, str] = {'vl_connection_id': connection_id}
+    if connection is not None:
+        fields['variant_label'] = connection.name
+    return fields, connection
+
+
+def resolve_profile_selection(db: Session, profile_id: str | None) -> dict[str, str]:
+    """Translates a client-supplied profile_id into the extra
+    processing_info.settings fields it implies, mirroring the shape
+    app/api/benchmarks.py's variant generation writes for its 'vl' variant
+    (vl_connection_id + a human-readable label under 'variant_label') -- see
+    app/workers/tasks.py's vl_override build (~line 335) for the consumer,
+    which only needs settings.vl_connection_id to work unchanged.
+
+    Static preset ids (the _PADDLE_PROFILES keys) need no extra settings
+    and return {}. An unrecognized *static-looking* id also returns {},
+    deliberately un-validated -- exactly today's behavior
+    (paddle_service._resolve_profile silently clamps it to the default
+    profile downstream; upload_document has never validated profile_id, and
+    this must not become stricter for that path). Only a
+    'vl:<connection_id>' selection is strictly checked here, because an
+    unknown/disabled connection has no equivalent silent fallback the way a
+    bad static id falls back to a default OCR preset: raises 422 in that
+    case, matching the wording already used for unknown static profiles
+    (see routes.py's restart_job validator).
+    """
+    if not isinstance(profile_id, str) or not profile_id.startswith(_VL_PROFILE_PREFIX):
+        return {}
+    connection_id = profile_id[len(_VL_PROFILE_PREFIX):]
+    fields, connection = _vl_connection_settings(db, connection_id)
+    if connection is None or not connection.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown profile '{profile_id}'",
+        )
+    return {'profile_id': profile_id, **fields}
+
+
+def vl_settings_for_worker(db: Session, profile_id: str | None) -> dict[str, str]:
+    """Non-raising counterpart to resolve_profile_selection for Celery
+    workers (app/workers/import_tasks.py's attachment-OCR dispatch), which
+    must never abort a whole run/page over an HTTP-shaped exception --
+    workers in this codebase deliberately stay fastapi-free (see
+    app/workers/openwebui_tasks.py's "instead of raising HTTPException"
+    house rule). The connection was already validated once, at request time
+    (import_routes.py's create_import_run calls resolve_profile_selection);
+    if it has since been deleted/disabled, this still returns
+    vl_connection_id so process_job's own disabled-connection check
+    (tasks.py ~335) fails just that one child job with its normal clear
+    message, instead of silently dropping the selection."""
+    if not isinstance(profile_id, str) or not profile_id.startswith(_VL_PROFILE_PREFIX):
+        return {}
+    connection_id = profile_id[len(_VL_PROFILE_PREFIX):]
+    fields, _connection = _vl_connection_settings(db, connection_id)
+    return {'profile_id': profile_id, **fields}
+
+
+def effective_pipeline_profile_id(profile_id: str | None) -> str | None:
+    """The real OCR/VL pipeline id to hand to process_job.delay /
+    convert_to_markdown_with_details -- a 'vl:<connection_id>' selection
+    always resolves to 'openai_vision' (the same real profile
+    app/api/benchmarks.py's vl variant spec uses), matching the
+    settings.vl_connection_id the worker's vl_override build already reads
+    unchanged (tasks.py ~335). The stored settings.profile_id stays the
+    display value ('vl:<connection_id>', see resolve_profile_selection) --
+    this function is only for the argument passed to the Celery task /
+    conversion call, never for what's persisted."""
+    if isinstance(profile_id, str) and profile_id.startswith(_VL_PROFILE_PREFIX):
+        return 'openai_vision'
+    return profile_id
 
 
 def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
@@ -1111,73 +1442,159 @@ def _resolve_profile(profile_id: str | None) -> tuple[str, dict[str, str]]:
     return requested_profile, _PADDLE_PROFILES[requested_profile]
 
 
-def _convert_with_native_extractors(
+def _eml_to_markdown(
     source: Path,
-    *,
     selected_profile_id: str,
     selected_profile: dict[str, str],
-    capability: dict,
+    metadata: dict[str, object] | None = None,
+) -> tuple[str, int]:
+    """Convert a .eml (RFC-822 email) file to markdown.
+
+    Returns (markdown_content, page_count_for_attachments).
+    The function:
+    1. Parses the email envelope and body
+    2. Renders the body (HTML or plain text) to markdown
+    3. For each attachment, if supported, processes it through the conversion pipeline
+    4. Combines them all into one markdown document
+
+    This is used as a first-class document handler (not tied to mail ingestion),
+    so it uses the standard frontmatter/versioning like any other document type.
+    """
+    from app.services.confluence_markdown import html_to_markdown
+
+    # Read and parse the .eml file
+    raw_eml = source.read_bytes()
+    msg = _parse_eml_bytes(raw_eml)
+    envelope = _extract_envelope(msg)
+    chosen_body, leaves = _walk_tree(msg)
+
+    sections: list[str] = []
+    total_attachment_pages = 0
+
+    # Render the email body
+    if chosen_body is not None:
+        content_type = chosen_body.get_content_type()
+        if content_type == 'text/html':
+            html_content = chosen_body.get_content()
+            if not isinstance(html_content, str):
+                html_content = html_content.decode('utf-8', errors='replace')
+            # Use the same HTML->markdown conversion as mail_ingest
+            rendered, _images, _links = html_to_markdown(html_content, base_url='', capture_attachments=False)
+        else:
+            text_content = chosen_body.get_content()
+            rendered = text_content if isinstance(text_content, str) else text_content.decode('utf-8', errors='replace')
+
+        if rendered.strip():
+            sections.append(rendered.strip())
+
+    # Process attachments
+    for leaf in leaves:
+        if leaf.outcome != 'job':
+            # Skip inline and skipped attachments
+            if leaf.outcome == 'skipped' and leaf.skip_reason:
+                sections.append(f'(skipped: {leaf.filename} — {leaf.skip_reason})')
+            continue
+
+        # This is a job-outcome attachment — process it through the pipeline
+        try:
+            # Write the attachment to a temporary file
+            temp_file = Path(source.parent) / f'_temp_attachment_{leaf.index}_{leaf.filename}'
+            temp_file.write_bytes(leaf.content)
+
+            try:
+                # Recursively convert the attachment using the same profile
+                attachment_md, attachment_details = convert_to_markdown_with_details(
+                    str(temp_file),
+                    profile_id=selected_profile_id,
+                    metadata=metadata,
+                )
+
+                # Extract just the body (strip frontmatter)
+                parts = attachment_md.split('---\n', 2)
+                if len(parts) >= 3:
+                    attachment_body = parts[2].strip()
+                else:
+                    attachment_body = attachment_md.strip()
+
+                # Add as an attachment section
+                if attachment_body:
+                    sections.append(f'## Attachment: {leaf.filename}\n\n{attachment_body}')
+
+                # Sum up pages
+                if isinstance(attachment_details.get('page_count'), int):
+                    total_attachment_pages += attachment_details['page_count']
+            finally:
+                temp_file.unlink(missing_ok=True)
+        except Exception as exc:
+            # If attachment conversion fails, log it as skipped
+            sections.append(f'(skipped: {leaf.filename} — conversion error: {str(exc)[:50]})')
+
+    # Combine all sections
+    body = '\n\n---\n\n'.join(sections) if sections else '(empty email)'
+
+    # page_count is 1 for the email body + sum of attachment pages
+    page_count = max(1, total_attachment_pages)
+
+    return body, page_count
+
+
+def _fallback_convert_with_frontmatter(
+    source: Path,
+    suffix: str,
+    selected_profile_id: str,
+    selected_profile: dict[str, str],
+    metadata: dict[str, object] | None,
     fallback_reason: str,
-    used_fallback: bool,
+    capability: dict,
 ) -> tuple[str, dict]:
-    suffix = source.suffix.lower()
+    """Shared pypdf/spreadsheet fallback body for both call sites in
+    `convert_to_markdown_with_details` (PaddleOCR unavailable, and the
+    primary PP-StructureV3 path raising). Prepends the same RAG frontmatter
+    the successful path emits -- with used_fallback: true and the applicable
+    fallback engine -- so fallback output is never missing the header that
+    `PUT /jobs/{id}/save` and downstream RAG ingestion both expect.
+    `suffix` must be '.pdf', '.xls', or '.xlsx'.
+    """
+    engine = 'pypdf-fallback' if suffix == '.pdf' else 'spreadsheet-fallback'
+    frontmatter_metadata = {
+        **(metadata or {}),
+        'profile_id': selected_profile_id,
+        'engine': engine,
+        'used_fallback': True,
+    }
 
+    extra: dict[str, object] = {}
     if suffix == '.pdf':
-        markdown = _fallback_pdf_to_markdown(source)
+        body = _fallback_pdf_to_markdown(source)
         page_count = _pdf_page_count(source)
-        quality_gate = evaluate_document_quality(markdown)
-        return markdown, {
-            'engine': 'pypdf-native' if not used_fallback else 'pypdf-fallback',
-            'used_fallback': used_fallback,
-            'fallback_reason': fallback_reason,
-            'profile_id': selected_profile_id,
-            'profile_label': selected_profile['label'],
-            'page_count': page_count,
-            'quality_gate': quality_gate,
-            **capability,
-        }
+    else:
+        body, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+        page_count = max(1, sheet_count)
+        extra = {'sheet_count': sheet_count, 'row_count': row_count}
 
-    if suffix in {'.xls', '.xlsx'}:
-        markdown, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-        quality_gate = evaluate_document_quality(markdown) 
-        return markdown, {
-            'engine': 'spreadsheet-native' if not used_fallback else 'spreadsheet-fallback',
-            'used_fallback': used_fallback,
-            'fallback_reason': fallback_reason,
-            'profile_id': selected_profile_id,
-            'profile_label': selected_profile['label'],
-            'page_count': max(1, sheet_count),
-            'sheet_count': sheet_count,
-            'row_count': row_count,
-            'quality_gate': quality_gate,
-            **capability,
-        }
-
-    if suffix == '.docx':
-        markdown, paragraph_count = _fallback_docx_to_markdown(source)
-        quality_gate = evaluate_document_quality(markdown)
-        return markdown, {
-            'engine': 'docx-native' if not used_fallback else 'docx-fallback',
-            'used_fallback': used_fallback,
-            'fallback_reason': fallback_reason,
-            'profile_id': selected_profile_id,
-            'profile_label': selected_profile['label'],
-            'page_count': 1,
-            'paragraph_count': paragraph_count,
-            'quality_gate': quality_gate,
-            **capability,
-        }
-
-    raise RuntimeError(
-        'Native extraction supports only .pdf, .docx, .xls, and .xlsx. '
-        'Use an OCR profile for images and other formats.'
+    frontmatter = _build_rag_frontmatter(
+        source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
     )
+    markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
+    quality_gate = evaluate_document_quality(markdown)
+    return markdown, {
+        'engine': engine,
+        'used_fallback': True,
+        'fallback_reason': fallback_reason,
+        'profile_id': selected_profile_id,
+        'profile_label': selected_profile['label'],
+        'page_count': page_count,
+        **extra,
+        'quality_gate': quality_gate,
+        **capability,
+    }
 
 
 def convert_to_markdown_with_details(
     input_path: str,
     profile_id: str | None = None,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, object] | None = None,
+    vl_override: dict[str, str] | None = None,
 ) -> tuple[str, dict]:
     source = Path(input_path).resolve()
     if not source.exists():
@@ -1185,32 +1602,50 @@ def convert_to_markdown_with_details(
 
     selected_profile_id, selected_profile = _resolve_profile(profile_id)
     capability = _runtime_capability()
+    suffix = source.suffix.lower()
 
-    if selected_profile_id == 'no_profile':
-        return _convert_with_native_extractors(
-            source,
-            selected_profile_id=selected_profile_id,
-            selected_profile=selected_profile,
-            capability=capability,
-            fallback_reason='OCR disabled by profile selection',
-            used_fallback=False,
-        )
+    # .eml (email) files are processed directly without PaddleOCR dependency
+    if suffix == '.eml':
+        try:
+            body, page_count = _eml_to_markdown(source, selected_profile_id, selected_profile, metadata)
+            frontmatter_metadata = {
+                **(metadata or {}),
+                'profile_id': selected_profile_id,
+                'engine': 'mail-eml',
+                'used_fallback': False,
+            }
+            frontmatter = _build_rag_frontmatter(
+                source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
+            )
+            markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
+            quality_gate = evaluate_document_quality(markdown)
+            return markdown, {
+                'engine': 'mail-eml',
+                'used_fallback': False,
+                'profile_id': selected_profile_id,
+                'profile_label': selected_profile['label'],
+                'page_count': page_count,
+                'quality_gate': quality_gate,
+                **capability,
+            }
+        except Exception as exc:
+            raise RuntimeError(f'Failed to convert .eml file: {exc}') from exc
 
     if not _paddleocr_available():
-        return _convert_with_native_extractors(
-            source,
-            selected_profile_id=selected_profile_id,
-            selected_profile=selected_profile,
-            capability=capability,
-            fallback_reason='PaddleOCR is not installed in this worker image',
-            used_fallback=True,
-        )
+        if suffix in {'.pdf', '.xls', '.xlsx'}:
+            return _fallback_convert_with_frontmatter(
+                source, suffix, selected_profile_id, selected_profile, metadata,
+                'PaddleOCR is not installed in this worker image', capability,
+            )
+        raise RuntimeError('PaddleOCR is not installed in this worker image')
 
     try:
         selected_pipeline = selected_profile.get('pipeline', 'ppstructurev3')
         converter = 'ppstructure-json-to-rag-markdown'
         if selected_pipeline == 'openai_vision':
-            page_structures, extraction_meta = _openai_vision_to_structure(source, selected_profile)
+            page_structures, extraction_meta = _openai_vision_to_structure(
+                source, selected_profile, vl_override=vl_override
+            )
             converter = 'openai-vision-to-rag-markdown'
         elif selected_pipeline == 'paddlevl':
             page_structures, extraction_meta = _paddlevl_to_structure(source, capability)
@@ -1222,11 +1657,17 @@ def convert_to_markdown_with_details(
                 selected_profile,
                 capability,
             )
+        frontmatter_metadata = {
+            **(metadata or {}),
+            'profile_id': selected_profile_id,
+            'engine': 'paddleocr',
+            'used_fallback': False,
+        }
         markdown, block_stats = _convert_structure_to_markdown(
             page_structures,
             source_name=source.name,
             profile_label=selected_profile['label'],
-            metadata=metadata,
+            metadata=frontmatter_metadata,
         )
         quality_gate = evaluate_document_quality(
             markdown,
@@ -1252,14 +1693,12 @@ def convert_to_markdown_with_details(
             **capability,
         }
     except Exception as exc:
-        return _convert_with_native_extractors(
-            source,
-            selected_profile_id=selected_profile_id,
-            selected_profile=selected_profile,
-            capability=capability,
-            fallback_reason=str(exc),
-            used_fallback=True,
-        )
+        suffix = source.suffix.lower()
+        if suffix in {'.pdf', '.xls', '.xlsx'}:
+            return _fallback_convert_with_frontmatter(
+                source, suffix, selected_profile_id, selected_profile, metadata, str(exc), capability,
+            )
+        raise
 
 
 def convert_to_markdown(input_path: str, profile_id: str | None = None) -> str:
