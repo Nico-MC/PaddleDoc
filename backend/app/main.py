@@ -12,6 +12,7 @@ from app.api.import_routes import router as import_router
 from app.api.mail_routes import router as mail_router
 from app.api.openwebui_routes import router as openwebui_router
 from app.api.routes import router
+from app.api.webhook_routes import router as webhook_router
 from app.core.config import settings
 from app.schemas.jobs import HealthResponse
 from app.services.storage import ensure_storage_dirs
@@ -75,3 +76,8 @@ app.include_router(mail_router, dependencies=[Depends(get_current_user), Depends
 # the main router; the module itself adds the OPENWEBUI_ENABLED kill-switch
 # (mirrors import_router's registration).
 app.include_router(openwebui_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])
+
+# Outbound webhook surface (/api/v1/webhooks/...): same session + CSRF gate
+# as the main router; the module itself adds the WEBHOOKS_ENABLED kill-switch
+# (mirrors import_router's/openwebui_router's registration).
+app.include_router(webhook_router, dependencies=[Depends(get_current_user), Depends(origin_guard)])

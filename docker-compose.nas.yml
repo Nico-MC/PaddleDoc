@@ -94,6 +94,13 @@ services:
       # JSON list string, same convention as IMPORT_PRIVATE_HOST_ALLOWLIST.
       OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
       OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
+      # Webhook delivery. A NAS-/LAN-hosted target (e.g. n8n) is the
+      # textbook allowlist use case: put its host (host or host:port) in
+      # WEBHOOK_PRIVATE_HOST_ALLOWLIST, e.g. '["192.168.1.10:5678"]' --
+      # JSON list string, same convention as IMPORT_PRIVATE_HOST_ALLOWLIST.
+      WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
+      WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
+      WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
     depends_on:
@@ -170,6 +177,15 @@ services:
       # same OPENWEBUI_* settings as the backend (which only tests/lists).
       OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
       OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
+      # Webhook delivery: the deliver_webhook task runs on this worker, so it
+      # needs the same WEBHOOK_* settings as the backend. The pending-cap is
+      # also enforced here, not just by the backend's POST /webhooks/send --
+      # app/workers/webhook_tasks.py's _dispatch() (the automatic
+      # job.finished/job.failed/import_run.finished hooks) checks the same
+      # cap before creating a delivery, and that runs in this worker process.
+      WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
+      WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
+      WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
       - ./nas-data/storage:/app/backend/storage:rw
       # See docker-compose.yml: container home is /home/paddledoc.

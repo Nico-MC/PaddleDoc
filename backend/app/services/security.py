@@ -210,6 +210,7 @@ _OIDC_CLIENT_SECRET_HKDF_INFO = b'oidc-client-secret'
 _IMPORT_CREDENTIAL_HKDF_INFO = b'import-source-credential'
 _VL_CONNECTION_API_KEY_HKDF_INFO = b'vl-connection-api-key'
 _OPENWEBUI_CONNECTION_API_KEY_HKDF_INFO = b'openwebui-connection-api-key'
+_WEBHOOK_CONNECTION_SECRET_HKDF_INFO = b'webhook-connection-secret'
 
 
 def _derive_fernet_key(info: bytes) -> bytes:
@@ -328,6 +329,36 @@ def decrypt_openwebui_api_key(ciphertext: str) -> str:
         return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
     except InvalidToken as exc:
         raise ValueError('OpenWebUI connection API key could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
+
+
+# --- Webhook connection secret encryption ------------------------------------
+#
+# Same Fernet-over-HKDF pattern as OIDC client secrets / import credentials /
+# VL connection API keys / OpenWebUI connection API keys, under its own info
+# label. webhook_connections.secret_encrypted is write-only at the API; the
+# plaintext exists only inside POST .../test and the delivery worker task
+# (see app/workers/webhook_tasks.py). Unlike the other secrets above, this one
+# is genuinely optional -- a connection may have no secret at all -- so
+# callers must check for None before encrypting/decrypting.
+
+def encrypt_webhook_secret(plaintext: str) -> str:
+    """Fernet-encrypt a webhook connection secret for storage in
+    webhook_connections.secret_encrypted."""
+    fernet = Fernet(_derive_fernet_key(_WEBHOOK_CONNECTION_SECRET_HKDF_INFO))
+    return fernet.encrypt(plaintext.encode('utf-8')).decode('utf-8')
+
+
+def decrypt_webhook_secret(ciphertext: str) -> str:
+    """Inverse of encrypt_webhook_secret.
+
+    Raises ValueError if the ciphertext is malformed/tampered, or was
+    encrypted under a different SECRET_KEY (e.g. after a key rotation).
+    """
+    fernet = Fernet(_derive_fernet_key(_WEBHOOK_CONNECTION_SECRET_HKDF_INFO))
+    try:
+        return fernet.decrypt(ciphertext.encode('utf-8')).decode('utf-8')
+    except InvalidToken as exc:
+        raise ValueError('webhook connection secret could not be decrypted (wrong SECRET_KEY or corrupted value)') from exc
 
 
 # --- Short-lived signed cookie values (OIDC state/nonce/PKCE) --------------

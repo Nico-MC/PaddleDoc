@@ -9,6 +9,7 @@ headers, caps, and allowed_private_hosts propagation.
 
 import base64
 import json
+import logging
 
 import pytest
 
@@ -558,3 +559,145 @@ def test_v1_resolve_space_root_not_found(monkeypatch):
     })
     with pytest.raises(ConfluenceError, match='not found'):
         _dc_client().resolve_space_root('NOPE')
+
+
+# --- diagnostic logging + enriched error messages ------------------------------
+#
+# The user's Server/DC crawl loses pages silently today; these tests lock in
+# that every failed request now (a) logs a WARNING carrying method/path,
+# status, server_kind, and Confluence's own JSON `message` (never an HTML
+# body, never a query string, never the credential), and (b) raises a
+# ConfluenceError whose text is enriched with a plain-language reading of the
+# common status codes -- 401/403/404/429 -- so it is diagnosable straight out
+# of ImportRun.error_message / state.errors without cross-referencing logs.
+
+def test_get_json_403_logs_warning_with_path_status_kind_and_explanation(monkeypatch, caplog):
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/pages/123?body-format=export_view': (403, _json_body({'message': 'No permission'})),
+    })
+    with caplog.at_level(logging.WARNING, logger='app.services.confluence'):
+        with pytest.raises(ConfluenceError) as excinfo:
+            _cloud_client().fetch_page('123')
+
+    assert excinfo.value.status_code == 403
+    message = str(excinfo.value)
+    assert 'HTTP 403' in message
+    assert 'Forbidden' in message
+    assert 'permission' in message.lower()
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert '/wiki/api/v2/pages/123' in logged
+    assert '403' in logged
+    assert 'cloud' in logged
+    assert 'No permission' in logged
+
+
+def test_get_json_html_error_body_is_never_logged_verbatim(monkeypatch, caplog):
+    # A common DC failure mode: a reverse proxy in front of Confluence answers
+    # with an HTML error page instead of Confluence's own JSON. That body must
+    # never be parsed as a message and dumped into the log.
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/pages/123?body-format=export_view': (
+            502, b'<html><body>Bad Gateway from the reverse proxy</body></html>'
+        ),
+    })
+    with caplog.at_level(logging.WARNING, logger='app.services.confluence'):
+        with pytest.raises(ConfluenceError):
+            _cloud_client().fetch_page('123')
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert '<html>' not in logged
+    assert 'Bad Gateway' not in logged
+
+
+def test_get_json_success_logs_debug_not_warning(monkeypatch, caplog):
+    _install(monkeypatch, {
+        f'{DC_BASE}/rest/api/content/42?expand=body.export_view,version,space': (200, _json_body({
+            'id': '42',
+            'title': 'Runbook',
+            'version': {'number': 1},
+            'body': {'export_view': {'value': '<p>ok</p>'}},
+        })),
+    })
+    with caplog.at_level(logging.DEBUG, logger='app.services.confluence'):
+        _dc_client().fetch_page('42')
+
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    debug_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any('/rest/api/content/42' in line and '200' in line for line in debug_lines)
+    assert any('datacenter' in line for line in debug_lines)
+
+
+def test_query_string_and_credential_never_appear_in_warning_log(monkeypatch, caplog):
+    # Only the path is ever logged/reported -- a token riding along in a
+    # query string (this API never puts one there, but the discipline must
+    # hold regardless) must not leak into the log or the error text either.
+    url = f'{CLOUD_BASE}/wiki/api/v2/pages/123?body-format=export_view&api_token={SECRET}'
+    _install(monkeypatch, {url: (401, b'{}')})
+    client = _cloud_client()
+
+    with caplog.at_level(logging.WARNING, logger='app.services.confluence'):
+        with pytest.raises(ConfluenceError) as excinfo:
+            client._get_json(url)
+
+    assert SECRET not in str(excinfo.value)
+    assert all(SECRET not in r.getMessage() for r in caplog.records)
+    assert all('api_token' not in r.getMessage() for r in caplog.records)
+
+
+def test_attachment_download_403_logs_warning_and_enriches_message(monkeypatch, caplog):
+    download_path = '/download/attachments/42/secret.pdf'
+    _install(monkeypatch, {
+        f'{DC_BASE}{download_path}': (403, _json_body({'message': 'You are not permitted to view this attachment'})),
+    })
+    client = _dc_client()
+
+    with caplog.at_level(logging.WARNING, logger='app.services.confluence'):
+        with pytest.raises(ConfluenceError) as excinfo:
+            client._get_bytes(f'{DC_BASE}{download_path}')
+
+    assert excinfo.value.status_code == 403
+    assert 'Forbidden' in str(excinfo.value)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert 'not permitted' in logged
+    assert download_path in logged
+
+
+def test_v2_resolve_space_root_not_found_mentions_key_and_permission_ambiguity(monkeypatch):
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/spaces?keys=NOPE&limit=1': (200, _json_body({'results': []})),
+    })
+    with pytest.raises(ConfluenceError) as excinfo:
+        _cloud_client().resolve_space_root('NOPE')
+    message = str(excinfo.value)
+    assert "'NOPE'" in message
+    assert 'not found' in message
+    assert 'accessible' in message or 'permission' in message.lower()
+
+
+def test_v2_resolve_space_root_personal_space_hint(monkeypatch):
+    _install(monkeypatch, {
+        f'{CLOUD_BASE}/wiki/api/v2/spaces?keys=~jdoe&limit=1': (200, _json_body({'results': []})),
+    })
+    with pytest.raises(ConfluenceError) as excinfo:
+        _cloud_client().resolve_space_root('~jdoe')
+    message = str(excinfo.value)
+    assert "'~jdoe'" in message
+    assert 'personal space' in message
+
+
+def test_v1_resolve_space_root_not_found_mentions_key_and_permission_ambiguity(monkeypatch):
+    _install(monkeypatch, {
+        f'{DC_BASE}/rest/api/space/NOPE?expand=homepage': (404, b'{}'),
+    })
+    with pytest.raises(ConfluenceError) as excinfo:
+        _dc_client().resolve_space_root('NOPE')
+    message = str(excinfo.value)
+    assert "'NOPE'" in message
+    assert 'accessible' in message or 'permission' in message.lower()

@@ -784,6 +784,70 @@ def test_0012_provider_email_username_round_trip(tmp_path, monkeypatch) -> None:
     assert 'use_email_as_username' in provider_columns
 
 
+def test_0013_webhooks_round_trip(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / 'migration_scratch_0013.db'
+    db_url = f'sqlite:///{db_path}'
+    monkeypatch.setattr(settings, 'database_url', db_url)
+
+    engine = create_engine(db_url, future=True)
+    _build_legacy_metadata().create_all(bind=engine)
+
+    cfg = _alembic_config()
+    command.stamp(cfg, '0003_job_markdown_versions')
+
+    # --- upgrade through the real 0004..0013 chain ---
+    command.upgrade(cfg, 'head')
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert {'webhook_connections', 'webhook_deliveries'} <= tables
+
+    connection_columns = {c['name'] for c in insp.get_columns('webhook_connections')}
+    assert {'id', 'name', 'url', 'secret_encrypted', 'enabled', 'events', 'owner_id', 'created_at', 'updated_at'} \
+        <= connection_columns
+    connection_fks = {(fk['referred_table'], tuple(fk['constrained_columns'])) for fk in insp.get_foreign_keys('webhook_connections')}
+    assert ('users', ('owner_id',)) in connection_fks
+
+    delivery_columns = {c['name'] for c in insp.get_columns('webhook_deliveries')}
+    assert {
+        'id', 'connection_id', 'connection_name', 'owner_id', 'event', 'job_id', 'import_run_id',
+        'status', 'http_status', 'error_message', 'attempts', 'created_at', 'updated_at',
+    } <= delivery_columns
+    delivery_fks = {(fk['referred_table'], tuple(fk['constrained_columns'])) for fk in insp.get_foreign_keys('webhook_deliveries')}
+    assert ('webhook_connections', ('connection_id',)) in delivery_fks
+    assert ('jobs', ('job_id',)) in delivery_fks
+    assert ('import_runs', ('import_run_id',)) in delivery_fks
+    assert ('users', ('owner_id',)) in delivery_fks
+
+    # server_default must make enabled/events/status/attempts land sanely for
+    # a pre-existing raw-SQL insert (mirrors 0012's server_default check).
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO webhook_connections (id, name, url, created_at, updated_at) "
+            "VALUES ('c1', 'Legacy', 'https://example.com/hook', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ))
+        enabled, events = conn.execute(
+            text("SELECT enabled, events FROM webhook_connections WHERE id = 'c1'")
+        ).one()
+    assert enabled in (1, True)
+    assert events == '[]'
+
+    # --- downgrade one revision: only the 0013 tables disappear ---
+    command.downgrade(cfg, '0012_provider_email_username')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert not ({'webhook_connections', 'webhook_deliveries'} & tables)
+    # 0012's schema must survive a 0013-only downgrade untouched.
+    provider_columns = {c['name'] for c in insp.get_columns('auth_providers')}
+    assert 'use_email_as_username' in provider_columns
+
+    # --- re-upgrade: should cleanly re-apply from the 0012 baseline ---
+    command.upgrade(cfg, 'head')
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert {'webhook_connections', 'webhook_deliveries'} <= tables
+
+
 def test_migration_revision_ids_fit_alembic_version_column():
     """Alembic stores the current revision in alembic_version.version_num,
     a VARCHAR(32). PostgreSQL enforces that limit; SQLite (this suite's

@@ -47,7 +47,13 @@ from app.schemas.import_ import (
     ImportSourceTestResponse,
     ImportSourceUpdateRequest,
 )
-from app.services.confluence import ConfluenceError, detect_server_kind, extract_page_id
+from app.services.confluence import (
+    ConfluenceError,
+    _extract_display_parts,
+    create_client,
+    detect_server_kind,
+    extract_page_id,
+)
 from app.services.paddle_service import resolve_profile_selection
 # Module-object access (security.encrypt_import_credential /
 # security.decrypt_import_credential) rather than from-imports: the helpers
@@ -76,9 +82,16 @@ router = APIRouter(prefix='/api/v1/import', dependencies=[Depends(_require_impor
 # deliberately does not read settings lazily: the cap is fixed at import time.
 _probe_semaphore = threading.BoundedSemaphore(settings.import_probe_concurrency)
 
-# Space-key extraction from pasted space URLs (/wiki/spaces/KEY/...); page-id
-# extraction lives in app.services.confluence.extract_page_id.
+# Space-key extraction from pasted space URLs (/wiki/spaces/KEY/...) and
+# from TITLE-LESS /display/KEY overview links only. A /display/KEY/Title
+# value is unambiguously a PAGE link -- treating it as its space would
+# silently import the whole space when someone pastes a page URL into the
+# space-scope field (or switches scope type after pasting), so it falls
+# through to the normal invalid-space error instead. Page-id extraction
+# lives in app.services.confluence.extract_page_id; title-only page
+# resolution lives in app.services.confluence._extract_display_parts.
 _SPACE_KEY_URL_PATTERN = re.compile(r'/spaces/([^/?#]+)')
+_SPACE_KEY_DISPLAY_PATTERN = re.compile(r'/display/([^/?#]+)/?(?:[?#]|$)')
 
 
 # --- Shared helpers -----------------------------------------------------------
@@ -151,7 +164,7 @@ def _is_stale_active(run: ImportRun, now: datetime) -> bool:
 def _extract_space_key(value: str) -> str | None:
     candidate = value.strip()
     if '://' in candidate:
-        match = _SPACE_KEY_URL_PATTERN.search(candidate)
+        match = _SPACE_KEY_URL_PATTERN.search(candidate) or _SPACE_KEY_DISPLAY_PATTERN.search(candidate)
         if match is None:
             return None
         candidate = match.group(1)
@@ -374,6 +387,38 @@ def test_import_source(
 
 # --- Runs ---------------------------------------------------------------------
 
+def _resolve_page_by_title_via_source(source: ImportSource, space_key: str, title: str) -> str:
+    """Resolve a title-only page link (/display/SPACEKEY/Title,
+    viewpage.action?spaceKey=&title=) to a numeric page id at run-creation
+    time, using the same create_client factory the worker uses to build its
+    client (app/workers/import_tasks.py) -- creation otherwise makes no
+    outbound requests, but a title-only scope has no id to seed the frontier
+    with until one is looked up. Any failure (undecryptable credential,
+    space/page not found, network/auth error) becomes a 422 with the
+    ConfluenceError's message -- never a 500."""
+    try:
+        credential = security.decrypt_import_credential(source.credential_encrypted)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='Stored credential can no longer be decrypted (SECRET_KEY changed?); re-enter it on the source',
+        ) from None
+    try:
+        client = create_client(
+            base_url=source.base_url,
+            server_kind=source.server_kind,
+            auth_type=source.auth_type,
+            auth_username=source.auth_username,
+            credential=credential,
+            allowed_private_hosts=frozenset(settings.import_private_host_allowlist),
+            timeout=float(settings.import_fetch_timeout_seconds),
+            max_response_bytes=settings.import_fetch_max_bytes,
+        )
+        return client.resolve_page_by_title(space_key, title)
+    except ConfluenceError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
 @router.post('/runs', response_model=ImportRunResponse, status_code=status.HTTP_201_CREATED)
 def create_import_run(
     request: Request,
@@ -403,10 +448,19 @@ def create_import_run(
     if payload.scope.type == 'page':
         scope_value = extract_page_id(payload.scope.value)
         if scope_value is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail='scope.value must be a numeric page id or a Confluence page URL containing one',
-            )
+            # No numeric id in the value -- try the title-only /display and
+            # viewpage.action?spaceKey=&title= forms, resolved against the
+            # source's own API right here (see
+            # _resolve_page_by_title_via_source). A source that isn't cloud
+            # or datacenter can't reach this: server_kind is required above.
+            display_parts = _extract_display_parts(payload.scope.value)
+            if display_parts is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail='scope.value must be a numeric page id or a Confluence page URL containing one',
+                )
+            space_key, title = display_parts
+            scope_value = _resolve_page_by_title_via_source(source, space_key, title)
     else:
         scope_value = _extract_space_key(payload.scope.value)
         if scope_value is None:

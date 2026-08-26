@@ -3,13 +3,14 @@
 import { Fragment, Suspense, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Cloud, ScanEye, UploadCloud } from 'lucide-react';
+import { Cloud, ScanEye, UploadCloud, Webhook } from 'lucide-react';
 
 import { ConfluenceConnectionsTab } from '@/components/connections/confluence-connections-tab';
 import { OpenWebUIConnectionsTab } from '@/components/connections/openwebui-connections-tab';
 import { VlConnectionsPanel } from '@/components/connections/vl-connections-panel';
+import { WebhookConnectionsTab } from '@/components/connections/webhook-connections-tab';
 
-type TabId = 'confluence' | 'openwebui' | 'vl';
+type TabId = 'confluence' | 'openwebui' | 'webhooks' | 'vl';
 
 type TabDef = { id: TabId; label: string; icon: typeof Cloud };
 
@@ -19,6 +20,7 @@ const TAB_GROUPS: { label: string; tabs: TabDef[] }[] = [
     tabs: [
       { id: 'confluence', label: 'Confluence', icon: Cloud },
       { id: 'openwebui', label: 'OpenWebUI', icon: UploadCloud },
+      { id: 'webhooks', label: 'Webhooks', icon: Webhook },
     ],
   },
   {
@@ -143,6 +145,11 @@ function ConnectionsPageInner() {
             aria-labelledby="connections-tab-openwebui"
           >
             <OpenWebUIConnectionsTab />
+          </div>
+        )}
+        {tab === 'webhooks' && (
+          <div role="tabpanel" id="connections-panel-webhooks" aria-labelledby="connections-tab-webhooks">
+            <WebhookConnectionsTab />
           </div>
         )}
         {tab === 'vl' && (

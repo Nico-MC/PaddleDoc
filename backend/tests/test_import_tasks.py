@@ -7,6 +7,7 @@ so chunk continuations and child OCR enqueues can be asserted (and replayed
 manually to simulate the queue).
 """
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -1116,3 +1117,153 @@ def test_worker_restart_requeues_stale_import_runs(sent, client_holder, monkeypa
     assert ('import_confluence', [stale_run_id, 2]) in sent
     assert ('import_confluence', [lost_pending_run_id, 0]) in sent
     assert all(args[0] != fresh_run_id for name, args in sent if name == 'import_confluence')
+
+
+# --- Diagnostic logging ---------------------------------------------------------
+#
+# The user-reported symptom is silent data loss: whole spaces/sub-pages fail
+# to import on their Server/DC instance with no trace of why. These tests
+# lock in that every such failure now leaves a WARNING in the worker log
+# (captured into worker_log_entries -> the Admin Logs tab) with enough
+# context to diagnose it, that routine cap/frontier events are logged at
+# INFO instead (so a truncated-by-design tree does not read as broken), that
+# every run logs an INFO start/end line, and that nothing sensitive ever
+# reaches a log message.
+
+def test_run_start_and_finish_log_info_lines(sent, client_holder, caplog) -> None:
+    client = _three_page_tree()
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    with caplog.at_level(logging.INFO, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    info_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    start_lines = [line for line in info_lines if run_id in line and 'starting' in line]
+    assert len(start_lines) == 1
+    assert 'scope=page' in start_lines[0]
+    assert 'server_kind=cloud' in start_lines[0]
+
+    finish_lines = [line for line in info_lines if run_id in line and 'finished' in line]
+    assert len(finish_lines) == 1
+    assert 'imported=3' in finish_lines[0]
+    assert 'failed=0' in finish_lines[0]
+    assert 'attachments=2' in finish_lines[0]
+    assert 'duration=' in finish_lines[0]
+
+
+def test_missing_page_failure_logs_warning_with_page_context(sent, client_holder, caplog) -> None:
+    client = _three_page_tree()
+    del client.pages['102']  # the fake client 404s for this page id
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    with caplog.at_level(logging.WARNING, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    assert run.pages_failed == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    matching = [line for line in warnings if '102' in line]
+    assert matching, f'no WARNING mentioning the failed page id 102 among: {warnings}'
+    assert any('404' in line for line in matching)
+
+
+def test_discover_children_failure_logs_warning_with_parent_context(sent, client_holder, caplog) -> None:
+    # A page whose child listing fails is exactly where sub-pages disappear
+    # silently -- the log must name the PARENT (id + title), not just the
+    # generic failure.
+    client = _three_page_tree()
+    real_iter_children = client.iter_children
+
+    def failing_iter_children(page_id: str):
+        if page_id == '100':
+            raise ConfluenceError(
+                "Confluence API request to '/rest/api/content/100/child/page' returned HTTP 403 "
+                '(Forbidden -- the account has no permission for this space/page '
+                '(Data Center: often a per-page restriction))',
+                status_code=403,
+            )
+        return real_iter_children(page_id)
+
+    client.iter_children = failing_iter_children
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+
+    with caplog.at_level(logging.WARNING, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    # A children-listing failure never fails the page itself -- only its
+    # (undiscovered) sub-tree is missing.
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.pages_imported == 1
+    assert any('listing children' in e['error'] for e in run.state['errors'])
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    matching = [line for line in warnings if '100' in line and 'Root Page' in line]
+    assert matching, f'no WARNING naming parent page 100/"Root Page" among: {warnings}'
+    assert any('403' in line for line in matching)
+
+
+def test_max_pages_cap_logs_info_not_warning(sent, client_holder, caplog) -> None:
+    client = _three_page_tree()
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id), options={'max_pages': 2})
+
+    with caplog.at_level(logging.DEBUG, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    assert run.pages_imported == 2
+    # A cap hit on a run with no real failures must produce no WARNING at all
+    # -- a truncated (by design) tree must not read as broken.
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    info_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any('max_pages' in line for line in info_lines)
+
+
+def test_byte_cap_logs_info_not_warning(sent, client_holder, caplog, monkeypatch) -> None:
+    client = _three_page_tree()
+    client_holder['client'] = client
+    owner = _make_owner()
+    run_id = _make_run(owner.id, _make_source(owner.id))
+    monkeypatch.setattr(settings, 'import_run_max_total_bytes', 10)
+
+    with caplog.at_level(logging.DEBUG, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    run = _get_run(run_id)
+    assert run.status == ImportRunStatus.FINISHED
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    info_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any('byte cap' in line for line in info_lines)
+
+
+def test_no_credential_or_query_string_leaks_into_worker_log(sent, client_holder, caplog) -> None:
+    client = _three_page_tree()
+    del client.pages['102']  # triggers a per-page failure, guaranteeing a WARNING is logged
+    client_holder['client'] = client
+    owner = _make_owner()
+    token = 'SECRET-TOKEN-9f3ac21'
+    source_id = _make_source(owner.id, credential_encrypted=security.encrypt_import_credential(token))
+    run_id = _make_run(owner.id, source_id)
+
+    with caplog.at_level(logging.DEBUG, logger='app.workers.import_tasks'):
+        import_confluence(run_id, 0)
+        _drain_continuations(sent)
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)  # sanity: the failure was actually logged
+    assert all(token not in r.getMessage() for r in caplog.records)
+    assert all('Authorization' not in r.getMessage() for r in caplog.records)
+    assert all('Bearer' not in r.getMessage() and 'Basic ' not in r.getMessage() for r in caplog.records)

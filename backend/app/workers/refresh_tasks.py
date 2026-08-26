@@ -68,6 +68,12 @@ logger = logging.getLogger(__name__)
 
 TICK_TASK_NAME = 'confluence_refresh_tick'
 
+# Same cap as import_tasks._ERROR_MESSAGE_MAX_CHARS -- kept as a separate
+# local constant rather than importing it, same "workers don't reach into
+# each other's private constants" discipline as the local _aware_utc copy
+# below.
+_START_FAILURE_MESSAGE_MAX_CHARS = 2000
+
 _REFRESH_LOCK_KEY = 'worker:confluence-refresh:tick-lock'
 # A generous multiple of the tick interval: must comfortably outlive a
 # single tick (including a slow due-sources scan) so a healthy chain's own
@@ -114,6 +120,10 @@ def _acquire_or_renew(lock_token: str | None) -> str | None:
     if lock_token is None:
         return _try_acquire_refresh_lock()
     return lock_token if _renew_refresh_lock(lock_token) else None
+
+
+def _truncate(value: str, limit: int) -> str:
+    return value if len(value) <= limit else value[: limit - 3] + '...'
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -221,9 +231,23 @@ def _dispatch_due_refreshes() -> None:
                 continue  # Doppelstart-Schutz: an earlier run for this source is still in flight.
             try:
                 _start_refresh_run(db, source)
-            except Exception:
-                logger.exception('confluence refresh: failed to start a run for source %s', source.id)
+            except Exception as exc:
+                logger.exception(
+                    'confluence refresh: failed to start a run for source %s (%r, %s, server_kind=%s)',
+                    source.id, source.name, source.base_url, source.server_kind,
+                )
                 db.rollback()
+                # Surface the failure on the source itself: this crash happened
+                # before (or while) an ImportRun even existed, so without this
+                # there is nothing for the admin to see beyond the worker log --
+                # same last_refresh_error field a failed RUN would populate via
+                # _record_refresh_outcome in import_tasks.py.
+                fresh_source = db.get(ImportSource, source.id)
+                if fresh_source is not None:
+                    fresh_source.last_refresh_error = _truncate(
+                        f'failed to start a refresh run: {exc}', _START_FAILURE_MESSAGE_MAX_CHARS
+                    )
+                    db.commit()
     finally:
         db.close()
 

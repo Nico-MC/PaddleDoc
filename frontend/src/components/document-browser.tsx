@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Download, Inbox, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, SearchX, Settings2, Trash2, TrendingDown, UploadCloud } from 'lucide-react';
+import { Download, Inbox, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, SearchX, Settings2, Trash2, TrendingDown, UploadCloud, Webhook } from 'lucide-react';
 
 import { Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
 import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
+import { WebhookSendDialog } from '@/components/webhook-send-dialog';
 import type { PaddleCapabilities } from '@/components/dashboard/shared';
 import { apiFetch, redirectIfSessionExpired } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
@@ -313,6 +314,7 @@ export function DocumentBrowser({
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [pushDialogJob, setPushDialogJob] = useState<Job | null>(null);
+  const [webhookDialogJob, setWebhookDialogJob] = useState<Job | null>(null);
   const [restartProfileJob, setRestartProfileJob] = useState<Job | null>(null);
 
   const markJobsQueued = (predicate: (job: Job) => boolean) => {
@@ -1137,6 +1139,19 @@ export function DocumentBrowser({
                             <UploadCloud className="h-4 w-4 text-emerald-700" />
                           </Button>
                         )}
+                        {job.status === 'FINISHED' && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 px-0"
+                            onClick={() => setWebhookDialogJob(job)}
+                            aria-label={`Send ${job.original_filename} to webhook`}
+                            title="Send to webhook"
+                          >
+                            <Webhook className="h-4 w-4 text-emerald-700" />
+                          </Button>
+                        )}
                         {allowDelete && (
                           <Button
                             type="button"
@@ -1247,6 +1262,13 @@ export function DocumentBrowser({
         <OpenWebUIPushDialog
           jobs={[{ id: pushDialogJob.id, label: pushDialogJob.original_filename }]}
           onClose={() => setPushDialogJob(null)}
+        />
+      )}
+
+      {webhookDialogJob && (
+        <WebhookSendDialog
+          job={{ id: webhookDialogJob.id, label: webhookDialogJob.original_filename }}
+          onClose={() => setWebhookDialogJob(null)}
         />
       )}
 

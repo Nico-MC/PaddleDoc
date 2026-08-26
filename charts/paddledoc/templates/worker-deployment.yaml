@@ -132,6 +132,22 @@ spec:
               value: {{ .Values.openwebui.enabled | quote }}
             - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
               value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            # Webhook delivery: the deliver_webhook task runs on this worker,
+            # so it needs the same WEBHOOK_* settings as the backend. The
+            # pending-cap is also enforced here, not just by the backend's
+            # POST /webhooks/send -- app/workers/webhook_tasks.py's
+            # _dispatch() (the automatic job.finished/job.failed/
+            # import_run.finished hooks) checks the same cap before creating
+            # a delivery, and that runs in this worker process.
+            - name: WEBHOOKS_ENABLED
+              value: {{ .Values.webhooks.enabled | quote }}
+            - name: WEBHOOK_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.webhooks.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 50 as "5e+01", which the app's int settings
+            # reject.
+            - name: WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER
+              value: {{ .Values.webhooks.maxPendingPerUser | int64 | quote }}
             # `openai_vision` profile: the outbound call to the VL endpoint is
             # made here.
             - name: VL_PRIVATE_HOST_ALLOWLIST

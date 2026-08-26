@@ -22,6 +22,7 @@ from app.services.paddle_service import (
 # tests.
 from app.services import security
 from app.services.storage import build_result_path, ensure_storage_dirs
+from app.workers import webhook_tasks
 from app.workers.celery_app import celery_app
 
 
@@ -324,6 +325,10 @@ def process_job(
                 }
                 db.commit()
                 logger.warning('Stopping redelivered job %s for manual retry: %s -> %s', job_id, profile_id, suggested)
+                try:
+                    webhook_tasks.dispatch_job_event(db, job, 'job.failed')
+                except Exception:  # pragma: no cover - webhooks must never break job completion
+                    logger.exception('webhook dispatch failed for job %s (job.failed)', job_id)
                 return
 
         runtime = get_paddle_settings()
@@ -348,6 +353,10 @@ def process_job(
                     'execution': {'status': 'failed', 'error': job.error_message},
                 }
                 db.commit()
+                try:
+                    webhook_tasks.dispatch_job_event(db, job, 'job.failed')
+                except Exception:  # pragma: no cover - webhooks must never break job completion
+                    logger.exception('webhook dispatch failed for job %s (job.failed)', job_id)
                 return
             vl_override = {
                 'base_url': vl_conn.base_url,
@@ -459,6 +468,10 @@ def process_job(
         }
         job.error_message = None
         db.commit()
+        try:
+            webhook_tasks.dispatch_job_event(db, job, 'job.finished')
+        except Exception:  # pragma: no cover - webhooks must never break job completion
+            logger.exception('webhook dispatch failed for job %s (job.finished)', job_id)
     except Exception as exc:  # pragma: no cover
         job = db.get(Job, job_id)
         if job is not None:
@@ -477,6 +490,10 @@ def process_job(
                 },
             }
             db.commit()
+            try:
+                webhook_tasks.dispatch_job_event(db, job, 'job.failed')
+            except Exception:  # pragma: no cover - webhooks must never break job completion
+                logger.exception('webhook dispatch failed for job %s (job.failed)', job_id)
     finally:
         db.close()
 
@@ -497,3 +514,6 @@ def probe_paddle() -> dict[str, str | None]:
 import app.workers.import_tasks  # noqa: E402,F401  (registers import_confluence)
 import app.workers.openwebui_tasks  # noqa: E402,F401  (registers push_openwebui)
 import app.workers.refresh_tasks  # noqa: E402,F401  (registers confluence_refresh_tick)
+# webhook_tasks (registers deliver_webhook) is already imported above (as
+# `webhook_tasks`, module-object style) for the completion hooks' own use --
+# no separate registration-only import needed here, unlike the three above.

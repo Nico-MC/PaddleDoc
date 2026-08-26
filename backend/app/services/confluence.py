@@ -30,14 +30,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, unquote, unquote_plus, urljoin, urlsplit
 
 from app.models.models import ImportAuthType
 from app.services.safe_fetch import SafeFetchError, safe_fetch
+
+logger = logging.getLogger(__name__)
 
 SERVER_KIND_CLOUD = 'cloud'
 SERVER_KIND_DATACENTER = 'datacenter'
@@ -47,11 +50,91 @@ API_BASE_PATH_DATACENTER = '/rest/api'
 _LIST_PAGE_LIMIT = 50
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
 
+# Plain-language interpretation appended to a ConfluenceError's message for
+# the status codes admins actually hit while diagnosing a broken import --
+# the raw "HTTP 403" alone tells a user nothing actionable. 404 gets the most
+# text: Data Center is well known to answer with 404 (not 403) when the
+# account can see that a page id exists but lacks permission to read it, so
+# a plain "page not found" reading is actively misleading there.
+_STATUS_EXPLANATIONS: dict[int, str] = {
+    401: 'Unauthorized -- the credential is missing, expired, or was rejected; re-check it on the source',
+    403: 'Forbidden -- the account has no permission for this space/page (Data Center: often a per-page restriction)',
+    404: (
+        'Not Found -- the space/page does not exist, or the account cannot see it; on Server/Data Center a '
+        'missing permission is frequently reported as 404 instead of 403'
+    ),
+    429: 'Too Many Requests -- Confluence is rate-limiting this account; the import will need to slow down or retry later',
+}
+
+# Cap on how much of a failed response's extracted JSON `message` field is
+# ever logged -- generous enough for a full sentence, short enough that a
+# pathological server can't flood the log table via worker_log_entries.
+_BODY_MESSAGE_LOG_CHARS = 200
+
+
+def _explain_status(status_code: int) -> str:
+    explanation = _STATUS_EXPLANATIONS.get(status_code)
+    return f' ({explanation})' if explanation else ''
+
+
+def _space_not_found_message(space_key: str) -> str:
+    # Both APIs answer a nonexistent key and a key the account cannot see
+    # the same way (Cloud: empty results list; Server/DC: 404), so the two
+    # causes are genuinely indistinguishable from here -- the message says
+    # so explicitly instead of guessing. '~'-prefixed keys are Confluence's
+    # personal-space convention and are worth calling out on their own: they
+    # are frequently unresolvable simply because the importing account was
+    # never granted access to that person's space.
+    personal_hint = (
+        " -- keys starting with '~' are personal spaces; confirm the account has been granted access to it"
+        if space_key.startswith('~')
+        else ''
+    )
+    return f'space {space_key!r} not found or not accessible to this account (check the key and its permissions){personal_hint}'
+
+
+def _page_not_found_message(space_key: str, title: str) -> str:
+    # Mirrors _space_not_found_message's reasoning: a nonexistent title and
+    # one the account cannot see both come back as an empty result set on
+    # both APIs, so this says so rather than guessing which it was.
+    return (
+        f'page {title!r} not found in space {space_key!r} or not accessible to this account '
+        '(check the exact title and its permissions)'
+    )
+
+
+def _extract_json_error_message(body: bytes) -> str | None:
+    """Best-effort pull of Confluence's own `message` field out of a failed
+    response body, for the WARNING log only. JSON-only and capped -- an HTML
+    error page (a misconfigured reverse proxy in front of Data Center is a
+    common source of one) is never parsed as text and never logged verbatim,
+    only silently ignored here."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    message = data.get('message')
+    if not isinstance(message, str) or not message:
+        return None
+    message = message.strip()
+    if not message:
+        return None
+    return message if len(message) <= _BODY_MESSAGE_LOG_CHARS else message[:_BODY_MESSAGE_LOG_CHARS] + '...'
+
 # Cloud pretty links (/spaces/KEY/pages/123/Title) and DC viewpage.action
-# (?pageId=123). Title-only /display/KEY/Title links are a documented
-# non-goal.
+# (?pageId=123). Title-only /display/KEY/Title links and viewpage.action
+# ?spaceKey=&title= links carry no numeric id -- see _extract_display_parts,
+# which the API layer uses to resolve those via resolve_page_by_title.
 _PAGE_ID_PATH_RE = re.compile(r'/pages/(\d+)(?:[/?#]|$)')
 _PAGE_ID_QUERY_RE = re.compile(r'[?&]pageId=(\d+)(?:[&#]|$)')
+
+# /display/SPACEKEY/Page+Title (SPACEKEY may contain '~' for personal
+# spaces, e.g. /display/~jdoe/My+Notes). The title segment is percent/plus
+# decoded by _extract_display_parts, matching how Confluence itself encodes
+# titles into these links.
+_DISPLAY_PATH_RE = re.compile(r'/display/([^/?#]+)/([^/?#]+)')
 
 
 class ConfluenceError(Exception):
@@ -121,11 +204,15 @@ class PageSource(Protocol):
 
     def resolve_space_root(self, space_key: str) -> str: ...
 
+    def resolve_page_by_title(self, space_key: str, title: str) -> str: ...
+
 
 def extract_page_id(value: str) -> str | None:
     """Extract a Confluence page id from a bare numeric id, a Cloud pretty
     URL (`/pages/{id}/...`), or a DC viewpage URL (`?pageId={id}`). Returns
-    None when no id is recognizable (e.g. title-only /display links)."""
+    None when no id is recognizable (e.g. title-only /display links or
+    viewpage.action?spaceKey=&title= links) -- callers fall back to
+    `_extract_display_parts` + `resolve_page_by_title` for those."""
     value = value.strip()
     if not value:
         return None
@@ -137,6 +224,34 @@ def extract_page_id(value: str) -> str | None:
     match = _PAGE_ID_PATH_RE.search(value)
     if match:
         return match.group(1)
+    return None
+
+
+def _extract_display_parts(value: str) -> tuple[str, str] | None:
+    """Extract (space_key, title) from a title-only Confluence link that
+    carries no numeric page id: `/display/SPACEKEY/Page+Title` (Cloud and
+    Server/DC both serve this legacy path) or the classic Server/DC
+    `viewpage.action?spaceKey=...&title=...` form. The title is fully
+    URL-decoded ('+' and %XX both become their plain characters, matching
+    how Confluence itself builds these links from a page title). Returns
+    None when neither form is recognizable; the caller resolves the id via
+    `PageSource.resolve_page_by_title`."""
+    value = value.strip()
+    if not value:
+        return None
+    query = urlsplit(value).query
+    if query:
+        params = parse_qs(query)
+        space_keys = params.get('spaceKey')
+        titles = params.get('title')
+        if space_keys and titles and space_keys[0] and titles[0]:
+            return space_keys[0], titles[0]
+    match = _DISPLAY_PATH_RE.search(value)
+    if match:
+        space_key = unquote(match.group(1))
+        title = unquote_plus(match.group(2))
+        if space_key and title:
+            return space_key, title
     return None
 
 
@@ -174,6 +289,10 @@ def _host_key(url: str) -> tuple[str, int | None]:
 
 
 class _ConfluenceClientBase:
+    # Overridden by each concrete subclass; only used for diagnostics (log
+    # lines), never for branching request logic.
+    _server_kind_label = 'unknown'
+
     def __init__(
         self,
         base_url: str,
@@ -225,14 +344,37 @@ class _ConfluenceClientBase:
         except SafeFetchError as exc:
             raise ConfluenceError(f'Confluence request failed: {exc}') from exc
 
+    def _http_error(self, url: str, response, *, context: str) -> ConfluenceError:
+        """Build the ConfluenceError for a non-200 response, logging a
+        WARNING alongside it. The log line carries the path (never the query
+        string -- credentials never live there for this API, but tokens
+        occasionally do turn up as query params on other APIs, and this
+        keeps the discipline uniform), status, server kind, and Confluence's
+        own `message` field when the body is a JSON error object. The
+        exception message carries only the status and a fixed plain-language
+        explanation -- never the response body -- so it stays safe to surface
+        in ImportRun.error_message / state.errors (spec: never leak
+        credentials/tokens into the log or the error text)."""
+        path = urlsplit(url).path
+        body_message = _extract_json_error_message(response.body)
+        logger.warning(
+            'Confluence %s request failed: GET %s -> HTTP %s [%s]%s',
+            context,
+            path,
+            response.status_code,
+            self._server_kind_label,
+            f' -- Confluence said: {body_message!r}' if body_message else '',
+        )
+        return ConfluenceError(
+            f'Confluence API request to {path!r} returned HTTP {response.status_code}{_explain_status(response.status_code)}',
+            status_code=response.status_code,
+        )
+
     def _get_json(self, url: str) -> dict:
         response = self._fetch(url, {'Accept': 'application/json', **self._auth_headers}, self._max_response_bytes)
         if response.status_code != 200:
-            path = urlsplit(url).path
-            raise ConfluenceError(
-                f'Confluence API request to {path!r} returned HTTP {response.status_code}',
-                status_code=response.status_code,
-            )
+            raise self._http_error(url, response, context='API')
+        logger.debug('Confluence API request: GET %s -> HTTP 200 [%s]', urlsplit(url).path, self._server_kind_label)
         try:
             data = json.loads(response.body)
         except ValueError as exc:
@@ -245,10 +387,10 @@ class _ConfluenceClientBase:
         self._check_same_host(url)
         response = self._fetch(url, dict(self._auth_headers), self._max_attachment_bytes)
         if response.status_code != 200:
-            raise ConfluenceError(
-                f'Confluence attachment download returned HTTP {response.status_code}',
-                status_code=response.status_code,
-            )
+            raise self._http_error(url, response, context='attachment download')
+        logger.debug(
+            'Confluence attachment download: GET %s -> HTTP 200 [%s]', urlsplit(url).path, self._server_kind_label
+        )
         return response.body
 
     def _iter_results(self, first_url: str, next_url_fn) -> Iterator[dict]:
@@ -317,6 +459,8 @@ class ConfluenceV2Client(_ConfluenceClientBase):
     """Confluence Cloud, v2 REST (`/wiki/api/v2`), cursor pagination via
     `_links.next`, body format export_view."""
 
+    _server_kind_label = SERVER_KIND_CLOUD
+
     def __init__(self, base_url: str, **kwargs) -> None:
         super().__init__(base_url, **kwargs)
         self._wiki = _wiki_base(self._base_url)
@@ -383,11 +527,32 @@ class ConfluenceV2Client(_ConfluenceClientBase):
         data = self._get_json(f'{self._api}/spaces?keys={quote(space_key, safe="")}&limit=1')
         results = data.get('results')
         if not isinstance(results, list) or not results:
-            raise ConfluenceError(f'space {space_key!r} not found')
+            raise ConfluenceError(_space_not_found_message(space_key))
         homepage_id = results[0].get('homepageId') if isinstance(results[0], dict) else None
         if not homepage_id:
             raise ConfluenceError(f'space {space_key!r} has no homepage')
         return str(homepage_id)
+
+    def resolve_page_by_title(self, space_key: str, title: str) -> str:
+        # v2 has no spaceKey+title lookup on /pages -- it needs the space's
+        # numeric id first, same two-step resolution resolve_space_root uses.
+        space_data = self._get_json(f'{self._api}/spaces?keys={quote(space_key, safe="")}&limit=1')
+        space_results = space_data.get('results')
+        if not isinstance(space_results, list) or not space_results:
+            raise ConfluenceError(_space_not_found_message(space_key))
+        space_id = space_results[0].get('id') if isinstance(space_results[0], dict) else None
+        if not space_id:
+            raise ConfluenceError(f'space {space_key!r} has no id in the response')
+        page_data = self._get_json(
+            f'{self._api}/pages?space-id={quote(str(space_id), safe="")}&title={quote(title, safe="")}&limit=1'
+        )
+        page_results = page_data.get('results')
+        if not isinstance(page_results, list) or not page_results:
+            raise ConfluenceError(_page_not_found_message(space_key, title))
+        page_id = page_results[0].get('id') if isinstance(page_results[0], dict) else None
+        if not page_id:
+            raise ConfluenceError(f'page {title!r} in space {space_key!r} has no id in the response')
+        return str(page_id)
 
     def _attachment_download_link(self, item: dict) -> str:
         link = item.get('downloadLink')
@@ -406,6 +571,8 @@ class ConfluenceV2Client(_ConfluenceClientBase):
 class ConfluenceV1Client(_ConfluenceClientBase):
     """Confluence Server/Data Center, v1 REST (`/rest/api`), start/limit
     pagination, body via expand=body.export_view."""
+
+    _server_kind_label = SERVER_KIND_DATACENTER
 
     def __init__(self, base_url: str, **kwargs) -> None:
         super().__init__(base_url, **kwargs)
@@ -479,13 +646,28 @@ class ConfluenceV1Client(_ConfluenceClientBase):
             data = self._get_json(f'{self._api}/space/{quote(space_key, safe="")}?expand=homepage')
         except ConfluenceError as exc:
             if exc.status_code == 404:
-                raise ConfluenceError(f'space {space_key!r} not found', status_code=404) from exc
+                # Data Center is well known to answer 404 for a space the
+                # account merely lacks permission on -- see
+                # _space_not_found_message.
+                raise ConfluenceError(_space_not_found_message(space_key), status_code=404) from exc
             raise
         homepage = data.get('homepage')
         homepage_id = homepage.get('id') if isinstance(homepage, dict) else None
         if not homepage_id:
             raise ConfluenceError(f'space {space_key!r} has no homepage')
         return str(homepage_id)
+
+    def resolve_page_by_title(self, space_key: str, title: str) -> str:
+        data = self._get_json(
+            f'{self._api}/content?spaceKey={quote(space_key, safe="")}&title={quote(title, safe="")}&limit=1'
+        )
+        results = data.get('results')
+        if not isinstance(results, list) or not results:
+            raise ConfluenceError(_page_not_found_message(space_key, title))
+        page_id = results[0].get('id') if isinstance(results[0], dict) else None
+        if not page_id:
+            raise ConfluenceError(f'page {title!r} in space {space_key!r} has no id in the response')
+        return str(page_id)
 
     def _attachment_download_link(self, item: dict) -> str:
         links = item.get('_links')

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Outbound webhooks for automation (n8n and friends): every user can register webhook
+  connections under Connections › Webhooks — URL, optional signing secret (stored encrypted,
+  never displayed; deliveries then carry an `X-PaddleDoc-Signature` HMAC-SHA256 header), and
+  the events to subscribe to (job finished, job failed, import run finished). The worker
+  delivers automatically with retries and a visible delivery history, finished jobs can also
+  be sent manually from the jobs table or detail page, and payloads carry the job metadata
+  plus the full markdown so a flow can process it without calling back. Deliveries run
+  through the SSRF guard; private-network targets are allowed via
+  `WEBHOOK_PRIVATE_HOST_ALLOWLIST` (wired through compose and the Helm chart, both backend
+  and worker)
+- Confluence imports are diagnosable: every failed API request is logged (path, HTTP status,
+  server kind, and Confluence's own error message) with plain-language readings of the
+  common cases — including Data Center's habit of answering 404 for pages you lack
+  permission to see — and import runs log start/finish summaries, per-page and
+  children-listing failures with context, and cap events, all visible in the admin Logs tab
+  and the run's error list. Personal spaces (`~` keys) get an explicit hint
+
+### Fixed
+- Pasted Confluence Server/Data-Center page links now work as import scope:
+  `/display/SPACE/Page+Title` URLs (umlauts, personal spaces included) are resolved to the
+  page id at creation time via the source's API, with a clear message when resolution fails —
+  previously only bare page ids and Cloud-style URLs were accepted. A page link pasted into
+  the *space* scope field is rejected instead of silently importing the whole space
+
 ## [1.3.3] - 2026-08-22
 
 ### Added

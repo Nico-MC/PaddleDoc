@@ -39,6 +39,7 @@ from app.services import security
 from app.services.confluence import AttachmentMeta, ConfluenceError, Page, PageSource, create_client
 from app.services.confluence_markdown import add_frontmatter_keys, convert_page, rewrite_cross_page_links, sanitize_filename
 from app.services.paddle_service import effective_pipeline_profile_id, vl_settings_for_worker
+from app.workers import webhook_tasks
 from app.workers.celery_app import celery_app
 
 
@@ -75,6 +76,15 @@ _TEXT_SPECS: dict[str, str] = {
     '.log': 'text/plain',
     '.json': 'application/json',
 }
+
+
+def _aware_utc(value: datetime) -> datetime:
+    # Local copy of app.api.deps._aware_utc / refresh_tasks._aware_utc's
+    # naive-vs-aware sqlite fixup -- workers must not import the API module,
+    # same reasoning as _attach_tags being a local copy of routes._attach_tags.
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -151,6 +161,10 @@ def _attach_tags(db, job: Job, tags: list[str]) -> None:
             job.tags.append(tag_obj)
 
 
+def _describe_run_scope(run: ImportRun) -> str:
+    return f'{run.scope_type}={run.scope_value!r}'
+
+
 def _default_folder(run: ImportRun) -> str:
     # Spec §1.4: folder defaults to imports/<space-or-root-slug> so the
     # folder browser groups a run.
@@ -184,6 +198,7 @@ class _RunState:
     reassignment on every persist, per the model contract)."""
 
     def __init__(self, run: ImportRun) -> None:
+        self._run_id = run.id
         raw = run.state if isinstance(run.state, dict) else {}
         frontier = raw.get('frontier') if isinstance(raw.get('frontier'), list) else []
         self.frontier: list[list] = [
@@ -208,7 +223,16 @@ class _RunState:
             str(key): [str(title) for title in value] for key, value in children_titles.items() if isinstance(value, list)
         }
 
-    def add_error(self, page_id: str, title: str, error: str) -> None:
+    def add_error(self, page_id: str, title: str, error: str, *, level: int = logging.WARNING) -> None:
+        # Every recorded per-page problem also becomes a log line -- this is
+        # the ONE place all of them funnel through, so it is where the whole
+        # crawl's diagnosability lives: a swallowed sub-page (the reported
+        # symptom) or a stray 403/404 now always leaves a trace in the
+        # Admin Logs tab, not just in this run's own error list. `level`
+        # lets callers downgrade a routine cap/frontier event (max_pages,
+        # byte cap) to INFO -- those are not failures, and logging them at
+        # WARNING would make an intentionally-truncated tree look broken.
+        logger.log(level, 'import run %s, page %s (%r): %s', self._run_id, page_id, title or '(unknown title)', error)
         if len(self.errors) < _ERROR_LIST_MAX_ENTRIES:
             self.errors.append(
                 {
@@ -333,6 +357,7 @@ def _record_refresh_outcome(db, run: ImportRun, *, error: str | None) -> None:
 
 
 def _fail_run(db, run: ImportRun, state: _RunState, message: str, claimed_seq: int) -> None:
+    logger.warning('import run %s failed (setup): %s', run.id, message)
     run.status = ImportRunStatus.FAILED
     run.error_message = _truncate(message, _ERROR_MESSAGE_MAX_CHARS)
     run.finished_at = datetime.now(timezone.utc)
@@ -343,6 +368,10 @@ def _fail_run(db, run: ImportRun, state: _RunState, message: str, claimed_seq: i
 
 
 def _cancel_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> None:
+    logger.info(
+        'import run %s cancelled: imported=%d failed=%d discovered=%d',
+        run.id, run.pages_imported, run.pages_failed, run.pages_discovered,
+    )
     run.status = ImportRunStatus.CANCELLED
     run.cancel_requested = True
     run.finished_at = datetime.now(timezone.utc)
@@ -387,9 +416,31 @@ def _finalize_run(db, run: ImportRun, state: _RunState, claimed_seq: int) -> Non
     run.status = ImportRunStatus.FINISHED
     run.finished_at = datetime.now(timezone.utc)
     run.current_page_title = ''
+    duration_seconds = (
+        (run.finished_at - _aware_utc(run.started_at)).total_seconds() if run.started_at else None
+    )
+    logger.info(
+        'import run %s finished: imported=%d failed=%d attachments=%d duration=%s',
+        run.id,
+        run.pages_imported,
+        run.pages_failed,
+        run.attachments_saved,
+        f'{duration_seconds:.1f}s' if duration_seconds is not None else 'unknown',
+    )
     state.persist(run)
     _record_refresh_outcome(db, run, error=None)
     _commit_owned(db, run.id, claimed_seq)
+
+    # 'import_run.finished' webhook dispatch: only reached once the run's
+    # FINISHED commit above has actually gone through (a _LeaseLost from
+    # _commit_owned raises past this point instead, see the caller). Never
+    # allowed to break run completion -- same try/except+logger.exception
+    # discipline as the job.finished/job.failed hooks in
+    # app/workers/tasks.py.
+    try:
+        webhook_tasks.dispatch_run_event(db, run)
+    except Exception:  # pragma: no cover - webhooks must never break run completion
+        logger.exception('webhook dispatch failed for import run %s (import_run.finished)', run.id)
 
     # Backstop for child OCR jobs that were committed but never enqueued (a
     # crash between a per-page commit and its send_task, or a heartbeat
@@ -460,7 +511,9 @@ def _store_attachments(
             state.add_error(page.id, page.title, f'attachment {display_name!r} skipped: larger than the per-attachment limit')
             continue
         if run.artifact_bytes + run.content_bytes + claimed_size > total_cap:
-            state.add_error(page.id, page.title, f'attachment {display_name!r} skipped: run byte cap reached')
+            state.add_error(
+                page.id, page.title, f'attachment {display_name!r} skipped: run byte cap reached', level=logging.INFO
+            )
             continue
 
         try:
@@ -478,7 +531,9 @@ def _store_attachments(
             state.add_error(page.id, page.title, f'attachment {display_name!r} skipped: larger than the per-attachment limit')
             continue
         if run.artifact_bytes + run.content_bytes + len(data) > total_cap:
-            state.add_error(page.id, page.title, f'attachment {display_name!r} skipped: run byte cap reached')
+            state.add_error(
+                page.id, page.title, f'attachment {display_name!r} skipped: run byte cap reached', level=logging.INFO
+            )
             continue
 
         classified = _classify_attachment(attachment.filename, data)
@@ -665,7 +720,9 @@ def _import_one_page(
     if run.artifact_bytes + run.content_bytes + len(html_bytes) > settings.import_run_max_total_bytes:
         # §5.4: hitting the total-bytes cap ends discovery gracefully -- the
         # run finishes with a note instead of failing.
-        state.add_error(page.id, page.title, 'run byte cap reached; import stopped before this page')
+        state.add_error(
+            page.id, page.title, 'run byte cap reached; import stopped before this page', level=logging.INFO
+        )
         return None, True
 
     if not run.root_page_title:
@@ -884,9 +941,14 @@ def _discover_children(
     frontier_cap = max_pages * 4
     frontier_ids = {entry[0] for entry in state.frontier}
     child_path = [*(path_titles or []), page.title]
+    capped_reason: str | None = None
     try:
         for child_id in client.iter_children(page.id):
-            if run.pages_discovered >= max_pages or len(state.frontier) >= frontier_cap:
+            if run.pages_discovered >= max_pages:
+                capped_reason = f'max_pages ({max_pages}) reached'
+                break
+            if len(state.frontier) >= frontier_cap:
+                capped_reason = f'frontier link-bomb guard ({frontier_cap}) reached'
                 break
             child_id = str(child_id)
             if child_id in state.visited or child_id in frontier_ids:
@@ -895,7 +957,18 @@ def _discover_children(
             frontier_ids.add(child_id)
             run.pages_discovered += 1
     except ConfluenceError as exc:
-        state.add_error(page.id, page.title, f'listing children failed: {exc}')
+        # This is exactly where a whole undiscovered sub-tree disappears
+        # silently today (spec: "genau da verschwinden Sub-Pages heute
+        # stumm") -- page.id/page.title here are the PARENT whose children
+        # could not be listed, giving the admin the context to act on.
+        state.add_error(page.id, page.title, f'listing children of this page failed: {exc}')
+    if capped_reason is not None:
+        # Not a failure -- a truncated tree by design (spec: an INFO note so
+        # this does not read as an error next to the real ones above).
+        logger.info(
+            'import run %s: child discovery under page %s (%r) stopped -- %s',
+            run.id, page.id, page.title, capped_reason,
+        )
     state.persist(run)
     _commit_owned(db, run.id, claimed_seq)
 
@@ -964,6 +1037,18 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
         # the space homepage for space-scoped runs (creation makes no
         # outbound requests, so their frontier starts empty).
         if run.pages_discovered == 0 and not state.visited:
+            logger.info(
+                'import run %s starting: scope=%s server_kind=%s max_pages=%s max_depth=%s '
+                'include_attachments=%s ocr_attachments=%s is_refresh=%s',
+                run.id,
+                _describe_run_scope(run),
+                source.server_kind,
+                max_pages,
+                max_depth,
+                options.get('include_attachments', True),
+                bool(options.get('ocr_attachments')),
+                bool(options.get('is_refresh')),
+            )
             if options.get('is_refresh'):
                 # Seeding must run before ANY page is compared -- see
                 # _seed_page_states_if_empty's docstring (spec AUFGABE 2).
@@ -1006,6 +1091,13 @@ def import_confluence(self, run_id: str, chunk_seq: int) -> None:
         try:
             while state.frontier and pages_this_chunk < settings.import_chunk_pages:
                 if run.pages_imported >= max_pages:
+                    # Not a failure -- an intentional stop, logged at INFO so
+                    # an admin reading the logs does not mistake a capped
+                    # (truncated-by-design) tree for a broken crawl.
+                    logger.info(
+                        'import run %s: max_pages (%d) reached with %d pages still queued; stopping',
+                        run.id, max_pages, len(state.frontier),
+                    )
                     break
                 if _cancel_requested(db, run_id):
                     cancelled = True

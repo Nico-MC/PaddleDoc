@@ -111,6 +111,15 @@ spec:
               value: {{ .Values.openwebui.enabled | quote }}
             - name: OPENWEBUI_PRIVATE_HOST_ALLOWLIST
               value: {{ .Values.openwebui.privateHostAllowlist | toJson | quote }}
+            - name: WEBHOOKS_ENABLED
+              value: {{ .Values.webhooks.enabled | quote }}
+            - name: WEBHOOK_PRIVATE_HOST_ALLOWLIST
+              value: {{ .Values.webhooks.privateHostAllowlist | toJson | quote }}
+            # int64: Helm parses large YAML numbers as float64 and | quote
+            # would render 50 as "5e+01", which the app's int settings
+            # reject.
+            - name: WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER
+              value: {{ .Values.webhooks.maxPendingPerUser | int64 | quote }}
             # Admin "test VL connection" probe (POST /auth/admin/vl-connections/
             # {id}/test) runs here; the OCR call using the same endpoint runs
             # on the worker, which sets this too.

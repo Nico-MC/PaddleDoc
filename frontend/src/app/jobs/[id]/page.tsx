@@ -4,13 +4,14 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { useParams, useSearchParams } from 'next/navigation';
-import { Mail, Pencil, Settings2, UploadCloud } from 'lucide-react';
+import { Mail, Pencil, Settings2, UploadCloud, Webhook } from 'lucide-react';
 
 import { ErrorNotice, Field, inputClass, LoadingState, Modal } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
 import type { PaddleCapabilities } from '@/components/dashboard/shared';
 import type { JobArtifact } from '@/components/markdown/markdown-view';
 import { OpenWebUIPushDialog } from '@/components/openwebui-push-dialog';
+import { WebhookSendDialog } from '@/components/webhook-send-dialog';
 import { apiFetch, redirectIfSessionExpired, type JobVersionEntry, type JobVersionsResponse } from '@/lib/api';
 import { API_BASE_URL } from '@/lib/api-base';
 import { peekCached, setCached } from '@/lib/data-cache';
@@ -150,6 +151,7 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
   // endpoint yet (404) — the last-push line stays hidden in all three cases.
   const [lastPush, setLastPush] = useState<OpenWebUIPush | null>(null);
   const [pushDialogOpen, setPushDialogOpen] = useState(false);
+  const [webhookDialogOpen, setWebhookDialogOpen] = useState(false);
   const [restartProfileDialogOpen, setRestartProfileDialogOpen] = useState(false);
   const markdownSectionRef = useRef<HTMLElement>(null);
 
@@ -615,6 +617,10 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
               <UploadCloud className="h-4 w-4" />
               Push to OpenWebUI
             </Button>
+            <Button variant="outline" onClick={() => setWebhookDialogOpen(true)}>
+              <Webhook className="h-4 w-4" />
+              Send to webhook
+            </Button>
             <Button
               variant="outline"
               onClick={() => {
@@ -719,6 +725,12 @@ function JobDetails({ jobId, openEditOnLoad }: { jobId: string; openEditOnLoad: 
           jobs={[{ id: job.id, label: job.original_filename }]}
           onClose={() => setPushDialogOpen(false)}
           onPushed={() => void loadLastPush(job.id)}
+        />
+      )}
+      {webhookDialogOpen && (
+        <WebhookSendDialog
+          job={{ id: job.id, label: job.original_filename }}
+          onClose={() => setWebhookDialogOpen(false)}
         />
       )}
       {restartProfileDialogOpen && (

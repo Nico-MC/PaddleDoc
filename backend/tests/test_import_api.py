@@ -594,6 +594,8 @@ def test_create_run_rejects_untested_source_and_bad_scope(monkeypatch):
     )
     assert resp.status_code == 409
 
+    # No client is mocked here, so resolving the /display/ title against the
+    # (unreachable) source host fails -- still surfaces as 422, never a 500.
     resp = client.post(
         '/api/v1/import/runs',
         json={'source_id': tested.id, 'scope': {'type': 'page', 'value': 'https://acme.example.com/display/KEY/Title'}},
@@ -608,6 +610,129 @@ def test_create_run_rejects_untested_source_and_bad_scope(monkeypatch):
         json={'source_id': other_source.id, 'scope': {'type': 'page', 'value': '123'}},
     )
     assert resp.status_code == 404
+
+
+# --- Parser: title-only /display and viewpage.action links --------------------
+
+@pytest.mark.parametrize(
+    ('value', 'expected'),
+    [
+        # Cloud pretty URL and DC pageId form carry a numeric id -- not this
+        # parser's job (extract_page_id handles those and is unaffected).
+        ('https://acme.example.com/spaces/DOC/pages/123/Some+Title', None),
+        ('https://acme.example.com/pages/viewpage.action?pageId=456', None),
+        ('123', None),
+        ('not a url at all', None),
+        # Cloud/DC /display/SPACEKEY/Page+Title, '+' decoded to space.
+        ('https://acme.example.com/display/DOC/Page+Title', ('DOC', 'Page Title')),
+        # Percent-encoded umlauts in the title.
+        (
+            'https://acme.example.com/display/DOC/Ger%C3%A4te%C3%BCbersicht',
+            ('DOC', 'Geräteübersicht'),
+        ),
+        # '~'-prefixed personal space key.
+        ('https://acme.example.com/display/~jdoe/My+Private+Page', ('~jdoe', 'My Private Page')),
+        # Classic DC viewpage.action?spaceKey=&title= form.
+        (
+            'https://dc.example.com/pages/viewpage.action?spaceKey=DOC&title=Some+Page',
+            ('DOC', 'Some Page'),
+        ),
+        # spaceKey without a title is not a page reference.
+        ('https://dc.example.com/pages/viewpage.action?spaceKey=DOC', None),
+    ],
+)
+def test_extract_display_parts(value, expected):
+    from app.services.confluence import _extract_display_parts
+
+    assert _extract_display_parts(value) == expected
+
+
+# --- Runs: title-only /display page scope resolved at creation time -----------
+
+def test_create_run_page_scope_resolves_display_url_via_source_client(monkeypatch):
+    user = _user('imp-run-display-ok')
+    source = _make_source(user.id, server_kind='cloud', credential='resolve-secret-tok')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+
+    calls: list[tuple] = []
+
+    class FakeClient:
+        def resolve_page_by_title(self, space_key, title):
+            calls.append((space_key, title))
+            return '98765'  # PageSource.resolve_page_by_title's contract is str, like resolve_space_root's
+
+    def fake_create_client(**kwargs):
+        assert kwargs['server_kind'] == 'cloud'
+        assert kwargs['credential'] == 'resolve-secret-tok'
+        return FakeClient()
+
+    monkeypatch.setattr(import_routes, 'create_client', fake_create_client)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': 'https://acme.example.com/display/DOC/Page+Title'},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body['scope_value'] == '98765'
+    assert calls == [('DOC', 'Page Title')]
+    row = _get_run_row(body['id'])
+    assert row.state['frontier'] == [['98765', 0]]  # resolved id seeds the frontier, same as a direct id
+
+
+def test_create_run_page_scope_display_url_resolution_failure_is_422(monkeypatch):
+    user = _user('imp-run-display-fail')
+    source = _make_source(user.id, server_kind='datacenter')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+
+    def fake_create_client(**kwargs):
+        class FakeClient:
+            def resolve_page_by_title(self, space_key, title):
+                raise ConfluenceError(
+                    f'page {title!r} not found in space {space_key!r} or not accessible to this account '
+                    '(check the exact title and its permissions)'
+                )
+
+        return FakeClient()
+
+    monkeypatch.setattr(import_routes, 'create_client', fake_create_client)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': 'https://dc.example.com/display/DOC/Missing+Page'},
+        },
+    )
+    assert resp.status_code == 422
+    detail = resp.json()['detail']
+    assert 'Missing Page' in detail
+    assert 'DOC' in detail
+    # No run row was ever created for a failed resolution.
+    db = _db()
+    try:
+        assert db.query(ImportRun).filter(ImportRun.source_id == source.id).count() == 0
+    finally:
+        db.close()
+
+
+def test_create_run_space_scope_from_display_link_without_title(monkeypatch):
+    user = _user('imp-run-space-display')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={'source_id': source.id, 'scope': {'type': 'space', 'value': 'https://acme.example.com/display/DOC'}},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()['scope_value'] == 'DOC'
 
 
 def test_active_run_cap_and_stale_run_reaping(monkeypatch):
@@ -1108,3 +1233,20 @@ def test_import_disabled_kill_switch_404s_the_surface(monkeypatch):
 
     monkeypatch.setattr(settings, 'import_enabled', True)
     assert client.get('/api/v1/import/sources').status_code == 200
+
+
+def test_create_run_space_scope_rejects_titled_display_link(monkeypatch):
+    """A /display/KEY/Title value is a PAGE link. Pasted into the SPACE scope
+    it must NOT silently resolve to the space key (which would import the
+    whole space) -- it falls through to the invalid-space rejection.
+    Companion to test_create_run_space_scope_from_display_link_without_title."""
+    user = _user('imp-run-space-display-titled')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={'source_id': source.id, 'scope': {'type': 'space', 'value': 'https://wiki.example.com/display/ENG/Release+Notes'}},
+    )
+    assert resp.status_code == 422, resp.text

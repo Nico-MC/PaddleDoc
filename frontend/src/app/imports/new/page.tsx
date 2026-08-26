@@ -769,7 +769,8 @@ function NewImportPageInner() {
                   />
                 </label>
                 <p className="text-xs text-slate-500">
-                  Pasting a full Confluence URL works — the server extracts the {scopeType === 'space' ? 'space key' : 'page id'}.
+                  Pasting a full Confluence URL works — the server extracts the {scopeType === 'space' ? 'space key' : 'page id'}
+                  {scopeType === 'page' ? ', including /display/…-links' : ''}.
                 </p>
                 <div className="flex justify-between gap-3">
                   <Button variant="outline" onClick={() => setWizardStep(1)}>

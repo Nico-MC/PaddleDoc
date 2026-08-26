@@ -222,6 +222,25 @@ openwebui:
   # OPENWEBUI_PRIVATE_HOST_ALLOWLIST.
   privateHostAllowlist: []
 
+webhooks:
+  # Kill-switch; when false the /webhooks API surface returns 404s.
+  enabled: true
+  # Hostnames ("host" or "host:port") of private-network webhook targets
+  # (e.g. a LAN-hosted n8n) deliveries may reach, e.g.
+  # ["n8n.corp.internal:5678"]. Enforced per redirect hop inside the
+  # worker's SSRF-safe fetcher; cloud-metadata IPs stay blocked
+  # unconditionally. Rendered as a JSON list into
+  # WEBHOOK_PRIVATE_HOST_ALLOWLIST.
+  privateHostAllowlist: []
+  # Cap on pending webhook deliveries per user -- enforced both by the
+  # backend API at manual send time and by the worker's automatic
+  # job.finished/job.failed/import_run.finished dispatch (see
+  # app/workers/webhook_tasks.py's _dispatch()), so it is wired to both
+  # deployments. Same purpose as openwebui.enabled's push cap
+  # (OPENWEBUI_PUSH_MAX_PENDING_PER_USER), just not yet exposed as its own
+  # values key there.
+  maxPendingPerUser: 50
+
 vl:
   # Hostnames ("host" or "host:port") of private-network OpenAI-compatible
   # vision endpoints (self-hosted vLLM/Ollama/LiteLLM) that the `openai_vision`

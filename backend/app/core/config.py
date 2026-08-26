@@ -171,6 +171,31 @@ class Settings(BaseSettings):
     # parsing as cors_origins/import_private_host_allowlist.
     openwebui_private_host_allowlist: list[str] = []
 
+    # --- Outbound webhooks (app/services/webhooks.py, app/api/webhook_routes.py,
+    # app/workers/webhook_tasks.py). Kill-switch: when False the /webhooks API
+    # surface returns 404s, mirroring IMPORT_ENABLED/OPENWEBUI_ENABLED.
+    webhooks_enabled: bool = True
+    # DB-backed cooldown, per connection_id, between POST
+    # /webhooks/connections/{id}/test probes (429 + Retry-After inside the
+    # window) -- Redis-backed like openwebui_test_cooldown_seconds (see
+    # app/api/webhook_routes._check_test_cooldown), since WebhookConnection
+    # likewise carries no last-tested timestamp column.
+    webhook_test_cooldown_seconds: int = 10
+    # Cap on pending WebhookDelivery rows per user, enforced by POST
+    # /webhooks/send -- same reasoning as openwebui_push_max_pending_per_user:
+    # a wedged/unreachable receiving endpoint must not let one user queue
+    # unbounded outbound work.
+    webhook_max_pending_deliveries_per_user: int = 50
+    # Hostnames ('host' or 'host:port') of private-network webhook receivers
+    # outbound deliveries may reach -- same shape and enforcement as
+    # openwebui_private_host_allowlist (passed into safe_fetch as
+    # allowed_private_hosts, re-checked per redirect hop; cloud-metadata IPs
+    # stay blocked unconditionally). Webhook receivers (e.g. n8n) are
+    # typically self-hosted on a private LAN, exactly like the OpenWebUI
+    # case this mirrors. JSON list env value (WEBHOOK_PRIVATE_HOST_ALLOWLIST),
+    # same parsing as cors_origins/import_private_host_allowlist.
+    webhook_private_host_allowlist: list[str] = []
+
     # --- Confluence refresh (periodic re-crawl of an ImportSource to pick up
     # upstream edits; the tick/dispatch worker itself is built separately --
     # these are just the shared cadence knobs it and PATCH /import/sources/{id}

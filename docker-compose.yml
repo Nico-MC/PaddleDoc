@@ -62,6 +62,12 @@ services:
       # OpenWebUI needs its host (host or host:port) listed here.
       OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
       OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
+      # Webhook delivery: same allowlist convention as IMPORT_*/OPENWEBUI_* --
+      # a LAN-hosted target (e.g. n8n) needs its host (host or host:port)
+      # listed here.
+      WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
+      WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
+      WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
       - ./backend/storage:/app/backend/storage
     depends_on:
@@ -139,6 +145,15 @@ services:
       # same OPENWEBUI_* settings as the backend (which only tests/lists).
       OPENWEBUI_ENABLED: ${OPENWEBUI_ENABLED:-true}
       OPENWEBUI_PRIVATE_HOST_ALLOWLIST: ${OPENWEBUI_PRIVATE_HOST_ALLOWLIST:-[]}
+      # Webhook delivery: the deliver_webhook task runs on this worker, so it
+      # needs the same WEBHOOK_* settings as the backend. The pending-cap is
+      # also enforced here, not just by the backend's POST /webhooks/send --
+      # app/workers/webhook_tasks.py's _dispatch() (the automatic
+      # job.finished/job.failed/import_run.finished hooks) checks the same
+      # cap before creating a delivery, and that runs in this worker process.
+      WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
+      WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
+      WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
       - ./backend/storage:/app/backend/storage
       # PaddleOCR writes model weights into $HOME/.paddlex and
