@@ -1,9 +1,10 @@
 """Outbound webhook delivery: signature correctness and payload shape
 (app/services/webhooks.py), the deliver_webhook worker task's happy path /
 final-4xx / retried-5xx paths (app/workers/webhook_tasks.py), and the
-job-completion dispatch hook (app/workers/tasks.py's process_job) creating
-deliveries only for matching events/owner and never breaking job completion
-on a webhook failure.
+job-completion dispatch hook (app/workers/tasks.py's process_job) creating a
+delivery only when the job/run was itself configured with a
+webhook_connection_id -- never a fan-out to every connection subscribed to
+the event -- and never breaking job completion on a webhook failure.
 
 Drives deliver_webhook directly against the shared sqlite test DB
 (SessionLocal monkeypatched to conftest's TestingSessionLocal), same pattern
@@ -47,7 +48,13 @@ def _make_connection(db, owner_id: str, *, events=('job.finished', 'job.failed')
     return connection
 
 
-def _make_job(db, owner_id: str | None, *, status=JobStatus.FINISHED, filename='report.pdf', markdown='hello', error_message=None, tags=None) -> Job:
+def _make_job(
+    db, owner_id: str | None, *, status=JobStatus.FINISHED, filename='report.pdf', markdown='hello',
+    error_message=None, tags=None, webhook_connection_id: str | None = None,
+) -> Job:
+    settings_info = {'profile_id': 'ppocrv6_small', 'folder': 'inbox', 'subfolder': 'q3'}
+    if webhook_connection_id:
+        settings_info['webhook_connection_id'] = webhook_connection_id
     job = Job(
         original_filename=filename,
         upload_path=f'/tmp/{filename}',
@@ -57,12 +64,27 @@ def _make_job(db, owner_id: str | None, *, status=JobStatus.FINISHED, filename='
         owner_id=owner_id,
         document_version=1,
         content_sha256='deadbeef' * 8,
-        processing_info={'settings': {'profile_id': 'ppocrv6_small', 'folder': 'inbox', 'subfolder': 'q3'}},
+        processing_info={'settings': settings_info},
     )
     db.add(job)
     db.commit()
     db.refresh(job)
     return job
+
+
+def _make_run(db, owner_id: str | None, *, webhook_connection_id: str | None = None, pages_imported: int = 0, pages_failed: int = 0) -> ImportRun:
+    options: dict = {}
+    if webhook_connection_id:
+        options['webhook_connection_id'] = webhook_connection_id
+    run = ImportRun(
+        owner_id=owner_id, kind='confluence', scope_type='space', scope_value='ENG',
+        options=options, state={'frontier': [], 'visited': {}, 'errors': []},
+        pages_imported=pages_imported, pages_failed=pages_failed,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
 
 
 def _make_delivery(db, connection: WebhookConnection, *, job_id: str | None = None, import_run_id: str | None = None, event: str = 'job.finished') -> WebhookDelivery:
@@ -404,15 +426,37 @@ def test_deliver_webhook_non_pending_is_a_noop(db_session) -> None:
 
 
 # --- Job-completion dispatch hook (app/workers/tasks.py) --------------------
+#
+# Regression coverage for the opt-in rewrite: a delivery now only ever
+# happens when the job/run itself carries a webhook_connection_id, never
+# just because the owner happens to have a matching subscribed connection.
 
-def test_process_job_finished_dispatches_only_matching_events(db_session) -> None:
-    """Two connections for the same owner: one subscribed to job.finished
-    (gets a delivery), one only to job.failed (does not)."""
+def test_dispatch_job_event_noop_without_configured_connection(db_session) -> None:
+    """Regression (the opt-in core): owner has an enabled connection
+    subscribed to job.finished, but the job itself was never configured
+    with a webhook_connection_id -- must be a complete no-op."""
     db = db_session
     user = create_test_user(username='webhook_hook_user', email='webhook_hook_user@example.com')
-    matching = _make_connection(db, user.id, events=('job.finished',))
-    non_matching = _make_connection(db, user.id, events=('job.failed',))
-    job = _make_job(db, user.id)
+    _make_connection(db, user.id, events=('job.finished',))
+    job = _make_job(db, user.id)  # no webhook_connection_id in settings
+
+    with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
+        webhook_tasks.dispatch_job_event(db, job, 'job.finished')
+
+    mock_send_task.assert_not_called()
+    assert db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).count() == 0
+
+
+def test_dispatch_job_event_delivers_only_to_configured_connection(db_session) -> None:
+    """Regression: the job is configured with one connection; a second
+    enabled connection also subscribed to job.finished exists for the same
+    owner but was never selected on the job -- exactly one delivery, for
+    the configured connection, must be created."""
+    db = db_session
+    user = create_test_user(username='webhook_hook_user2', email='webhook_hook_user2@example.com')
+    configured = _make_connection(db, user.id, events=('job.finished',))
+    _make_connection(db, user.id, events=('job.finished',))  # second subscribed connection, not configured
+    job = _make_job(db, user.id, webhook_connection_id=configured.id)
 
     with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
         webhook_tasks.dispatch_job_event(db, job, 'job.finished')
@@ -421,30 +465,62 @@ def test_process_job_finished_dispatches_only_matching_events(db_session) -> Non
     db.expire_all()
     deliveries = db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).all()
     assert len(deliveries) == 1
-    assert deliveries[0].connection_id == matching.id
+    assert deliveries[0].connection_id == configured.id
     assert deliveries[0].event == 'job.finished'
     assert deliveries[0].status == 'pending'
 
 
-def test_dispatch_job_event_ignores_other_owners_connections(db_session) -> None:
+def test_dispatch_job_event_configured_connection_not_subscribed_is_noop(db_session) -> None:
+    """Regression: the configured connection exists, is enabled, and is
+    owned by the job's owner, but its events list doesn't include this
+    event -- still zero deliveries."""
     db = db_session
-    owner = create_test_user(username='webhook_hook_owner', email='webhook_hook_owner@example.com')
-    other = create_test_user(username='webhook_hook_other', email='webhook_hook_other@example.com')
-    _make_connection(db, other.id, events=('job.finished',))  # different owner, must not fire
-    job = _make_job(db, owner.id)
+    user = create_test_user(username='webhook_hook_user3', email='webhook_hook_user3@example.com')
+    connection = _make_connection(db, user.id, events=('job.failed',))  # not subscribed to job.finished
+    job = _make_job(db, user.id, webhook_connection_id=connection.id)
 
     with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
         webhook_tasks.dispatch_job_event(db, job, 'job.finished')
 
     mock_send_task.assert_not_called()
+    assert db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).count() == 0
+
+
+def test_dispatch_job_event_configured_connection_disabled_is_noop(db_session) -> None:
+    db = db_session
+    user = create_test_user(username='webhook_hook_user_disabled_conn', email='webhook_hook_user_disabled_conn@example.com')
+    connection = _make_connection(db, user.id, events=('job.finished',), enabled=False)
+    job = _make_job(db, user.id, webhook_connection_id=connection.id)
+
+    with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
+        webhook_tasks.dispatch_job_event(db, job, 'job.finished')
+
+    mock_send_task.assert_not_called()
+    assert db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).count() == 0
+
+
+def test_dispatch_job_event_configured_connection_owned_by_other_user_is_noop(db_session) -> None:
+    """Regression: the connection id stored on the job belongs to a
+    different owner (stale/foreign id) -- must not be usable."""
+    db = db_session
+    owner = create_test_user(username='webhook_hook_owner', email='webhook_hook_owner@example.com')
+    other = create_test_user(username='webhook_hook_other', email='webhook_hook_other@example.com')
+    foreign_connection = _make_connection(db, other.id, events=('job.finished',))
+    job = _make_job(db, owner.id, webhook_connection_id=foreign_connection.id)
+
+    with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
+        webhook_tasks.dispatch_job_event(db, job, 'job.finished')
+
+    mock_send_task.assert_not_called()
+    assert db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).count() == 0
 
 
 def test_dispatch_job_event_noop_when_webhooks_disabled(db_session, monkeypatch) -> None:
     db = db_session
     monkeypatch.setattr(webhook_tasks.settings, 'webhooks_enabled', False)
-    user = create_test_user(username='webhook_hook_user2', email='webhook_hook_user2@example.com')
-    _make_connection(db, user.id, events=('job.finished',))
-    job = _make_job(db, user.id)
+    user = create_test_user(username='webhook_hook_user_wh_disabled', email='webhook_hook_user_wh_disabled@example.com')
+    connection = _make_connection(db, user.id, events=('job.finished',))
+    job = _make_job(db, user.id, webhook_connection_id=connection.id)
 
     with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
         webhook_tasks.dispatch_job_event(db, job, 'job.finished')
@@ -455,15 +531,54 @@ def test_dispatch_job_event_noop_when_webhooks_disabled(db_session, monkeypatch)
 def test_dispatch_job_event_respects_pending_cap(db_session, monkeypatch) -> None:
     db = db_session
     monkeypatch.setattr(webhook_tasks.settings, 'webhook_max_pending_deliveries_per_user', 0)
-    user = create_test_user(username='webhook_hook_user3', email='webhook_hook_user3@example.com')
-    _make_connection(db, user.id, events=('job.finished',))
-    job = _make_job(db, user.id)
+    user = create_test_user(username='webhook_hook_user6', email='webhook_hook_user6@example.com')
+    connection = _make_connection(db, user.id, events=('job.finished',))
+    job = _make_job(db, user.id, webhook_connection_id=connection.id)
 
     with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
         webhook_tasks.dispatch_job_event(db, job, 'job.finished')  # must not raise
 
     mock_send_task.assert_not_called()
     assert db.query(WebhookDelivery).filter(WebhookDelivery.job_id == job.id).count() == 0
+
+
+# --- Import-run dispatch hook (app/workers/import_tasks.py) -----------------
+#
+# Same opt-in contract as dispatch_job_event above, but reading
+# webhook_connection_id from run.options instead of processing_info.
+
+def test_dispatch_run_event_delivers_when_configured(db_session) -> None:
+    db = db_session
+    user = create_test_user(username='webhook_run_user', email='webhook_run_user@example.com')
+    connection = _make_connection(db, user.id, events=('import_run.finished',))
+    run = _make_run(db, user.id, webhook_connection_id=connection.id, pages_imported=3)
+
+    with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
+        webhook_tasks.dispatch_run_event(db, run)
+
+    mock_send_task.assert_called_once()
+    db.expire_all()
+    deliveries = db.query(WebhookDelivery).filter(WebhookDelivery.import_run_id == run.id).all()
+    assert len(deliveries) == 1
+    assert deliveries[0].connection_id == connection.id
+    assert deliveries[0].event == 'import_run.finished'
+    assert deliveries[0].status == 'pending'
+
+
+def test_dispatch_run_event_noop_without_configured_connection(db_session) -> None:
+    """Regression: owner has an enabled connection subscribed to
+    import_run.finished, but the run itself has no webhook_connection_id in
+    its options -- must be a complete no-op."""
+    db = db_session
+    user = create_test_user(username='webhook_run_user2', email='webhook_run_user2@example.com')
+    _make_connection(db, user.id, events=('import_run.finished',))
+    run = _make_run(db, user.id)  # no webhook_connection_id in options
+
+    with patch.object(webhook_tasks.celery_app, 'send_task') as mock_send_task:
+        webhook_tasks.dispatch_run_event(db, run)
+
+    mock_send_task.assert_not_called()
+    assert db.query(WebhookDelivery).filter(WebhookDelivery.import_run_id == run.id).count() == 0
 
 
 def test_process_job_completion_hook_swallows_webhook_dispatch_errors(monkeypatch, tmp_path) -> None:

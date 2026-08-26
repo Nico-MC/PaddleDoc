@@ -18,7 +18,13 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import _aware_utc, get_current_user
-from app.api.routes import _JOB_BLOB_DEFER_OPTIONS, _owner_visible, _parse_tags, _sanitize_storage_path
+from app.api.routes import (
+    _JOB_BLOB_DEFER_OPTIONS,
+    _owner_visible,
+    _parse_tags,
+    _sanitize_storage_path,
+    _validated_webhook_connection,
+)
 from app.core.config import settings
 from app.database.session import get_db
 from app.models.models import (
@@ -445,6 +451,15 @@ def create_import_run(
     if payload.options.ocr_profile_id:
         resolve_profile_selection(db, payload.options.ocr_profile_id)
 
+    # Same 422 semantics as routes.py's helper (unknown/foreign/disabled ->
+    # 422 'Unknown webhook connection' / 'Webhook connection is disabled',
+    # never a 404 -- see _validated_webhook_connection's docstring).
+    # Imported from app.api.routes rather than reimplemented here: no
+    # circular import, this module already imports several helpers from
+    # that one.
+    if payload.options.webhook_connection_id:
+        _validated_webhook_connection(db, user, payload.options.webhook_connection_id)
+
     if payload.scope.type == 'page':
         scope_value = extract_page_id(payload.scope.value)
         if scope_value is None:
@@ -512,6 +527,7 @@ def create_import_run(
         'tags': _parse_tags(','.join(payload.options.tags)),
         'email': payload.options.email.strip(),
         'path_tags': payload.options.path_tags,
+        'webhook_connection_id': payload.options.webhook_connection_id,
     }
     # Page scope seeds the frontier directly; space scope leaves it empty --
     # run creation makes no outbound requests, so the worker resolves the

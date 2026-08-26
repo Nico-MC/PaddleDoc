@@ -87,6 +87,11 @@ class ImportRunOptions(BaseModel):
     # path_titles) attached as tags, on top of `tags` above -- see
     # app/workers/import_tasks.py's _job_tags.
     path_tags: bool = False
+    # Delivery target for this run's 'import_run.finished' event; None = no
+    # webhook. Validated against the caller's own enabled connections at
+    # create time (app/api/import_routes.py's create_import_run) -- see
+    # app/workers/webhook_tasks.py's dispatch_run_event for the consumer.
+    webhook_connection_id: str | None = None
 
 
 class ImportRunCreateRequest(BaseModel):

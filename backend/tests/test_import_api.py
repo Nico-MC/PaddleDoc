@@ -25,6 +25,7 @@ from app.models.models import (
     Team,
     UserRole,
     VlConnection,
+    WebhookConnection,
 )
 from app.services import security
 from app.services.confluence import ConfluenceError
@@ -494,6 +495,25 @@ def _make_vl_connection(*, name: str = 'Import VL', enabled: bool = True) -> VlC
         db.close()
 
 
+def _make_webhook_connection(owner_id: str, *, name: str = 'Import Webhook', enabled: bool = True) -> WebhookConnection:
+    db = _db()
+    try:
+        connection = WebhookConnection(
+            owner_id=owner_id,
+            name=name,
+            url='https://n8n.example.com/webhook/import-test',
+            events=['import_run.finished'],
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
 def test_create_run_rejects_unknown_vl_ocr_profile_and_creates_no_run(monkeypatch):
     user = _user('imp-run-vl-bad')
     source = _make_source(user.id, server_kind='cloud')
@@ -562,6 +582,63 @@ def test_create_run_persists_path_tags_option(monkeypatch):
     assert resp.status_code == 201, resp.text
     row = _get_run_row(resp.json()['id'])
     assert row.options['path_tags'] is True
+
+
+def test_create_run_persists_webhook_connection_id_option(monkeypatch):
+    # Regression, mirroring test_create_run_persists_path_tags_option above:
+    # create_import_run's hand-built `options` dict must copy
+    # webhook_connection_id through to the persisted run -- that's what
+    # app/workers/webhook_tasks.py's dispatch_run_event reads to decide
+    # whether/where to deliver import_run.finished, and what
+    # ImportRunDetailResponse round-trips back out for "edit & run again".
+    user = _user('imp-run-webhook')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda *a, **k: None)
+    connection = _make_webhook_connection(user.id)
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': '123456'},
+            'options': {'webhook_connection_id': connection.id},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    row = _get_run_row(resp.json()['id'])
+    assert row.options['webhook_connection_id'] == connection.id
+
+    # Round-trips back out through the detail endpoint (Edit-&-run-again
+    # prefill) unchanged.
+    detail = client.get(f"/api/v1/import/runs/{resp.json()['id']}")
+    assert detail.json()['options']['webhook_connection_id'] == connection.id
+
+
+def test_create_run_rejects_unknown_webhook_connection_and_creates_no_run(monkeypatch):
+    user = _user('imp-run-webhook-bad')
+    source = _make_source(user.id, server_kind='cloud')
+    client = login_as(user.username)
+    sent: list[tuple] = []
+    monkeypatch.setattr(import_routes.celery_app, 'send_task', lambda name, args=None, **kw: sent.append((name, args)))
+
+    resp = client.post(
+        '/api/v1/import/runs',
+        json={
+            'source_id': source.id,
+            'scope': {'type': 'page', 'value': '123456'},
+            'options': {'webhook_connection_id': 'does-not-exist'},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()['detail'] == 'Unknown webhook connection'
+    assert sent == []
+
+    db = _db()
+    try:
+        assert db.query(ImportRun).filter(ImportRun.owner_id == user.id).count() == 0
+    finally:
+        db.close()
 
 
 def test_create_run_space_scope_from_url_leaves_frontier_for_worker(monkeypatch):
@@ -958,6 +1035,7 @@ def test_run_detail_exposes_source_id_and_options_ignoring_extra_keys():
         'tags': ['a', 'b'],
         'email': 'me@example.com',
         'path_tags': False,
+        'webhook_connection_id': None,
     }
 
     # Deleted source -> source_id goes NULL, run keeps its history.

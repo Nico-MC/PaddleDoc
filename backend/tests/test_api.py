@@ -8,7 +8,7 @@ from fastapi import HTTPException, UploadFile
 from app.api.deps import get_current_user
 from app.api.routes import _JOB_LIST_PAGE_LIMIT_MAX
 from app.main import app
-from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, User, UserRole, VlConnection
+from app.models.models import Collection, Job, JobMarkdownVersion, JobStatus, User, UserRole, VlConnection, WebhookConnection
 from app.services import security
 from conftest import TestingSessionLocal, client
 
@@ -202,6 +202,121 @@ def test_upload_with_unknown_vl_profile_is_422_and_creates_no_job(monkeypatch, t
     # No partial upload file/Job row left behind for a request rejected
     # before create_job_from_upload ever runs.
     assert not (settings.uploads_dir / 'inbox').exists()
+
+
+def _make_webhook_connection(owner_id: str, *, name: str = 'Upload Webhook', enabled: bool = True) -> WebhookConnection:
+    db = TestingSessionLocal()
+    try:
+        connection = WebhookConnection(
+            owner_id=owner_id,
+            name=name,
+            url='https://n8n.example.com/webhook/upload-test',
+            events=['job.finished'],
+            enabled=enabled,
+        )
+        db.add(connection)
+        db.commit()
+        db.refresh(connection)
+        db.expunge(connection)
+        return connection
+    finally:
+        db.close()
+
+
+def _make_other_user_id() -> str:
+    """A second, real user row (FK-enforced -- see _ensure_bypass_user_row's
+    docstring above) to own a webhook connection that _TEST_ADMIN_USER must
+    not be able to configure a job with."""
+    db = TestingSessionLocal()
+    try:
+        other_id = 'test-webhook-stranger'
+        if db.get(User, other_id) is None:
+            db.add(User(
+                id=other_id, username='test-webhook-stranger', email='test-webhook-stranger@example.com',
+                role=UserRole.USER, is_active=True,
+            ))
+            db.commit()
+        return other_id
+    finally:
+        db.close()
+
+
+def test_upload_with_webhook_connection_sets_job_setting(monkeypatch, tmp_path):
+    # Regression for the opt-in webhook rewrite: POST /upload's
+    # webhook_connection_id, once validated as the caller's own enabled
+    # connection, must land in job.processing_info['settings'] -- that's
+    # what app/workers/webhook_tasks.py's dispatch_job_event now reads to
+    # decide whether/where to deliver job.finished/job.failed.
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    connection = _make_webhook_connection(_TEST_ADMIN_USER.id)
+
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args, **kwargs: None)
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('document-webhook.pdf', b'%PDF-webhook-upload-sample', 'application/pdf')},
+        data={'profile_id': 'ppocrv6_tiny', 'webhook_connection_id': connection.id},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    db = TestingSessionLocal()
+    try:
+        job = db.get(Job, payload['job_id'])
+        assert job.processing_info['settings']['webhook_connection_id'] == connection.id
+    finally:
+        db.close()
+
+
+def test_upload_with_unknown_webhook_connection_is_422_and_creates_no_job(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+
+    delayed: list[tuple] = []
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args, **kwargs: delayed.append(args))
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('document-webhook-bad.pdf', b'%PDF-webhook-bad-sample', 'application/pdf')},
+        data={'profile_id': 'ppocrv6_tiny', 'webhook_connection_id': 'does-not-exist'},
+    )
+    assert response.status_code == 422
+    assert response.json()['detail'] == 'Unknown webhook connection'
+    assert delayed == []
+    # No partial upload file/Job row left behind, same as the vl: 422 above.
+    assert not (settings.uploads_dir / 'inbox').exists()
+
+
+def test_upload_with_foreign_webhook_connection_is_422_no_existence_leak(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.core.config import settings
+
+    settings.uploads_dir = tmp_path / 'uploads'
+    settings.results_dir = tmp_path / 'results'
+    other_owner_id = _make_other_user_id()
+    foreign_connection = _make_webhook_connection(other_owner_id, name='Someone else’s')
+
+    delayed: list[tuple] = []
+    monkeypatch.setattr(routes.process_job, 'delay', lambda *args, **kwargs: delayed.append(args))
+
+    response = client.post(
+        '/api/v1/upload',
+        files={'file': ('document-webhook-foreign.pdf', b'%PDF-webhook-foreign-sample', 'application/pdf')},
+        data={'profile_id': 'ppocrv6_tiny', 'webhook_connection_id': foreign_connection.id},
+    )
+    assert response.status_code == 422
+    # Same message as an unknown id -- a foreign connection id must not be
+    # distinguishable from a nonexistent one (see
+    # routes._validated_webhook_connection's docstring).
+    assert response.json()['detail'] == 'Unknown webhook connection'
+    assert delayed == []
 
 
 def test_upload_allows_missing_email(monkeypatch, tmp_path):

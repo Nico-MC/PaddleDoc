@@ -16,7 +16,19 @@ from sqlalchemy.orm import Session, defer
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
 from app.database.session import get_db
-from app.models.models import Collection, Job, JobArtifact, JobMarkdownVersion, JobStatus, Tag, Team, User, UserRole, VlConnection
+from app.models.models import (
+    Collection,
+    Job,
+    JobArtifact,
+    JobMarkdownVersion,
+    JobStatus,
+    Tag,
+    Team,
+    User,
+    UserRole,
+    VlConnection,
+    WebhookConnection,
+)
 from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
@@ -615,6 +627,27 @@ def _enabled_vl_connections(db: Session) -> list[VlConnection]:
     )
 
 
+def _validated_webhook_connection(db: Session, user: User, connection_id: str) -> WebhookConnection:
+    """Validates a client-supplied webhook_connection_id for the job/run
+    surfaces that let a task opt into outbound-webhook delivery (POST
+    /upload, POST /collections/{id}/start below, and
+    app/api/import_routes.py's create_import_run, which imports this
+    helper). Raises 422 'Unknown webhook connection' when the row is
+    missing OR owned by another user -- collapsed into one message/status so
+    a cross-user connection id can't be distinguished from a nonexistent one
+    (no existence leak, same discipline as webhook_routes._get_owned_connection's
+    404-not-403, just 422 here to match resolve_profile_selection's
+    'Unknown profile' wording for an invalid selection made at job-creation
+    time). A separate 422 'Webhook connection is disabled' covers an
+    otherwise-valid, owned connection that is simply switched off."""
+    connection = db.get(WebhookConnection, connection_id)
+    if connection is None or connection.owner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Unknown webhook connection')
+    if not connection.enabled:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Webhook connection is disabled')
+    return connection
+
+
 def create_job_from_upload(
     db: Session,
     file: UploadFile,
@@ -869,6 +902,12 @@ def start_collection_processing(
     profile_settings = resolve_profile_selection(db, payload.profile_id)
     dispatch_profile_id = effective_pipeline_profile_id(payload.profile_id)
 
+    # Same "validate once up front, apply to every job" discipline as the
+    # profile above: an unknown/foreign/disabled webhook_connection_id fails
+    # the whole start rather than partially wiring up some jobs in the batch.
+    if payload.webhook_connection_id:
+        _validated_webhook_connection(db, user, payload.webhook_connection_id)
+
     job_ids = _collection_job_ids(db, collection_id, user)
     if not job_ids:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='No files uploaded to collection')
@@ -880,17 +919,21 @@ def start_collection_processing(
             continue
         info = job.processing_info if isinstance(job.processing_info, dict) else {}
         settings_info = dict(info.get('settings')) if isinstance(info.get('settings'), dict) else {}
-        # Clear any stale vl_connection_id/variant_label before applying the
-        # new selection so switching away from a vl: profile never leaves
-        # orphaned VL fields behind (same discipline as restart_job).
+        # Clear any stale vl_connection_id/variant_label/webhook_connection_id
+        # before applying the new selection so switching away from a vl:
+        # profile, or away from a configured webhook, never leaves orphaned
+        # fields behind (same discipline as restart_job).
         settings_info.pop('vl_connection_id', None)
         settings_info.pop('variant_label', None)
+        settings_info.pop('webhook_connection_id', None)
         settings_info['profile_id'] = payload.profile_id
         settings_info.update(profile_settings)
         settings_info['mode'] = 'collection'
         settings_info['email'] = collection.email
         settings_info['department'] = collection.department
         settings_info['collection_id'] = collection_id
+        if payload.webhook_connection_id:
+            settings_info['webhook_connection_id'] = payload.webhook_connection_id
         job.processing_info = {**info, 'settings': settings_info}
         process_job.delay(
             job.id,
@@ -920,6 +963,7 @@ def upload_document(
     subfolder: str = Form(''),
     tags: str = Form(''),
     password: str = Form(''),
+    webhook_connection_id: str = Form(''),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> UploadResponse:
@@ -942,8 +986,22 @@ def upload_document(
     # the default profile downstream). See resolve_profile_selection.
     profile_settings = resolve_profile_selection(db, profile_id)
 
+    # Same 422 semantics as the vl: profile check above -- an unknown,
+    # foreign, or disabled webhook_connection_id fails the upload outright
+    # rather than silently uploading without the requested delivery target.
+    webhook_connection_id_clean = webhook_connection_id.strip()
+    if webhook_connection_id_clean:
+        _validated_webhook_connection(db, user, webhook_connection_id_clean)
+
     file_id = str(uuid.uuid4())
     storage_folder = _storage_folder(file_id, folder_clean, subfolder_clean)
+
+    # Both extra-settings sources merge into one dict: a vl: profile's
+    # vl_connection_id/variant_label and the opt-in webhook_connection_id
+    # are independent selections and can both be present on the same job.
+    extra_settings = dict(profile_settings)
+    if webhook_connection_id_clean:
+        extra_settings['webhook_connection_id'] = webhook_connection_id_clean
 
     try:
         job = create_job_from_upload(
@@ -959,7 +1017,7 @@ def upload_document(
             subfolder=subfolder_clean or None,
             tags=_parse_tags(tags),
             password_hash=password_hash,
-            extra_settings=profile_settings or None,
+            extra_settings=extra_settings or None,
         )
     except DuplicateUploadError as exc:
         return _duplicate_upload_response(exc.predecessor)

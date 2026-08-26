@@ -11,13 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Outbound webhooks for automation (n8n and friends): every user can register webhook
   connections under Connections › Webhooks — URL, optional signing secret (stored encrypted,
   never displayed; deliveries then carry an `X-PaddleDoc-Signature` HMAC-SHA256 header), and
-  the events to subscribe to (job finished, job failed, import run finished). The worker
-  delivers automatically with retries and a visible delivery history, finished jobs can also
-  be sent manually from the jobs table or detail page, and payloads carry the job metadata
-  plus the full markdown so a flow can process it without calling back. Deliveries run
-  through the SSRF guard; private-network targets are allowed via
-  `WEBHOOK_PRIVATE_HOST_ALLOWLIST` (wired through compose and the Helm chart, both backend
-  and worker)
+  the events the connection accepts (job finished, job failed, import run finished).
+  Delivery is strictly per-task opt-in: the File Task wizard's profile step and the
+  Confluence import wizard's options both grew an optional "Send result to webhook"
+  selection, and only a task configured that way ever sends — a connection that merely
+  subscribes to an event receives nothing. The worker delivers automatically with retries
+  and a visible delivery history, finished jobs can also be sent manually from the jobs
+  table or detail page, and payloads carry the job metadata plus the full markdown so a
+  flow can process it without calling back. Deliveries run through the SSRF guard;
+  private-network targets are allowed via `WEBHOOK_PRIVATE_HOST_ALLOWLIST` (wired through
+  compose and the Helm chart, both backend and worker)
 - Confluence imports are diagnosable: every failed API request is logged (path, HTTP status,
   server kind, and Confluence's own error message) with plain-language readings of the
   common cases — including Data Center's habit of answering 404 for pages you lack

@@ -3,12 +3,14 @@
 import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, FileText, Plus, Sparkles, UploadCloud, X } from 'lucide-react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { ErrorNotice, Field, Modal, inputClass } from '@/components/admin/admin-shared';
 import { Button } from '@/components/ui/button';
 import { apiFetch } from '@/lib/api';
 import { peekCached, useCachedResource } from '@/lib/data-cache';
+import { listWebhookConnections, type WebhookConnection } from '@/lib/webhooks';
 import {
   API,
   type DuplicateUploadBody,
@@ -42,6 +44,7 @@ function duplicateUploadMessage(fileName: string, error: UploadError): string {
 const JOBS_KEY = '/api/v1/jobs';
 const PADDLE_SETTINGS_KEY = '/api/v1/paddle/settings';
 const PADDLE_CAPABILITIES_KEY = '/api/v1/paddle/capabilities';
+const WEBHOOK_CONNECTIONS_KEY = '/api/v1/webhooks/connections';
 
 type WizardStepId = 1 | 2 | 3 | 4;
 
@@ -101,22 +104,40 @@ export function ProcessingFlow() {
     const payload = await response.json();
     return { profiles: payload.profiles ?? [] } as PaddleCapabilities;
   };
+  // Only enabled connections can actually receive a delivery, so the picker
+  // never offers a disabled one -- same filter the backend applies when
+  // deciding whether to fire.
+  const fetchEnabledWebhookConnections = async () => {
+    const payload = await listWebhookConnections();
+    return payload.items.filter((connection) => connection.enabled);
+  };
 
   const jobsResource = useCachedResource(JOBS_KEY, fetchJobsForFolders, { ttlMs: 15_000 });
   const settingsResource = useCachedResource(PADDLE_SETTINGS_KEY, fetchPaddleSettings, { ttlMs: 60_000 });
   const capabilitiesResource = useCachedResource(PADDLE_CAPABILITIES_KEY, fetchPaddleCapabilities, {
     ttlMs: 60_000,
   });
+  const webhookConnectionsResource = useCachedResource(WEBHOOK_CONNECTIONS_KEY, fetchEnabledWebhookConnections, {
+    ttlMs: 60_000,
+  });
 
   const capabilities = capabilitiesResource.data ?? { profiles: [] };
+  const enabledWebhookConnections: WebhookConnection[] = webhookConnectionsResource.data ?? [];
   const [selectedProfileId, setSelectedProfileId] = useState(
     () => peekCached<PaddleSettings>(PADDLE_SETTINGS_KEY)?.default_profile ?? 'ppocrv6_tiny',
   );
   const singleFileInputRef = useRef<HTMLInputElement>(null);
   const collectionFileInputRef = useRef<HTMLInputElement>(null);
 
+  // '' = no webhook target; step 2's picker is entirely optional, so this
+  // never factors into isStep2Valid below.
+  const [webhookConnectionId, setWebhookConnectionId] = useState('');
+
   const selectedProfile =
     capabilities.profiles.find((option) => option.value === selectedProfileId) ?? capabilities.profiles[0];
+  const selectedWebhookConnection = enabledWebhookConnections.find(
+    (connection) => connection.id === webhookConnectionId,
+  );
   const selectedSubfolderOptions = folder ? (folderOptions[folder] ?? []) : [];
 
   const refreshFolderOptions = async () => {
@@ -167,6 +188,9 @@ export function ProcessingFlow() {
       formData.append('folder', folder.trim());
       formData.append('subfolder', subfolder.trim());
       formData.append('mode', 'single');
+      if (webhookConnectionId) {
+        formData.append('webhook_connection_id', webhookConnectionId);
+      }
       await sendFormDataWithProgress(`${API}/api/v1/upload`, formData, (loaded, total) => {
         setUploadProgress({
           phase: 'single',
@@ -302,7 +326,10 @@ export function ProcessingFlow() {
     const response = await apiFetch(`/api/v1/collections/${collectionId}/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile_id: selectedProfile.value }),
+      body: JSON.stringify({
+        profile_id: selectedProfile.value,
+        ...(webhookConnectionId ? { webhook_connection_id: webhookConnectionId } : {}),
+      }),
     });
     if (!response.ok) {
       setFlowMessage({ text: 'Failed to start collection processing.', step: 4, tone: 'error' });
@@ -629,6 +656,34 @@ export function ProcessingFlow() {
                   );
                 })}
               </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-semibold text-slate-950">Send result to webhook</p>
+                <p className="mt-1 text-xs text-slate-600">
+                  Optional — deliver the finished result to a webhook connection, e.g. an n8n flow.
+                </p>
+                {enabledWebhookConnections.length > 0 ? (
+                  <select
+                    value={webhookConnectionId}
+                    onChange={(event) => setWebhookConnectionId(event.target.value)}
+                    className="mt-3 w-full rounded border border-slate-200 bg-white px-3 py-2 text-slate-950 md:w-1/2"
+                  >
+                    <option value="">Don&apos;t send</option>
+                    {enabledWebhookConnections.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="mt-3 text-xs text-slate-500">
+                    No webhook connections yet — create one under{' '}
+                    <Link href="/connections?tab=webhooks" className="text-emerald-700 hover:text-emerald-800">
+                      Connections › Webhooks
+                    </Link>
+                    .
+                  </p>
+                )}
+              </div>
               {step2Hint}
               <div className="flex justify-between gap-3">
                 <Button variant="outline" onClick={() => goToStep(1)}>
@@ -801,6 +856,10 @@ export function ProcessingFlow() {
                   <div>
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Profile</dt>
                     <dd className="mt-0.5 text-slate-950">{selectedProfile?.label ?? 'No profile selected'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Webhook</dt>
+                    <dd className="mt-0.5 text-slate-950">{selectedWebhookConnection?.name ?? 'Not configured'}</dd>
                   </div>
                   <div>
                     <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">

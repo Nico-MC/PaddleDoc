@@ -30,6 +30,11 @@ class CollectionResponse(BaseModel):
 
 class CollectionStartRequest(BaseModel):
     profile_id: str = Field(min_length=1)
+    # Delivery target for every job started in this batch (job.finished /
+    # job.failed); None = no webhook. Validated against the caller's own
+    # enabled connections once, up front, in start_collection_processing --
+    # see app/api/routes.py's _validated_webhook_connection.
+    webhook_connection_id: str | None = Field(default=None, min_length=1)
 
 
 class CollectionStartResponse(BaseModel):

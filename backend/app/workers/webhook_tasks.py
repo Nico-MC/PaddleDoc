@@ -2,6 +2,16 @@
 event payload to its connection's URL, with retry/backoff for
 transport-level and 5xx failures.
 
+Webhooks are per-task opt-in, not a fan-out: dispatch_job_event/
+dispatch_run_event below fire only when the job/import run was itself
+explicitly configured with a webhook_connection_id (job.processing_info
+['settings'] / run.options -- see app/api/routes.py's POST /upload, POST
+/collections/{id}/start, and app/api/import_routes.py's create_import_run
+for where that id is set and validated). A connection subscribed to the
+event but never selected on the task gets nothing; the connection's own
+`events` list still filters which of finished/failed actually send once a
+connection *is* configured.
+
 Registered from app/workers/tasks.py (the `celery -A app.workers.tasks`
 entrypoint) via an explicit import, mirroring app/workers/openwebui_tasks.py;
 app/api/webhook_routes.py and the completion hooks in app/workers/tasks.py /
@@ -179,7 +189,7 @@ def deliver_webhook(self, delivery_id: str) -> None:
         db.close()
 
 
-# --- Dispatch: create+enqueue deliveries for a just-finished job/run --------
+# --- Dispatch: create+enqueue a delivery for a just-finished job/run -------
 #
 # Called from the two real completion hooks (app/workers/tasks.py's
 # process_job, right after a terminal FINISHED/FAILED commit, and
@@ -190,21 +200,48 @@ def deliver_webhook(self, delivery_id: str) -> None:
 # contract: a webhook dispatch failure must never take down a job/run
 # completion that has already succeeded and committed.
 #
-# These only ever create pending WebhookDelivery rows and enqueue
+# Per-task opt-in, not a fan-out: a job/run only ever gets a delivery if it
+# was itself configured with a webhook_connection_id (see the module
+# docstring), so there is at most one WebhookDelivery created per event here
+# -- never a loop over "every connection subscribed to this event".
+#
+# This only ever creates a pending WebhookDelivery row and enqueues
 # deliver_webhook by name (celery_app.send_task) -- no network call happens
 # here, matching app/api/webhook_routes.send_webhook's own dispatch shape.
 
-def _enabled_connections_for_event(db, owner_id: str, event: str) -> list[WebhookConnection]:
-    connections = db.scalars(
-        select(WebhookConnection)
-        .where(WebhookConnection.owner_id == owner_id)
-        .where(WebhookConnection.enabled.is_(True))
-    ).all()
+def _configured_connection(db, owner_id: str, connection_id: str, event: str) -> WebhookConnection | None:
+    """The one connection a job/run was explicitly configured with, iff it
+    still exists, is still owned by `owner_id`, is enabled, and still lists
+    `event` among the events it should receive -- ownership/enabled/events
+    are re-checked here rather than trusted from configuration time, since a
+    connection can be deleted, disabled, reassigned, or have its events
+    edited after a job/run was set up with it. Returns None in every other
+    case: a fully silent no-op when the id doesn't resolve to an owned
+    connection at all (routes.py/import_routes.py already reject that at
+    configuration time, so this is just defense in depth), but a one-line
+    logger.info when a real, owned connection is found and skipped anyway
+    (disabled, or not subscribed to this event) -- worth a line in the
+    worker logs since that's a configuration mismatch someone can act on.
+    Never logs the connection's url or secret."""
+    connection = db.get(WebhookConnection, connection_id)
+    if connection is None or connection.owner_id != owner_id:
+        return None
+    if not connection.enabled:
+        logger.info(
+            'webhook dispatch: configured connection %s is disabled; skipping event %s', connection_id, event,
+        )
+        return None
     # Filtered in Python, not SQL: `events` is a JSON list column (no
     # portable containment operator across sqlite/postgres), same reasoning
     # as WebhookConnection.status/event being plain strings rather than a
     # queryable enum.
-    return [connection for connection in connections if event in (connection.events or [])]
+    if event not in (connection.events or []):
+        logger.info(
+            'webhook dispatch: configured connection %s is not subscribed to event %s; skipping',
+            connection_id, event,
+        )
+        return None
+    return connection
 
 
 def _pending_delivery_count(db, owner_id: str) -> int:
@@ -216,52 +253,61 @@ def _pending_delivery_count(db, owner_id: str) -> int:
     ) or 0
 
 
-def _dispatch(db, owner_id: str | None, event: str, *, job_id: str | None, import_run_id: str | None) -> None:
-    if not settings.webhooks_enabled or not owner_id:
+def _dispatch(
+    db, owner_id: str | None, event: str, *, connection_id: str | None, job_id: str | None, import_run_id: str | None
+) -> None:
+    if not settings.webhooks_enabled or not owner_id or not connection_id:
         return
-    connections = _enabled_connections_for_event(db, owner_id, event)
-    if not connections:
+    connection = _configured_connection(db, owner_id, connection_id, event)
+    if connection is None:
         return
 
-    # Cap checked once up front and incremented locally per created row --
-    # same single-count-then-decrement-headroom shape as
-    # webhook_routes.send_webhook's cap check, just amortized over however
-    # many connections this owner has subscribed to this event instead of
-    # always exactly 1.
+    # Cap checked once up front, same shape as webhook_routes.send_webhook's
+    # cap check -- there is only ever one connection to create a delivery
+    # for now, so no more per-connection loop/decrement is needed.
     pending = _pending_delivery_count(db, owner_id)
     cap = settings.webhook_max_pending_deliveries_per_user
-    for connection in connections:
-        if pending >= cap:
-            logger.warning(
-                'webhook dispatch: pending-delivery cap reached for user %s (event %s); '
-                'skipping connection %s (%s)',
-                owner_id, event, connection.id, connection.name,
-            )
-            continue
-        delivery = WebhookDelivery(
-            connection_id=connection.id,
-            connection_name=connection.name,
-            owner_id=owner_id,
-            event=event,
-            job_id=job_id,
-            import_run_id=import_run_id,
-            status='pending',
+    if pending >= cap:
+        logger.warning(
+            'webhook dispatch: pending-delivery cap reached for user %s (event %s); skipping connection %s (%s)',
+            owner_id, event, connection.id, connection.name,
         )
-        db.add(delivery)
-        db.commit()
-        pending += 1
-        celery_app.send_task(DELIVER_TASK_NAME, args=[delivery.id])
+        return
+
+    delivery = WebhookDelivery(
+        connection_id=connection.id,
+        connection_name=connection.name,
+        owner_id=owner_id,
+        event=event,
+        job_id=job_id,
+        import_run_id=import_run_id,
+        status='pending',
+    )
+    db.add(delivery)
+    db.commit()
+    celery_app.send_task(DELIVER_TASK_NAME, args=[delivery.id])
 
 
 def dispatch_job_event(db, job: Job, event: str) -> None:
-    """event is 'job.finished' or 'job.failed'. No-op if WEBHOOKS_ENABLED is
-    off, the job has no owner, or the owner has no enabled connection
-    subscribed to `event`."""
-    _dispatch(db, job.owner_id, event, job_id=job.id, import_run_id=None)
+    """event is 'job.finished' or 'job.failed'. Per-task opt-in (see the
+    module docstring): no-op unless WEBHOOKS_ENABLED is on, the job has an
+    owner, AND the job itself carries a non-empty webhook_connection_id
+    under job.processing_info['settings'] -- even then, that connection
+    still has to be enabled and subscribed to `event` (_configured_connection)
+    for a delivery to actually get created."""
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings')
+    connection_id = settings_info.get('webhook_connection_id') if isinstance(settings_info, dict) else None
+    connection_id = connection_id if isinstance(connection_id, str) and connection_id else None
+    _dispatch(db, job.owner_id, event, connection_id=connection_id, job_id=job.id, import_run_id=None)
 
 
 def dispatch_run_event(db, run) -> None:
-    """event is always 'import_run.finished'. No-op if WEBHOOKS_ENABLED is
-    off, the run has no owner, or the owner has no enabled connection
-    subscribed to it."""
-    _dispatch(db, run.owner_id, 'import_run.finished', job_id=None, import_run_id=run.id)
+    """event is always 'import_run.finished'. Same per-task opt-in as
+    dispatch_job_event above, but the webhook_connection_id lives in
+    run.options (app/schemas/import_.py's ImportRunOptions) instead of
+    processing_info['settings']."""
+    options = run.options if isinstance(run.options, dict) else {}
+    connection_id = options.get('webhook_connection_id')
+    connection_id = connection_id if isinstance(connection_id, str) and connection_id else None
+    _dispatch(db, run.owner_id, 'import_run.finished', connection_id=connection_id, job_id=None, import_run_id=run.id)

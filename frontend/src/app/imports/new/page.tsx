@@ -24,6 +24,7 @@ import {
   type ImportSourceTestResponse,
   TEST_COOLDOWN_FALLBACK_MS,
 } from '@/lib/imports';
+import { listWebhookConnections, type WebhookConnection } from '@/lib/webhooks';
 
 const WIZARD_STEPS = [
   { id: 1, title: 'Connection', description: 'Pick or create a Confluence connection and test it.' },
@@ -52,6 +53,8 @@ type ImportRunOptionsPayload = {
   // Optional: an older backend may not send this yet, so read it
   // defensively (?? false) rather than assuming presence.
   path_tags?: boolean;
+  // Optional for the same reason -- absent/null both mean "no webhook".
+  webhook_connection_id?: string | null;
 };
 
 type ImportRunDetailWithPrefill = ImportRunDetail & {
@@ -114,6 +117,9 @@ function NewImportPageInner() {
   const [pathTags, setPathTags] = useState(false);
   const [capabilities, setCapabilities] = useState<PaddleCapabilities>({ profiles: [] });
   const [selectedProfileId, setSelectedProfileId] = useState('');
+  // '' = no webhook target; only enabled connections are offered.
+  const [webhookConnections, setWebhookConnections] = useState<WebhookConnection[]>([]);
+  const [webhookConnectionId, setWebhookConnectionId] = useState('');
 
   const [folder, setFolder] = useState('');
   const [subfolder, setSubfolder] = useState('');
@@ -135,12 +141,13 @@ function NewImportPageInner() {
 
     const loadInitialData = async () => {
       try {
-        const [sourcesPayload, jobsPayload, capabilitiesPayload, prefillRun] = await Promise.all([
+        const [sourcesPayload, jobsPayload, capabilitiesPayload, webhookConnectionsPayload, prefillRun] = await Promise.all([
           apiJson<ImportSourceListResponse>('/api/v1/import/sources', { cache: 'no-store' }),
           apiJson<{ items: Job[] }>('/api/v1/jobs', { cache: 'no-store' }).catch(() => ({ items: [] as Job[] })),
           apiJson<PaddleCapabilities>('/api/v1/paddle/capabilities', { cache: 'no-store' }).catch(
             () => ({ profiles: [] }) as PaddleCapabilities,
           ),
+          listWebhookConnections().catch(() => ({ items: [] as WebhookConnection[] })),
           prefillFromRunId
             ? apiJson<ImportRunDetailWithPrefill>(`/api/v1/import/runs/${prefillFromRunId}`, { cache: 'no-store' }).catch(
                 () => null,
@@ -164,6 +171,7 @@ function NewImportPageInner() {
         setFolderOptions((prev) => buildFolderOptions(prev, jobsPayload.items ?? []));
         const profiles = capabilitiesPayload.profiles ?? [];
         setCapabilities({ profiles });
+        setWebhookConnections(webhookConnectionsPayload.items.filter((connection) => connection.enabled));
         const prefillProfileId = prefillRun?.options.ocr_profile_id ?? null;
         if (prefillProfileId && profiles.some((profile) => profile.value === prefillProfileId)) {
           setSelectedProfileId(prefillProfileId);
@@ -184,6 +192,7 @@ function NewImportPageInner() {
           setSubfolder(options.subfolder ?? '');
           setTags((options.tags ?? []).join(', '));
           setEmail(options.email ?? '');
+          setWebhookConnectionId(options.webhook_connection_id ?? '');
           if (prefillSourceStillExists) {
             setWizardStep(3);
             setPrefillNotice('Prefilled from a previous run — adjust anything and start.');
@@ -419,6 +428,7 @@ function NewImportPageInner() {
               .map((entry) => entry.trim())
               .filter(Boolean),
             email: email.trim(),
+            ...(webhookConnectionId ? { webhook_connection_id: webhookConnectionId } : {}),
           },
         }),
       });
@@ -867,6 +877,35 @@ function NewImportPageInner() {
                       the jobs list can filter by section.
                     </p>
                   </div>
+                </div>
+
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4">
+                  <p className="text-sm font-semibold text-slate-950">Send result to webhook</p>
+                  <p className="text-xs text-slate-600">
+                    Optional — deliver the finished result to a webhook connection, e.g. an n8n flow.
+                  </p>
+                  {webhookConnections.length > 0 ? (
+                    <select
+                      value={webhookConnectionId}
+                      onChange={(event) => setWebhookConnectionId(event.target.value)}
+                      className="mt-1 w-full rounded border border-slate-200 bg-slate-50 px-3 py-2 text-slate-950 md:w-1/2"
+                    >
+                      <option value="">Don&apos;t send</option>
+                      {webhookConnections.map((connection) => (
+                        <option key={connection.id} value={connection.id}>
+                          {connection.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-xs text-slate-500">
+                      No webhook connections yet — create one under{' '}
+                      <Link href="/connections?tab=webhooks" className="text-emerald-700 hover:text-emerald-800">
+                        Connections › Webhooks
+                      </Link>
+                      .
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">
