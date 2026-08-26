@@ -2,14 +2,6 @@ name: paddledoc
 
 services:
   frontend:
-<<<<<<< HEAD
-    build:
-      context: ./frontend
-      args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1},backend,worker,postgres,redis
-=======
     # No extra kernel privileges, no privilege escalation inside the
     # container -- mirrors the Helm chart containerSecurityContext.
     security_opt:
@@ -17,7 +9,6 @@ services:
     cap_drop:
       - ALL
     build: ./frontend
->>>>>>> main
     restart: unless-stopped
     ports:
       - '3000:3000'
