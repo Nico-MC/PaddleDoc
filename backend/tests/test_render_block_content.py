@@ -325,3 +325,204 @@ def test_render_block_content_llm_markdown_bypasses_form_latex_normalization():
     """
     markdown = r'$ \underline{\text{keep me}} $'
     assert render('llm_markdown', markdown, page_number=1) == markdown
+
+
+# --- B5: table renderer repair -----------------------------------------------
+#
+# Five measured bugs in `_html_table_to_markdown` / the 'table' branch of
+# `_render_block_content`. Fixtures below use the two real rows quoted
+# verbatim in the task, plus the real "literal \n in a cell" content.
+
+
+def _table_lines(result: str) -> list[str]:
+    return result.split('\n')
+
+
+# Bug 1a: a label/value form row must NOT be promoted to a GFM header --
+# that would turn the value into a column name and delete it from the data.
+# Real fixture: `<tr><td>Nachname:</td><td>Cicekli</td></tr>`.
+
+def test_render_block_content_table_label_value_row_is_not_promoted_to_header():
+    html_table = (
+        '<table>'
+        '<tr><td>Nachname:</td><td>Cicekli</td></tr>'
+        '<tr><td>Vorname:</td><td>Ali</td></tr>'
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    lines = _table_lines(result)
+    # GFM still needs a header line, but it must be blank -- neither
+    # "Nachname:" nor "Cicekli" may appear there.
+    assert 'Nachname' not in lines[0]
+    assert 'Cicekli' not in lines[0]
+    assert set(lines[0]) <= {'|', ' '}
+    assert '---' in lines[1]
+    # Both rows -- including the would-be header -- survive as data.
+    assert '| Nachname: | Cicekli |' in result
+    assert '| Vorname: | Ali |' in result
+
+
+# Bug 1b: the counter-example from the task -- a real header row with no
+# <th>, told apart from the label/value shape because every data row below
+# carries a checkbox mark (already normalised to '[x]'/'[ ]' upstream, see
+# _normalize_checkbox_glyphs) under the option columns.
+
+def test_render_block_content_table_checkbox_option_header_is_recognized():
+    html_table = (
+        '<table>'
+        '<tr><td>Folgende Unterlagen sind der Schadenanzeige beigefuegt:</td>'
+        '<td>Ja</td><td>Nein</td></tr>'
+        '<tr><td>Versicherungsschein / Police der Reiseversicherung</td>'
+        '<td>☒</td><td>☐</td></tr>'
+        '<tr><td>Rechnung</td><td>☐</td><td>☒</td></tr>'
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    lines = _table_lines(result)
+    assert 'Folgende Unterlagen sind der Schadenanzeige beigefuegt:' in lines[0]
+    assert 'Ja' in lines[0]
+    assert 'Nein' in lines[0]
+    assert '---' in lines[1]
+    assert '[x]' in result
+    assert '[ ]' in result
+    # The header text itself must not be duplicated into the data section.
+    assert result.count('Folgende Unterlagen sind der Schadenanzeige beigefuegt:') == 1
+
+
+# Bug 1, documented limitation: a genuine header made of plain words (not
+# checkbox marks) is indistinguishable from a label/value row under this
+# heuristic and is missed -- it falls back to a blank synthetic header
+# rather than risk deleting real data, so nothing is lost, it's just not
+# recognized as a header.
+
+def test_render_block_content_table_word_header_documented_limitation():
+    html_table = (
+        '<table>'
+        '<tr><td>Name</td><td>Stadt</td></tr>'
+        '<tr><td>Ali</td><td>Berlin</td></tr>'
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    lines = _table_lines(result)
+    assert set(lines[0]) <= {'|', ' '}
+    assert '| Name | Stadt |' in result  # kept, just as a data row
+
+
+# <th> is still treated as an unambiguous header regardless of the
+# checkbox heuristic (already covered indirectly by
+# test_render_block_content_table_html_converts_to_gfm; asserted directly
+# here for the multi-row case the heuristic above operates on).
+
+def test_render_block_content_table_th_row_is_always_header():
+    html_table = (
+        '<table>'
+        '<tr><th>Name</th><th>Stadt</th></tr>'
+        '<tr><td>Ali</td><td>Berlin</td></tr>'
+        '<tr><td>Peter</td><td>Hamburg</td></tr>'
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    lines = _table_lines(result)
+    assert '| Name | Stadt |' == lines[0]
+    assert '| Ali | Berlin |' in result
+    assert '| Peter | Hamburg |' in result
+
+
+# Bug 2: a literal two-character '\n' (not a real line break) inside a cell,
+# measured 39x. Real fixture content (the parenthetical is on its own
+# visual line in the source).
+
+def test_render_block_content_table_literal_backslash_n_becomes_br():
+    cell = (
+        r'Versicherungsschein / Police der Reiseversicherung'
+        r'\n(Nicht Policen-Nummer der Kreditkarte)'
+    )
+    assert '\\n' in cell  # sanity: this really is backslash + 'n', not a real newline
+    html_table = f'<table><tr><td>{cell}</td><td>Wert</td></tr><tr><td>Other</td><td>X</td></tr></table>'
+    result = render('table', html_table, page_number=1)
+    assert '<br>' in result
+    assert '\\n' not in result
+    assert 'Versicherungsschein / Police der Reiseversicherung<br>(Nicht Policen-Nummer der Kreditkarte)' in result
+
+
+# Bug 3: an unescaped '|' inside a cell would otherwise be read as a new
+# column boundary and tear the row apart.
+
+def test_render_block_content_table_pipe_in_cell_is_escaped():
+    html_table = (
+        '<table>'
+        '<tr><td>Feld</td><td>A|B</td></tr>'
+        '<tr><td>Other</td><td>C|D</td></tr>'
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    assert 'A\\|B' in result
+    assert 'C\\|D' in result
+    # Each data row must still be exactly 2 GFM columns (3 real column
+    # separators), not split into 3 by the escaped literal. An escaped pipe
+    # ('\|') still contains a '|' character, so exclude those before counting.
+    data_lines = [ln for ln in _table_lines(result) if 'Feld' in ln or 'Other' in ln]
+    assert all(ln.count('|') - ln.count('\\|') == 3 for ln in data_lines)
+
+
+# Bug 4: colspan must not silently discard the spanning cell's content, and
+# must not shift every subsequent column in that row out of alignment with
+# rows that don't span. Full rowspan support is explicitly not required.
+
+def test_render_block_content_table_colspan_expands_and_keeps_content():
+    html_table = (
+        "<table><tr><td colspan='2'>Merged Header</td></tr>"
+        '<tr><td>Left</td><td>Right</td></tr></table>'
+    )
+    result = render('table', html_table, page_number=1)
+    assert 'Merged Header' in result
+    assert '| Left | Right |' in result
+    # Every row renders with the same column count (3 pipes = 2 columns).
+    assert all(ln.count('|') == 3 for ln in _table_lines(result))
+
+
+def test_render_block_content_table_rowspan_cell_content_is_not_dropped():
+    html_table = (
+        "<table><tr><td rowspan='2'>Shared</td><td>1</td></tr>"
+        '<tr><td>2</td></tr></table>'
+    )
+    result = render('table', html_table, page_number=1)
+    assert 'Shared' in result
+    assert '1' in result
+    assert '2' in result
+
+
+# Bug 5: an empty table (no parseable <tr> rows) must not fall through to
+# leaking the raw HTML into the generated markdown -- the worst of the five
+# measured bugs.
+
+def test_render_block_content_table_empty_table_does_not_leak_raw_html():
+    assert render('table', '<table></table>', page_number=1) == ''
+    assert render('table', '<table><tbody></tbody></table>', page_number=1) == ''
+
+
+def test_render_block_content_table_no_rows_with_attributes_does_not_leak_raw_html():
+    html_table = "<table border=1 style='margin: auto; border-collapse: collapse;'></table>"
+    result = render('table', html_table, page_number=1)
+    assert result == ''
+    assert '<table' not in result.lower()
+
+
+# P1's format_block_content=True carries presentational attributes on both
+# <table> and <td>/<th> -- the existing regexes tolerate `[^>]*`, verified
+# here explicitly per the task's stated concern.
+
+def test_render_block_content_table_tolerates_presentation_attributes():
+    html_table = (
+        "<table border=1 style='margin: auto; border-collapse: collapse;'>"
+        "<tr><td style='text-align: center;'>A</td>"
+        "<td style='text-align: center;'>B</td></tr>"
+        "<tr><td style='text-align: center;'>1</td>"
+        "<td style='text-align: center;'>2</td></tr>"
+        '</table>'
+    )
+    result = render('table', html_table, page_number=1)
+    assert '<table' not in result.lower()
+    assert '<td' not in result.lower()
+    assert '| A | B |' in result
+    assert '| 1 | 2 |' in result

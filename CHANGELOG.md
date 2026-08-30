@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Form fields keep their labels. Where the pipeline does not recognise a form section as a
+  table, its fields decay into one-word paragraphs and label and value come apart —
+  `Nachname:` / `Vorname:` / `Peter` / `Anschrift:`, in which nothing can tell you whose
+  name Peter is. Six of nine sample documents were affected. Blocks now carry their
+  geometry through the renderer, and a label (a text block ending in `:`) is paired with
+  the nearest value to its right whose vertical band overlaps it. The guards matter more
+  than the rule: a candidate that ends in `:` is never consumed as a value, so two labels
+  side by side cannot eat each other; a gap wider than a quarter of the page blocks the
+  pairing, so a label cannot reach into the next column; and a value is never taken across
+  another label that sits between them, so an empty field cannot steal the next field's
+  value. Blocks without geometry keep the old path untouched, and
+  `_PAIR_LABEL_VALUE_GEOMETRY` switches the whole thing off
+- `checkbox_detect` — a checkbox reader that is deliberately **not** wired into the
+  pipeline. Of eleven verifiable ticked boxes the pipeline currently recognises one, and
+  the layout model has no checkbox class at all, so the boxes would have to come from the
+  page image. Measured on three pages, the obvious approach does not hold: fill ratio does
+  not separate ticked from empty (0.265–0.335 against 0.31–0.51, almost fully overlapping)
+  because the ink of a cross merges with the box outline into a single contour, and letter
+  shapes, letterhead logos and stamp areas produce more square candidates per page (15–135)
+  than there are real boxes (7–14). The module keeps a pure, testable core and imports
+  cv2/numpy/pypdfium2 lazily; a heuristic that ticks the wrong box in production would be
+  worse than today's silence. A workable version needs template matching against the
+  printed outline or a small trained model
 - Filled-in forms survive the trip to Markdown. PaddleOCR-VL classifies a form field's
   preprinted rule lines as a formula and emits LaTeX where a value belongs, so
   `Buchungsdatum:` arrived as `$$ \begin{array}{c}\underline{02}\quad\underline{082}…`.
@@ -97,6 +120,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *Upgrading an existing installation*.
 
 ### Fixed
+- Tables no longer lose their first row to the header. `_html_table_to_markdown` promoted
+  `rows[0]` unconditionally, so in a form the first label/value pair became the column
+  heading and its value left the data — six of twenty-five tables in the sample corpus were
+  affected, `Nachname: | Cicekli` among them. A first row is now treated as a header only
+  when it uses `<th>` or the rows below it mark the same columns as options; otherwise an
+  empty header line is emitted and every row stays data. Alongside it: the two literal
+  characters `\n`, which PaddleOCR-VL sometimes puts inside a cell and which break a GFM
+  row, become `<br>` (39 occurrences in the corpus); `|` inside cell text is escaped
+  instead of splitting the column; `colspan` is expanded into blank cells so a spanning
+  cell no longer shifts every column after it out of alignment
+- A table the renderer could not parse leaked its raw `<table>` markup into the generated
+  Markdown. `_html_table_to_markdown` returned `''` for zero parseable rows and the caller
+  then fell through to a branch that emitted the untouched HTML
 - The quality gate's `ocr_confidence` was a measurement artefact. `_collect_numeric_values`
   harvested every numeric leaf whose *ancestor* key contained a hint as a substring —
   `conf` matches `preprocessor_config` — and silently divided anything in (1,100] by 100,

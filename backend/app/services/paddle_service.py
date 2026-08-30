@@ -309,33 +309,136 @@ def _normalize_checkbox_glyphs(text: str) -> str:
     return result
 
 
+_TABLE_ROW_RE = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+# Backreference (`</t\1>`) so an opening `<td>` can't be closed by a stray
+# `</th>` or vice versa -- P1's `format_block_content=True` output carries
+# presentational attributes on both (`<td style='text-align: center; ...'>`),
+# which this still matches via `[^>]*`.
+_TABLE_CELL_RE = re.compile(r'<t([dh])([^>]*)>(.*?)</t\1>', re.DOTALL | re.IGNORECASE)
+_COLSPAN_RE = re.compile(r'colspan\s*=\s*["\']?(\d+)', re.IGNORECASE)
+
+# Checkbox glyphs are already normalised to these two tokens by
+# _normalize_checkbox_glyphs, which runs on the whole block content before
+# _render_block_content ever reaches the table branch -- see
+# _first_row_is_header below, which keys off exactly these tokens.
+_HEADER_OPTION_TOKENS = frozenset({'[x]', '[ ]'})
+
+
+def _table_row_cells(row_html: str) -> tuple[list[str], bool]:
+    """Extract one `<tr>`'s cell texts.
+
+    `colspan` is expanded into extra blank cells so a spanning cell doesn't
+    shift every column after it out of alignment with rows that don't span
+    (measured need: bug 4). `rowspan` is deliberately left alone -- full
+    rowspan support isn't required, and the spanned cell's content is still
+    kept exactly once rather than dropped, which is all "ohne Inhalte zu
+    verlieren" asks for.
+    """
+    cells: list[str] = []
+    has_th = False
+    for tag, attrs, body in _TABLE_CELL_RE.findall(row_html):
+        if tag.lower() == 'h':
+            has_th = True
+        cell_text = re.sub(r'<[^>]+>', '', body)
+        cell_text = html.unescape(cell_text)
+        # PaddleOCR-VL sometimes emits a literal two-character '\n' inside a
+        # cell (measured 39x) instead of a real line break -- e.g. a label
+        # and a parenthetical clarification stacked on separate visual
+        # lines. A real newline would be harmless here (the \s+ collapse
+        # below folds it to a space); this literal backslash-n is NOT
+        # whitespace, so it survives untouched and corrupts the row once
+        # written into a GFM table cell (bug 2). `<br>` is chosen over a
+        # plain space because collapsing distinct lines into one sentence
+        # would blur content that was visually and semantically separate.
+        cell_text = cell_text.replace('\\n', '<br>')
+        cell_text = re.sub(r'\s+', ' ', cell_text).strip()
+        # A bare '|' would otherwise be read as a new column boundary (bug 3).
+        cell_text = cell_text.replace('|', '\\|')
+        cell_text = cell_text or ' '
+        colspan_match = _COLSPAN_RE.search(attrs)
+        span = max(int(colspan_match.group(1)), 1) if colspan_match else 1
+        cells.append(cell_text)
+        cells.extend([' '] * (span - 1))
+    return cells, has_th
+
+
+def _first_row_is_header(rows: list[list[str]], first_row_has_th: bool) -> bool:
+    """Decide whether `rows[0]` is a real header or the first data row
+    (bug 1).
+
+    Two shapes measured in the actual data are structurally identical
+    without this check: a form's label/value row (`Nachname: | Cicekli`,
+    where treating it as a header would turn "Cicekli" into a column name
+    and delete it from the data) and a genuine option-header row
+    (`... beigefuegt: | Ja | Nein`) with no `<th>` either. What tells them
+    apart is what sits under columns 2..N in every *other* row: for the
+    option-header shape, that's a checkbox mark (already normalised to
+    '[x]'/'[ ]' upstream) or blank in every row -- a form never repeats the
+    literal string 'Ja'/'Nein' as a *value*. For the label/value shape,
+    those columns hold arbitrary data (names, dates, ...), which fails the
+    check and correctly keeps it out of the header.
+
+    Honest failure modes, accepted rather than chased further:
+      - A genuine header whose columns are words (not checkbox marks) is
+        missed. Falls back to a blank synthetic header, so no data is lost
+        -- the would-be header row just prints as an ordinary data row too.
+      - A coincidental table where columns 2..N are blank in every row is
+        misclassified as a header (blank cells don't fail the check, since
+        an all-blank option column is indistinguishable from
+        "nobody checked either box").
+    """
+    if first_row_has_th:
+        return True
+    if len(rows) < 2 or len(rows[0]) < 2:
+        return False
+    saw_marker = False
+    for col in range(1, len(rows[0])):
+        for row in rows[1:]:
+            cell = row[col].strip() if col < len(row) else ''
+            if cell in _HEADER_OPTION_TOKENS:
+                saw_marker = True
+            elif cell != '':
+                return False
+    return saw_marker
+
+
 def _html_table_to_markdown(table_html: str) -> str:
-    """Convert a simple HTML table to GitHub Flavored Markdown table."""
+    """Convert a simple HTML table to a GitHub Flavored Markdown table.
+
+    Returns '' when the markup has no parseable `<tr>` rows -- callers must
+    not fall back to the raw HTML in that case (bug 5: that fallback used
+    to leak `<table ...>` straight into the generated markdown).
+    """
     rows: list[list[str]] = []
-    for row_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE):
-        cells: list[str] = []
-        for cell_match in re.finditer(r'<t[dh][^>]*>(.*?)</t[dh]>', row_match.group(1), re.DOTALL | re.IGNORECASE):
-            cell_text = re.sub(r'<[^>]+>', '', cell_match.group(1))
-            cell_text = html.unescape(cell_text)
-            cell_text = re.sub(r'\s+', ' ', cell_text).strip()
-            cells.append(cell_text or ' ')
-        if cells:
-            rows.append(cells)
+    first_row_has_th = False
+    for row_match in _TABLE_ROW_RE.finditer(table_html):
+        cells, has_th = _table_row_cells(row_match.group(1))
+        if not cells:
+            continue
+        if not rows:
+            first_row_has_th = has_th
+        rows.append(cells)
 
     if not rows:
         return ''
 
-    # Align all rows to the width of the widest row
+    # Align all rows to the width of the widest row.
     max_cols = max(len(row) for row in rows)
     rows = [row + [' '] * (max_cols - len(row)) for row in rows]
 
     def md_row(cells: list[str]) -> str:
         return '| ' + ' | '.join(cells) + ' |'
 
-    lines = [md_row(rows[0])]
-    lines.append('| ' + ' | '.join(['---'] * max_cols) + ' |')
-    for row in rows[1:]:
-        lines.append(md_row(row))
+    if _first_row_is_header(rows, first_row_has_th):
+        header, data_rows = rows[0], rows[1:]
+    else:
+        # GFM still requires a header line; emit a blank one rather than
+        # promoting a data row, and keep every row -- including this one
+        # -- in the data section so nothing measured gets lost.
+        header, data_rows = [' '] * max_cols, rows
+
+    lines = [md_row(header), '| ' + ' | '.join(['---'] * max_cols) + ' |']
+    lines.extend(md_row(row) for row in data_rows)
     return '\n'.join(lines)
 
 
@@ -383,9 +486,11 @@ def _render_block_content(label: str, content: str, page_number: int) -> str:
         return _render_heading(cleaned, fallback_level=3)
     if label == 'table':
         if cleaned and '<table' in cleaned.lower():
-            md_table = _html_table_to_markdown(cleaned)
-            if md_table:
-                return md_table
+            # Trust this fully, including an empty result: falling through
+            # to the `cleaned` passthrough below on '' used to leak the raw
+            # `<table ...>` markup straight into the generated markdown
+            # (bug 5) whenever no `<tr>` row could be parsed out of it.
+            return _html_table_to_markdown(cleaned)
         if cleaned:
             return cleaned
         return ''
@@ -585,6 +690,177 @@ def _boilerplate_key(content: str) -> str:
     return _DIGIT_RUN_RE.sub('#', _clean_block_text(content).lower())
 
 
+# B3: module-level on/off switch for geometric label/value pairing -- same
+# pattern as _DEDUPLICATE_REPEATED_BOILERPLATE (B2): a plain constant so a
+# quick global revert is one line away if some consumer needs the old
+# one-block-per-line output back.
+_PAIR_LABEL_VALUE_GEOMETRY = True
+
+# Labels that can be the LABEL half of a pair. Deliberately narrow (mirrors
+# _render_block_content's own 'text'/'paragraph'/'content' passthrough
+# group) -- a paragraph_title or table cell ending in ':' is not a form
+# field waiting for a value next to it.
+_LABEL_VALUE_LABEL_LABELS = frozenset({'text', 'paragraph', 'content'})
+
+# Labels that can be the VALUE half of a pair. Formula labels are included
+# on top of the plain-text ones because that is the measured failure mode
+# (groups.json page 2: "Buchungsdatum:" is a 'text' block, but its value,
+# "20 01 2026", is an 'inline_formula' block) -- excluding formulas would
+# make the whole feature a no-op on the real data.
+_LABEL_VALUE_VALUE_LABELS = frozenset({'text', 'paragraph', 'content', 'inline_formula', 'display_formula'})
+
+# Vertical overlap a value candidate must share with the label, as a
+# fraction of the LABEL's own height. 50% is chosen as the loosest
+# threshold that still tells "same form line" apart from "next line down":
+# measured label blocks are one text line tall (~25-30px in groups.json),
+# so anything sharing less than half of that band is a different row, not
+# a value sitting beside this label.
+_LABEL_VALUE_MIN_OVERLAP_RATIO = 0.5
+
+# Maximum horizontal gap allowed between a label's right edge and a value
+# candidate's left edge, as a fraction of the page's estimated width (the
+# widest block x1 seen on the page -- the real page width isn't threaded
+# this deep into the pipeline, so the blocks themselves are the only
+# available proxy for it). Calibrated against groups.json page 2: the real
+# "Buchungsdatum:" value sits 125px to its right (10.5% of the ~1191px
+# page), while the second date column two columns over -- which trap 3
+# requires NOT be picked up -- sits 531px away (44.6%). 25% sits cleanly
+# between the two, rejecting the cross-column jump while keeping the real
+# pair.
+_LABEL_VALUE_MAX_GAP_RATIO = 0.25
+
+
+def _label_value_is_label_text(rendered: str) -> bool:
+    """True when `rendered` (already cleaned/normalized) is a bare
+    'Something:' label.
+
+    This single check is what defeats trap 1 (side-by-side labels, e.g.
+    'Nachname:' immediately followed by 'Vorname:' in the same form row): a
+    block ending in ':' is excluded from being anyone's VALUE, so a naive
+    "nearest block to the right" search can never swallow one label as
+    another's value.
+    """
+    return rendered.rstrip().endswith(':')
+
+
+def _extract_bbox_rect(block: dict, bbox_keys: list[str]) -> tuple[float, float, float, float] | None:
+    """Reduce whichever geometry key(s) `_find_usable_bbox_keys` found on
+    `block` to a single (x0, y0, x1, y1) rectangle for the label/value
+    pairing geometry (B3).
+
+    Prefers a flat bbox (already validated by `_is_usable_bbox_value` as
+    >= 4 numbers) since it already IS the rectangle; falls back to the
+    bounding box of a polygon of points. `bbox_keys` is candidate-ordered
+    (see `_BLOCK_BBOX_KEY_CANDIDATES`) so a flat `block_bbox` wins over a
+    `block_polygon_points` on the same block when both are present.
+    """
+    for key in bbox_keys:
+        items = list(block[key])
+        if all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in items):
+            x0, y0, x1, y1 = items[0], items[1], items[2], items[3]
+            return float(x0), float(y0), float(x1), float(y1)
+        xs = [float(point[0]) for point in items]
+        ys = [float(point[1]) for point in items]
+        if xs and ys:
+            return min(xs), min(ys), max(xs), max(ys)
+    return None
+
+
+def _pair_label_value_blocks(records: list[dict]) -> list[str]:
+    """Fold decoupled 'Label:' / value block pairs into single
+    'Label: Wert' lines (B3), for one page's already-rendered,
+    already-boilerplate-filtered blocks.
+
+    `records` items are {'label', 'rendered', 'bbox'} in document order;
+    'bbox' is an (x0, y0, x1, y1) tuple or None. A block with no bbox can
+    never be matched as either half of a pair -- it just passes through
+    unchanged, which is the required fallback for engines/older jobs that
+    don't emit block geometry at all.
+
+    Deliberately conservative, per the brief: "a wrong pairing is worse
+    than no pairing." A label with no value inside the vertical-overlap /
+    max-gap window is emitted unchanged (trap 2: a value with no nearby
+    label is likewise left standalone, never reached for from afar), and
+    every value is consumed by at most one label (first-come by document
+    order -- there is exactly one label per value in every measured case,
+    so no ordering scheme has been observed to matter).
+    """
+    page_width = max((r['bbox'][2] for r in records if r['bbox']), default=0.0)
+    max_gap = page_width * _LABEL_VALUE_MAX_GAP_RATIO
+
+    value_indices = [
+        i for i, r in enumerate(records)
+        if r['bbox'] is not None
+        and r['label'] in _LABEL_VALUE_VALUE_LABELS
+        and not _label_value_is_label_text(r['rendered'])
+    ]
+    # Every OTHER label ("Something:") on the page with geometry -- used
+    # below to stop a label reaching PAST a nearer label for a value that
+    # is really the nearer label's. Without this, "Nachname: Vorname: Peter"
+    # with Nachname's own field left blank (no value block emitted for it
+    # at all) lets 'Nachname:' steal 'Peter' just because it is still
+    # within the generic gap budget -- a wrong pairing, which is exactly
+    # what the brief calls worse than no pairing.
+    label_positions = [
+        record['bbox']
+        for record in records
+        if record['bbox'] is not None
+        and record['label'] in _LABEL_VALUE_LABEL_LABELS
+        and _label_value_is_label_text(record['rendered'])
+    ]
+    used_values: set[int] = set()
+    paired_into: dict[int, int] = {}  # label index -> its value's index
+
+    for i, record in enumerate(records):
+        if record['bbox'] is None or record['label'] not in _LABEL_VALUE_LABEL_LABELS:
+            continue
+        if not _label_value_is_label_text(record['rendered']):
+            continue
+
+        lx0, ly0, lx1, ly1 = record['bbox']
+        label_height = ly1 - ly0
+        if label_height <= 0:
+            continue
+
+        best_value: int | None = None
+        best_gap = 0.0
+        for j in value_indices:
+            if j in used_values:
+                continue
+            vx0, vy0, vx1, vy1 = records[j]['bbox']
+            if vx0 <= lx1:
+                continue  # not to the label's right (trap 1/3 guard)
+            overlap = min(ly1, vy1) - max(ly0, vy0)
+            if overlap < label_height * _LABEL_VALUE_MIN_OVERLAP_RATIO:
+                continue  # different form row
+            gap = vx0 - lx1
+            if gap > max_gap:
+                continue  # too far -- likely a different column (trap 3)
+            if any(
+                lx1 <= mx0 < vx0
+                and min(ly1, my1) - max(ly0, my0) >= label_height * _LABEL_VALUE_MIN_OVERLAP_RATIO
+                for mx0, my0, mx1, my1 in label_positions
+                if (mx0, my0, mx1, my1) != record['bbox']
+            ):
+                continue  # a nearer label sits between this label and the value
+            if best_value is None or gap < best_gap:
+                best_value, best_gap = j, gap
+
+        if best_value is not None:
+            paired_into[i] = best_value
+            used_values.add(best_value)
+
+    parts: list[str] = []
+    for i, record in enumerate(records):
+        if i in used_values:
+            continue  # folded into its label's line below
+        if i in paired_into:
+            parts.append(f"{record['rendered']} {records[paired_into[i]]['rendered']}".strip())
+        else:
+            parts.append(record['rendered'])
+    return parts
+
+
 def _convert_structure_to_markdown(
     page_structures: list[dict],
     source_name: str = '',
@@ -607,7 +883,11 @@ def _convert_structure_to_markdown(
 
     for page_index, page in enumerate(page_structures, start=1):
         page_blocks = page.get('parsing_res_list', []) or []
-        page_parts: list[str] = []
+        # Rendered blocks kept for this page, geometry attached (B3 needs the
+        # whole page assembled before it can look for a value to a label's
+        # right -- unlike boilerplate dedup above, pairing can't be decided
+        # block-by-block as the loop goes).
+        page_records: list[dict] = []
 
         ordered_blocks = sorted(
             page_blocks,
@@ -626,9 +906,11 @@ def _convert_structure_to_markdown(
             # pipeline emits, independent of what _render_block_content keeps.
             bbox_blocks_total += 1
             block_bbox_keys = _find_usable_bbox_keys(block)
+            block_bbox_rect = None
             if block_bbox_keys:
                 bbox_blocks_with_bbox += 1
                 bbox_keys_seen.update(block_bbox_keys)
+                block_bbox_rect = _extract_bbox_rect(block, block_bbox_keys)
             block_content = str(block.get('block_content') or '')
             rendered = _render_block_content(
                 label=label,
@@ -645,8 +927,13 @@ def _convert_structure_to_markdown(
                 else:
                     seen_boilerplate.add(boilerplate_key)
             if rendered:
-                page_parts.append(rendered)
+                page_records.append({'label': label, 'rendered': rendered, 'bbox': block_bbox_rect})
                 block_count += 1
+
+        if _PAIR_LABEL_VALUE_GEOMETRY:
+            page_parts = _pair_label_value_blocks(page_records)
+        else:
+            page_parts = [record['rendered'] for record in page_records]
 
         if page_parts:
             page_header = f'<!-- page:{page_index}/{page_count} -->'
