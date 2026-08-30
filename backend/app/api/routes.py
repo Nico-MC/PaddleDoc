@@ -1648,6 +1648,8 @@ def export_job_json(
             'used_fallback': execution.get('used_fallback'),
             'page_count': execution.get('page_count'),
             'quality_gate': execution.get('quality_gate'),
+            'structure': execution.get('structure'),
+            'converter': execution.get('converter'),
         },
         'markdown': content,
     }

@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Filled-in forms survive the trip to Markdown. PaddleOCR-VL classifies a form field's
+  preprinted rule lines as a formula and emits LaTeX where a value belongs, so
+  `Buchungsdatum:` arrived as `$$ \begin{array}{c}\underline{02}\quad\underline{082}…`.
+  A new `form_latex` service flattens that back to plain text behind three gates — a hard
+  veto on real mathematics (`^`, `\sum`, `\partial`, any `\begin{}` but `array`), a macro
+  whitelist, and a positive form-field signal — plus a safety net that keeps the original
+  whenever the result would still carry a backslash. Measured on 52 real LaTeX lines from
+  nine scanned insurance forms: 51 flattened, the one holdout deliberate (a `\frac` chain
+  with no form vocabulary). Genuine formulas pass through untouched. Checkbox glyphs are
+  unified in the same pass: five codepoints for two states (`□ ☐ ☒ ☑ ⊠`, and `$\checkmark$`)
+  become `[x]` / `[ ]`, so retrieval on "ticked" is possible at all — `○` is deliberately
+  excluded, it shows up as a digit artefact, not a box
+- Field validation that reports rather than repairs: a new `field_validation` service checks
+  IBANs (mod-97, country code, length), ICD-10 shape, and date plausibility, and counts
+  orphan labels. It never rewrites a value — a type rule that "fixes" a field tears apart
+  correctly paired ones. Findings reach the quality gate as `signals.field_validation`
+  plus a top-level `issues` list, so a document that reads cleanly but carries an invalid
+  IBAN says so instead of passing silently. In the nine-document sample this flags seven
+  of eight IBANs, a month `14`, a month `082`, and a cancellation dated before its booking
+- The job JSON export carries `processing.structure` and `processing.converter`. The block
+  labels and counts were already collected and then dropped at the API boundary, which made
+  every diagnosis on a finished job guesswork. `structure` now also reports `bbox_coverage`
+  — how many blocks carry usable geometry and under which key names — which is what tells
+  you whether a geometric label/value pairing is buildable at all. Measured against
+  PaddleOCR-VL 1.6: all 115 blocks of a six-page form carry both `block_bbox` and
+  `block_polygon_points`
+- The RAG frontmatter carries `original_filename` alongside `source`. `source` is the UUID
+  the file has on disk, which is useless as a citation target
 - Outbound webhooks for automation (n8n and friends): every user can register webhook
   connections under Connections › Webhooks — URL, optional signing secret (stored encrypted,
   never displayed; deliveries then carry an `X-PaddleDoc-Signature` HMAC-SHA256 header), and
@@ -29,6 +57,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the run's error list. Personal spaces (`~` keys) get an explicit hint
 
 ### Changed
+- The OpenWebUI push honours the quality gate. A job graded `block` was previously uploaded
+  into the knowledge collection anyway, so the grade had no consequence whatsoever — every
+  document in the nine-document sample landed in the vector index despite grading C. A job
+  without a gate result (older jobs, fallback paths) still passes: absence is not failure
+- `PaddleOCRVL.predict` is called with `format_block_content=True`, so title blocks arrive
+  with the heading level the pipeline itself assigns (`#` document title, `##`/`###`
+  sections) instead of bare text that got flattened to a uniform `##` — untuned output had
+  105 `##` and not a single `#`, leaving hierarchical chunking exactly one level to work
+  with. `_render_heading` keeps an engine-supplied level and only stamps its own when the
+  content has none, so the PP-StructureV3 profiles are unaffected. The call site documents
+  the eight parameters that are deliberately *not* set and why, measured across nine
+  parameter sets on one input: `temperature`/`top_p` change nothing (this pipeline already
+  decodes greedily), `markdown_ignore_labels` only shapes PaddleOCR's own markdown rendering
+  which this module never consumes, and none of them reduce the number of LaTeX-carrying
+  blocks
+- Repeated headers, footers and page numbers appear once instead of on every page. Measured
+  across the nine documents, boilerplate made up 18.4 % of all non-empty lines. The
+  digit-normalisation that makes "Seite 2 von 6" and "Seite 3 von 6" compare equal is
+  applied to header/footer/number labels only — on ordinary text it would collapse real
+  numeric values. `_DEDUPLICATE_REPEATED_BOILERPLATE` switches it off
+- `figure`/`image` blocks keep their recognised content instead of collapsing to a bare
+  `*[Figure on page N]*` placeholder. In a filled-in form those regions hold signatures and
+  handwriting
 - **Breaking (compose file names).** One standard deployment for every platform:
   `docker-compose.nas.yml` became `docker-compose.yml`, so Windows, macOS, Linux and NAS
   hosts all start with a plain `docker compose up -d`. The old name described the file's
@@ -46,6 +97,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *Upgrading an existing installation*.
 
 ### Fixed
+- The quality gate's `ocr_confidence` was a measurement artefact. `_collect_numeric_values`
+  harvested every numeric leaf whose *ancestor* key contained a hint as a substring —
+  `conf` matches `preprocessor_config` — and silently divided anything in (1,100] by 100,
+  turning a count of `8` into a "confidence" of 0.08. The collector now matches exact key
+  names without inheriting context, and the score is `None` rather than `0.0` when the
+  engine supplies no confidences at all, so the weight is renormalised instead of dragging
+  the grade down. This was deterministic, not occasional: the `openai_vision` path, the
+  pypdf fallback and the `.eml` path could never score above 0.5 and therefore always
+  graded C, whatever the actual output looked like
+- `structure_quality` accounts for the share of formula blocks, which previously left it at
+  0.888–0.939 on documents whose form fields had been destroyed
+- The noise metric no longer mistakes German for gibberish: `[A-Za-z0-9']+` split "für"
+  into `f` + `r`, and any digit run of six or more counted as noise — birth dates and policy
+  numbers included
+- The generated Markdown no longer opens with a doubled `---` after the frontmatter
 - The frontend no longer blocks its own API calls. `PADDLEDOC_PUBLIC_API_URL` is unset by
   default in compose, and the CSP then left `connect-src` at `'self'` while the client still
   called `<page hostname>:8000` — the browser refused every request before sending it, so a

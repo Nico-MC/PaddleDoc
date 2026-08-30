@@ -431,6 +431,7 @@ def process_job(
                 'email': email or '',
                 'department': department or '',
                 'job_id': job.id,
+                'original_filename': job.original_filename,
                 'document_version': job.document_version,
                 'content_sha256': job.content_sha256,
                 'previous_job_id': job.previous_job_id,

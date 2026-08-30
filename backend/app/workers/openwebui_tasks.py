@@ -183,6 +183,22 @@ def push_openwebui(self, push_id: str) -> None:
             if not content:
                 raise OpenWebUIError('job has no markdown content to push')
 
+            # Quality-gate check (see app/services/quality_gate.py): a job
+            # processed before the gate existed, or one that fell back to a
+            # path that never ran it, simply has no 'quality_gate' dict --
+            # that absence must pass through, not block. Only an explicit
+            # recommendation of 'block' stops the push. There is currently no
+            # per-push/per-job override carrier to bypass this (see the
+            # OpenWebUIPush/Job models) -- a document graded this poorly
+            # cannot be pushed deliberately until one is added.
+            info = job.processing_info if isinstance(job.processing_info, dict) else {}
+            execution = info.get('execution') if isinstance(info.get('execution'), dict) else {}
+            quality_gate = execution.get('quality_gate') if isinstance(execution.get('quality_gate'), dict) else {}
+            if quality_gate.get('recommendation') == 'block':
+                grade = quality_gate.get('grade')
+                score = quality_gate.get('score')
+                raise OpenWebUIError(f'quality gate {grade} (score {score}): document was not pushed')
+
             try:
                 api_key = security.decrypt_openwebui_api_key(connection.api_key_encrypted)
             except ValueError as exc:
