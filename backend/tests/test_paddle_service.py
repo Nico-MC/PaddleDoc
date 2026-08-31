@@ -5,6 +5,7 @@ from pathlib import Path
 import zipfile
 
 import pytest
+import yaml
 
 from app.models.models import VlConnection
 from app.services import paddle_service, security
@@ -479,6 +480,428 @@ def test_build_rag_frontmatter_includes_used_fallback_only_when_true():
         'plain.pdf', 1, 'pypdf fallback', metadata={'engine': 'pypdf-fallback', 'used_fallback': True}
     )
     assert 'used_fallback: true' in frontmatter
+
+
+def _split_frontmatter(frontmatter: str) -> dict:
+    """Parse a `_build_rag_frontmatter` block (`---\\n<yaml>---\\n`) with a
+    real YAML parser instead of substring matching, so a value that itself
+    contains a colon or a `---` line can't produce a false-positive (or
+    false-negative) match. Mirrors _split_frontmatter in
+    test_confluence_markdown.py, which the docstring on _build_rag_frontmatter
+    calls out as the same discipline this function follows.
+    """
+    assert frontmatter.startswith('---\n')
+    end = frontmatter.index('\n---\n', 3)
+    return yaml.safe_load(frontmatter[4:end + 1])
+
+
+def test_build_rag_frontmatter_includes_original_filename_when_present():
+    frontmatter = paddle_service._build_rag_frontmatter(
+        'a1b2c3.pdf', 2, 'PP-OCRv6 tiny det + rec',
+        metadata={'engine': 'paddleocr', 'original_filename': 'Quarterly Report.pdf'},
+    )
+    data = _split_frontmatter(frontmatter)
+    assert data['source'] == 'a1b2c3.pdf'
+    assert data['original_filename'] == 'Quarterly Report.pdf'
+    # Placed right after `source`, ahead of the rest of the block (A4).
+    assert list(data.keys())[:2] == ['source', 'original_filename']
+
+
+def test_build_rag_frontmatter_omits_original_filename_when_absent():
+    frontmatter = paddle_service._build_rag_frontmatter(
+        'a1b2c3.pdf', 2, 'PP-OCRv6 tiny det + rec', metadata={'engine': 'paddleocr'},
+    )
+    data = _split_frontmatter(frontmatter)
+    assert data['source'] == 'a1b2c3.pdf'
+    assert 'original_filename' not in data
+
+
+@pytest.mark.parametrize(
+    'hostile_filename',
+    [
+        'weird: name #1.pdf',
+        'multi\nline\nname.pdf',
+        '---\nsource: spoofed\n---.pdf',
+    ],
+)
+def test_build_rag_frontmatter_original_filename_survives_yaml_hostile_names(hostile_filename):
+    frontmatter = paddle_service._build_rag_frontmatter(
+        'a1b2c3.pdf', 1, 'PP-OCRv6 tiny det + rec',
+        metadata={'engine': 'paddleocr', 'original_filename': hostile_filename},
+    )
+    data = _split_frontmatter(frontmatter)
+    # yaml.safe_dump quoting keeps the hostile filename as one scalar value
+    # instead of letting it inject a sibling key or open a second document.
+    assert data['original_filename'] == hostile_filename
+    assert data['source'] == 'a1b2c3.pdf'
+
+
+def test_convert_structure_to_markdown_bbox_coverage_no_boxes():
+    _, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {
+                'page_index': 0,
+                'parsing_res_list': [
+                    {'block_label': 'text', 'block_content': 'no box here', 'block_id': 1, 'block_order': 1},
+                    {'block_label': 'text', 'block_content': 'still no box', 'block_id': 2, 'block_order': 2},
+                ],
+            }
+        ],
+    )
+    coverage = stats['bbox_coverage']
+    assert coverage['blocks_total'] == 2
+    assert coverage['blocks_with_bbox'] == 0
+    assert coverage['keys_seen'] == []
+
+
+def test_convert_structure_to_markdown_bbox_coverage_flat_list_is_counted():
+    _, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {
+                'page_index': 0,
+                'parsing_res_list': [
+                    {
+                        'block_label': 'text',
+                        'block_content': 'boxed',
+                        'block_bbox': [1, 2, 3, 4],
+                        'block_id': 1,
+                        'block_order': 1,
+                    },
+                ],
+            }
+        ],
+    )
+    coverage = stats['bbox_coverage']
+    assert coverage['blocks_total'] == 1
+    assert coverage['blocks_with_bbox'] == 1
+    assert coverage['keys_seen'] == ['block_bbox']
+
+
+def test_convert_structure_to_markdown_bbox_coverage_polygon_is_counted():
+    _, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {
+                'page_index': 0,
+                'parsing_res_list': [
+                    {
+                        'block_label': 'text',
+                        'block_content': 'boxed',
+                        'poly': [[0, 0], [10, 0], [10, 10], [0, 10]],
+                        'block_id': 1,
+                        'block_order': 1,
+                    },
+                ],
+            }
+        ],
+    )
+    coverage = stats['bbox_coverage']
+    assert coverage['blocks_total'] == 1
+    assert coverage['blocks_with_bbox'] == 1
+    assert coverage['keys_seen'] == ['poly']
+
+
+def test_convert_structure_to_markdown_bbox_coverage_reports_every_geometry_key():
+    """A block carrying two geometry keys must report both.
+
+    This is the real PaddleOCR-VL 1.6 shape: measured on a six-page scanned
+    form, all 115 blocks carried `block_bbox` AND `block_polygon_points`.
+    Reporting only the first match would hide the polygon -- precisely the
+    richer shape a geometric label/value pairing would want.
+    """
+    _, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {
+                'page_index': 0,
+                'parsing_res_list': [
+                    {
+                        'block_label': 'text',
+                        'block_content': 'boxed twice',
+                        'block_bbox': [0, 0, 10, 10],
+                        'block_polygon_points': [[0, 0], [10, 0], [10, 10], [0, 10]],
+                        'block_id': 1,
+                        'block_order': 1,
+                    },
+                ],
+            }
+        ],
+    )
+    coverage = stats['bbox_coverage']
+    assert coverage['blocks_total'] == 1
+    # counted once as a block, but both key names surface
+    assert coverage['blocks_with_bbox'] == 1
+    assert coverage['keys_seen'] == ['block_bbox', 'block_polygon_points']
+
+
+def test_convert_structure_to_markdown_bbox_coverage_broken_values_are_not_counted():
+    _, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {
+                'page_index': 0,
+                'parsing_res_list': [
+                    {
+                        'block_label': 'text', 'block_content': 'a', 'block_id': 1, 'block_order': 1,
+                        'block_bbox': ['x', 'y', 'z', 'w'],  # strings, not numbers
+                    },
+                    {
+                        'block_label': 'text', 'block_content': 'b', 'block_id': 2, 'block_order': 2,
+                        'bbox': [1, 2, 3],  # flat but too short (needs >= 4)
+                    },
+                    {
+                        'block_label': 'text', 'block_content': 'c', 'block_id': 3, 'block_order': 3,
+                        'block_box': None,
+                    },
+                ],
+            }
+        ],
+    )
+    coverage = stats['bbox_coverage']
+    assert coverage['blocks_total'] == 3
+    assert coverage['blocks_with_bbox'] == 0
+    assert coverage['keys_seen'] == []
+
+
+# --- FEATURE: A8 -- frontmatter no longer double-separated -------------------
+#
+# _build_rag_frontmatter already ends its own block in a closing '---\n' YAML
+# delimiter. Before A8, _convert_structure_to_markdown (and the pypdf/.eml
+# fallback paths) treated that frontmatter as just another list item to join
+# with '\n\n---\n\n', wedging a redundant separator right after it -- measured
+# as 8 `^---$` lines across a real 6-page document (2 real YAML delimiters +
+# 6 redundant join separators, one per page).
+
+def test_prepend_frontmatter_joins_without_doubled_separator():
+    frontmatter = '---\nsource: x\n---\n'
+    result = paddle_service._prepend_frontmatter(frontmatter, 'body text')
+    assert result == '---\nsource: x\n---\n\nbody text'
+    assert '---\n\n---' not in result
+
+
+def test_prepend_frontmatter_empty_body_returns_frontmatter_only():
+    frontmatter = '---\nsource: x\n---\n'
+    assert paddle_service._prepend_frontmatter(frontmatter, '') == frontmatter.strip()
+
+
+def test_convert_structure_to_markdown_single_page_has_exactly_two_separator_lines():
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [{'parsing_res_list': [{'block_label': 'text', 'block_content': 'Only page', 'block_id': 1, 'block_order': 1}]}],
+    )
+    # The two YAML frontmatter delimiters only -- no extra page separator is
+    # needed (and none must be introduced) when there is nothing to separate
+    # the frontmatter from but the page content itself.
+    separator_lines = [line for line in markdown.splitlines() if line == '---']
+    assert len(separator_lines) == 2
+
+
+def test_convert_structure_to_markdown_two_pages_have_exactly_three_separator_lines():
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [
+            {'parsing_res_list': [{'block_label': 'text', 'block_content': 'Page one', 'block_id': 1, 'block_order': 1}]},
+            {'parsing_res_list': [{'block_label': 'text', 'block_content': 'Page two', 'block_id': 1, 'block_order': 1}]},
+        ],
+    )
+    # 2 YAML delimiters + exactly 1 real separator between the two pages --
+    # NOT 2 + 2 (the A8 bug: a redundant separator between frontmatter and
+    # the first page on top of the legitimate one between the two pages).
+    separator_lines = [line for line in markdown.splitlines() if line == '---']
+    assert len(separator_lines) == 3
+    assert 'Page one' in markdown
+    assert 'Page two' in markdown
+
+
+def test_fallback_convert_with_frontmatter_does_not_double_separator(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.pdf'
+    source.write_bytes(b'%PDF-1.4 test')
+
+    class FakePage:
+        def extract_text(self):
+            return 'Hello from PDF'
+
+    class FakeReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr(paddle_service, 'PdfReader', FakeReader)
+    markdown, _ = paddle_service._fallback_convert_with_frontmatter(
+        source, '.pdf', 'ppocrv6_tiny', paddle_service._PADDLE_PROFILES['ppocrv6_tiny'],
+        None, 'test fallback reason', {'selected_device': 'cpu'},
+    )
+    separator_lines = [line for line in markdown.splitlines() if line == '---']
+    assert len(separator_lines) == 2
+    assert 'Hello from PDF' in markdown
+
+
+def test_fallback_convert_with_frontmatter_wires_field_validation_into_quality_gate(monkeypatch, tmp_path):
+    # B4 integration: field_validation.validate_document() is built and
+    # tested standalone, but was not called from anywhere -- this proves the
+    # fallback path actually runs it and surfaces the result through
+    # evaluate_document_quality rather than silently dropping it.
+    source = tmp_path / 'sample.pdf'
+    source.write_bytes(b'%PDF-1.4 test')
+
+    class FakePage:
+        def extract_text(self):
+            return 'IBAN: DE89370400450533013100'  # deliberately wrong checksum
+
+    class FakeReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    monkeypatch.setattr(paddle_service, 'PdfReader', FakeReader)
+    _markdown, details = paddle_service._fallback_convert_with_frontmatter(
+        source, '.pdf', 'ppocrv6_tiny', paddle_service._PADDLE_PROFILES['ppocrv6_tiny'],
+        None, 'test fallback reason', {'selected_device': 'cpu'},
+    )
+    quality_gate = details['quality_gate']
+    assert any('Pruefziffer' in issue for issue in quality_gate['issues'])
+    assert quality_gate['signals']['field_validation']['iban_invalid'] == 1
+
+
+def test_eml_conversion_does_not_double_separator(tmp_path, monkeypatch):
+    from email.mime.text import MIMEText
+
+    msg = MIMEText('Plain body for separator check.', 'plain')
+    eml_file = tmp_path / 'sep_check.eml'
+    eml_file.write_bytes(msg.as_bytes())
+
+    monkeypatch.setattr(paddle_service, 'get_paddle_settings', lambda: {
+        'default_profile': 'ppocrv6_tiny', 'timeout_seconds': 30,
+    })
+
+    markdown, _ = paddle_service.convert_to_markdown_with_details(str(eml_file), profile_id='ppocrv6_tiny')
+    separator_lines = [line for line in markdown.splitlines() if line == '---']
+    assert len(separator_lines) == 2
+
+
+# --- FEATURE: B1 wiring -- normalize_form_latex is called label-independently -
+
+def test_convert_structure_to_markdown_applies_form_latex_normalization():
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [{'parsing_res_list': [
+            {
+                'block_label': 'text',
+                'block_content': r'Nachname: $ \underline{\text{Mueller}} $',
+                'block_id': 1,
+                'block_order': 1,
+            },
+        ]}],
+    )
+    assert 'Nachname: Mueller' in markdown
+    assert '\\underline' not in markdown
+
+
+def test_convert_structure_to_markdown_leaves_real_math_untouched():
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [{'parsing_res_list': [
+            {'block_label': 'text', 'block_content': r'$E = mc^2$', 'block_id': 1, 'block_order': 1},
+        ]}],
+    )
+    assert r'$E = mc^2$' in markdown
+
+
+# --- FEATURE: A3 -- checkbox glyphs unified end-to-end ------------------------
+
+def test_convert_structure_to_markdown_unifies_checkbox_glyphs():
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [{'parsing_res_list': [
+            {'block_label': 'text', 'block_content': '☒ ja  ☐ nein', 'block_id': 1, 'block_order': 1},
+        ]}],
+    )
+    assert '[x] ja [ ] nein' in markdown
+    assert '☒' not in markdown and '☐' not in markdown
+
+
+# --- FEATURE: B2 -- repeated header/footer/number boilerplate deduplication --
+#
+# Measured: 80x footer address, 47+6x "Seite X von Y", 42x "> Versicherungsnummer"
+# repeated across pages -- ~18.4% of all non-empty lines. header/footer/number
+# blocks measure block_order=None and sort to the end of each page (see the
+# sort key in _convert_structure_to_markdown), which is why they show up as
+# scattered blockquotes there; dedup tracks the pattern globally across the
+# whole document regardless of that per-page position.
+
+def test_convert_structure_to_markdown_deduplicates_repeated_footer_across_pages():
+    markdown, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {'parsing_res_list': [
+                {'block_label': 'text', 'block_content': 'Page one body', 'block_id': 1, 'block_order': 1},
+                {'block_label': 'footer', 'block_content': 'Musterstrasse 1, 12345 Musterstadt', 'block_id': 2, 'block_order': None},
+            ]},
+            {'parsing_res_list': [
+                {'block_label': 'text', 'block_content': 'Page two body', 'block_id': 1, 'block_order': 1},
+                {'block_label': 'footer', 'block_content': 'Musterstrasse 1, 12345 Musterstadt', 'block_id': 2, 'block_order': None},
+            ]},
+        ],
+    )
+    assert markdown.count('Musterstrasse 1, 12345 Musterstadt') == 1
+    assert 'Page one body' in markdown
+    assert 'Page two body' in markdown
+    # The suppressed repeat does not count as a rendered block either.
+    assert stats['block_count'] == 3
+
+
+def test_convert_structure_to_markdown_deduplicates_page_numbers_via_digit_folding():
+    """'Seite 2 von 6' and 'Seite 3 von 6' must compare equal for dedup
+    purposes -- the digit-run-to-'#' normalization is what makes that work.
+    """
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [
+            {'parsing_res_list': [
+                {'block_label': 'number', 'block_content': 'Seite 2 von 6', 'block_id': 1, 'block_order': None},
+            ]},
+            {'parsing_res_list': [
+                {'block_label': 'number', 'block_content': 'Seite 3 von 6', 'block_id': 1, 'block_order': None},
+            ]},
+        ],
+    )
+    assert 'Seite 2 von 6' in markdown
+    assert 'Seite 3 von 6' not in markdown
+
+
+def test_convert_structure_to_markdown_boilerplate_appearing_once_is_kept():
+    """Nothing is deduplicated that only occurs once."""
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [{'parsing_res_list': [
+            {'block_label': 'footer', 'block_content': 'Only ever appears once', 'block_id': 1, 'block_order': None},
+        ]}],
+    )
+    assert 'Only ever appears once' in markdown
+
+
+def test_convert_structure_to_markdown_text_blocks_with_same_numbers_are_not_deduplicated():
+    """Digit-folding must NOT apply to 'text'-labelled blocks -- collapsing
+    it there would falsely treat two distinct field values (or one value
+    genuinely repeated across pages, e.g. a total carried forward) as
+    boilerplate and silently drop it.
+    """
+    markdown, stats = paddle_service._convert_structure_to_markdown(
+        [
+            {'parsing_res_list': [
+                {'block_label': 'text', 'block_content': 'Betrag: 100 EUR', 'block_id': 1, 'block_order': 1},
+            ]},
+            {'parsing_res_list': [
+                {'block_label': 'text', 'block_content': 'Betrag: 100 EUR', 'block_id': 1, 'block_order': 1},
+            ]},
+        ],
+    )
+    assert markdown.count('Betrag: 100 EUR') == 2
+    assert stats['block_count'] == 2
+
+
+def test_convert_structure_to_markdown_boilerplate_dedup_can_be_disabled(monkeypatch):
+    """The module-level switch (no config system needed) restores the
+    repeat-every-page behavior wholesale."""
+    monkeypatch.setattr(paddle_service, '_DEDUPLICATE_REPEATED_BOILERPLATE', False)
+    markdown, _ = paddle_service._convert_structure_to_markdown(
+        [
+            {'parsing_res_list': [
+                {'block_label': 'footer', 'block_content': 'Repeat me', 'block_id': 1, 'block_order': None},
+            ]},
+            {'parsing_res_list': [
+                {'block_label': 'footer', 'block_content': 'Repeat me', 'block_id': 1, 'block_order': None},
+            ]},
+        ],
+    )
+    assert markdown.count('Repeat me') == 2
 
 
 def test_evaluate_document_quality_prefers_clean_high_confidence_documents():

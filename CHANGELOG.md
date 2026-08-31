@@ -8,6 +8,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Form fields keep their labels. Where the pipeline does not recognise a form section as a
+  table, its fields decay into one-word paragraphs and label and value come apart —
+  `Nachname:` / `Vorname:` / `Peter` / `Anschrift:`, in which nothing can tell you whose
+  name Peter is. Six of nine sample documents were affected. Blocks now carry their
+  geometry through the renderer, and a label (a text block ending in `:`) is paired with
+  the nearest value to its right whose vertical band overlaps it. The guards matter more
+  than the rule: a candidate that ends in `:` is never consumed as a value, so two labels
+  side by side cannot eat each other; a gap wider than a quarter of the page blocks the
+  pairing, so a label cannot reach into the next column; and a value is never taken across
+  another label that sits between them, so an empty field cannot steal the next field's
+  value. Blocks without geometry keep the old path untouched, and
+  `_PAIR_LABEL_VALUE_GEOMETRY` switches the whole thing off
+- `checkbox_detect` — a checkbox reader that is deliberately **not** wired into the
+  pipeline. Of eleven verifiable ticked boxes the pipeline currently recognises one, and
+  the layout model has no checkbox class at all, so the boxes would have to come from the
+  page image. Measured on three pages, the obvious approach does not hold: fill ratio does
+  not separate ticked from empty (0.265–0.335 against 0.31–0.51, almost fully overlapping)
+  because the ink of a cross merges with the box outline into a single contour, and letter
+  shapes, letterhead logos and stamp areas produce more square candidates per page (15–135)
+  than there are real boxes (7–14). The module keeps a pure, testable core and imports
+  cv2/numpy/pypdfium2 lazily; a heuristic that ticks the wrong box in production would be
+  worse than today's silence. A workable version needs template matching against the
+  printed outline or a small trained model
+- Filled-in forms survive the trip to Markdown. PaddleOCR-VL classifies a form field's
+  preprinted rule lines as a formula and emits LaTeX where a value belongs, so
+  `Buchungsdatum:` arrived as `$$ \begin{array}{c}\underline{02}\quad\underline{082}…`.
+  A new `form_latex` service flattens that back to plain text behind three gates — a hard
+  veto on real mathematics (`^`, `\sum`, `\partial`, any `\begin{}` but `array`), a macro
+  whitelist, and a positive form-field signal — plus a safety net that keeps the original
+  whenever the result would still carry a backslash. Measured on 52 real LaTeX lines from
+  nine scanned insurance forms: 51 flattened, the one holdout deliberate (a `\frac` chain
+  with no form vocabulary). Genuine formulas pass through untouched. Checkbox glyphs are
+  unified in the same pass: five codepoints for two states (`□ ☐ ☒ ☑ ⊠`, and `$\checkmark$`)
+  become `[x]` / `[ ]`, so retrieval on "ticked" is possible at all — `○` is deliberately
+  excluded, it shows up as a digit artefact, not a box
+- Field validation that reports rather than repairs: a new `field_validation` service checks
+  IBANs (mod-97, country code, length), ICD-10 shape, and date plausibility, and counts
+  orphan labels. It never rewrites a value — a type rule that "fixes" a field tears apart
+  correctly paired ones. Findings reach the quality gate as `signals.field_validation`
+  plus a top-level `issues` list, so a document that reads cleanly but carries an invalid
+  IBAN says so instead of passing silently. In the nine-document sample this flags seven
+  of eight IBANs, a month `14`, a month `082`, and a cancellation dated before its booking
+- The job JSON export carries `processing.structure` and `processing.converter`. The block
+  labels and counts were already collected and then dropped at the API boundary, which made
+  every diagnosis on a finished job guesswork. `structure` now also reports `bbox_coverage`
+  — how many blocks carry usable geometry and under which key names — which is what tells
+  you whether a geometric label/value pairing is buildable at all. Measured against
+  PaddleOCR-VL 1.6: all 115 blocks of a six-page form carry both `block_bbox` and
+  `block_polygon_points`
+- The RAG frontmatter carries `original_filename` alongside `source`. `source` is the UUID
+  the file has on disk, which is useless as a citation target
 - Outbound webhooks for automation (n8n and friends): every user can register webhook
   connections under Connections › Webhooks — URL, optional signing secret (stored encrypted,
   never displayed; deliveries then carry an `X-PaddleDoc-Signature` HMAC-SHA256 header), and
@@ -28,7 +79,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   children-listing failures with context, and cap events, all visible in the admin Logs tab
   and the run's error list. Personal spaces (`~` keys) get an explicit hint
 
+### Changed
+- The OpenWebUI push honours the quality gate. A job graded `block` was previously uploaded
+  into the knowledge collection anyway, so the grade had no consequence whatsoever — every
+  document in the nine-document sample landed in the vector index despite grading C. A job
+  without a gate result (older jobs, fallback paths) still passes: absence is not failure
+- `PaddleOCRVL.predict` is called with `format_block_content=True`, so title blocks arrive
+  with the heading level the pipeline itself assigns (`#` document title, `##`/`###`
+  sections) instead of bare text that got flattened to a uniform `##` — untuned output had
+  105 `##` and not a single `#`, leaving hierarchical chunking exactly one level to work
+  with. `_render_heading` keeps an engine-supplied level and only stamps its own when the
+  content has none, so the PP-StructureV3 profiles are unaffected. The call site documents
+  the eight parameters that are deliberately *not* set and why, measured across nine
+  parameter sets on one input: `temperature`/`top_p` change nothing (this pipeline already
+  decodes greedily), `markdown_ignore_labels` only shapes PaddleOCR's own markdown rendering
+  which this module never consumes, and none of them reduce the number of LaTeX-carrying
+  blocks
+- Repeated headers, footers and page numbers appear once instead of on every page. Measured
+  across the nine documents, boilerplate made up 18.4 % of all non-empty lines. The
+  digit-normalisation that makes "Seite 2 von 6" and "Seite 3 von 6" compare equal is
+  applied to header/footer/number labels only — on ordinary text it would collapse real
+  numeric values. `_DEDUPLICATE_REPEATED_BOILERPLATE` switches it off
+- `figure`/`image` blocks keep their recognised content instead of collapsing to a bare
+  `*[Figure on page N]*` placeholder. In a filled-in form those regions hold signatures and
+  handwriting
+- **Breaking (compose file names).** One standard deployment for every platform:
+  `docker-compose.nas.yml` became `docker-compose.yml`, so Windows, macOS, Linux and NAS
+  hosts all start with a plain `docker compose up -d`. The old name described the file's
+  origin, not its audience — it was always the deployment everyone should use. The
+  local-build file that held the `docker-compose.yml` name is now `docker-compose.dev.yml`
+  and runs under its own compose project name, so a contributor's trust-auth Postgres can
+  no longer end up sharing a volume with a real installation.
+- **Breaking (data location).** The standard file keeps Postgres, Redis, document storage
+  and the PaddleOCR model cache in Docker-managed volumes instead of bind-mounting
+  `./nas-data/`. That directory only ever existed on Windows and macOS because a compose
+  file demanded it, and it forced a `chown -R 1000:1000` on Linux hosts. Named volumes
+  need neither. To keep data on a specific share or disk, the new
+  `docker-compose.nas.example.yml` overlay redirects all four volumes to host paths and
+  changes nothing else. Migration steps for existing installations are in the README under
+  *Upgrading an existing installation*.
+
 ### Fixed
+- Tables no longer lose their first row to the header. `_html_table_to_markdown` promoted
+  `rows[0]` unconditionally, so in a form the first label/value pair became the column
+  heading and its value left the data — six of twenty-five tables in the sample corpus were
+  affected, `Nachname: | Cicekli` among them. A first row is now treated as a header only
+  when it uses `<th>` or the rows below it mark the same columns as options; otherwise an
+  empty header line is emitted and every row stays data. Alongside it: the two literal
+  characters `\n`, which PaddleOCR-VL sometimes puts inside a cell and which break a GFM
+  row, become `<br>` (39 occurrences in the corpus); `|` inside cell text is escaped
+  instead of splitting the column; `colspan` is expanded into blank cells so a spanning
+  cell no longer shifts every column after it out of alignment
+- A table the renderer could not parse leaked its raw `<table>` markup into the generated
+  Markdown. `_html_table_to_markdown` returned `''` for zero parseable rows and the caller
+  then fell through to a branch that emitted the untouched HTML
+- The quality gate's `ocr_confidence` was a measurement artefact. `_collect_numeric_values`
+  harvested every numeric leaf whose *ancestor* key contained a hint as a substring —
+  `conf` matches `preprocessor_config` — and silently divided anything in (1,100] by 100,
+  turning a count of `8` into a "confidence" of 0.08. The collector now matches exact key
+  names without inheriting context, and the score is `None` rather than `0.0` when the
+  engine supplies no confidences at all, so the weight is renormalised instead of dragging
+  the grade down. This was deterministic, not occasional: the `openai_vision` path, the
+  pypdf fallback and the `.eml` path could never score above 0.5 and therefore always
+  graded C, whatever the actual output looked like
+- `structure_quality` accounts for the share of formula blocks, which previously left it at
+  0.888–0.939 on documents whose form fields had been destroyed
+- The noise metric no longer mistakes German for gibberish: `[A-Za-z0-9']+` split "für"
+  into `f` + `r`, and any digit run of six or more counted as noise — birth dates and policy
+  numbers included
+- The generated Markdown no longer opens with a doubled `---` after the frontmatter
+- The frontend no longer blocks its own API calls. `PADDLEDOC_PUBLIC_API_URL` is unset by
+  default in compose, and the CSP then left `connect-src` at `'self'` while the client still
+  called `<page hostname>:8000` — the browser refused every request before sending it, so a
+  fresh install could not even reach `/setup`. The CSP now derives the same fallback origin
+  from the request host, making the variable optional; Helm is unaffected (its chart always
+  sets `frontend.apiUrl`)
+- `scripts/init-env.sh` no longer keeps the placeholder secrets from `.env.example`. It only
+  checked whether a key was present, so a `.env` copied from the example kept the published
+  `SECRET_KEY` and `REDIS_PASSWORD` and the script still reported success. A value identical
+  to the one in `.env.example` now counts as missing and is regenerated
+- `.env.*` is gitignored (`.env.example` excepted): `.env.bak` and friends carry real secrets
+- Postgres and Redis no longer restart-loop on startup. Both official images enter their
+  entrypoint as root, `chown`/`chmod` their data directory and only then drop to uid 999
+  via `gosu`/`setpriv`; the blanket `cap_drop: ALL` added in the security audit removed
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID` and `SETUID`, so all of that failed with
+  `EPERM` (`chown: changing ownership of '.': Operation not permitted`), the entrypoint
+  aborted and `restart: always` looped it — taking the backend (unhealthy) and worker
+  (never started) down with it. Both services now add back exactly those five capabilities,
+  keeping the other nine of Docker's defaults dropped. The Helm chart is unaffected: it
+  pairs `capabilities.drop: [ALL]` with `runAsUser: 999`, so its containers never enter
+  the entrypoint's root branch at all
 - Pasted Confluence Server/Data-Center page links now work as import scope:
   `/display/SPACE/Page+Title` URLs (umlauts, personal spaces included) are resolved to the
   page id at creation time via the source's API, with a clear message when resolution fails —

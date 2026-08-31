@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .env
+# Any .env variant (.env.local, .env.bak-*, ...) carries real secrets; only
+# the placeholder-filled example belongs in the repository.
+.env.*
+!.env.example
 venv/
 backend/.venv/
 test.db
@@ -14,7 +18,11 @@ backend/test.db
 backend/backend/
 backend/storage/uploads/*
 backend/storage/results/*
-backend/storage/mlflow/*
+# Data directory of the pre-named-volume layout. Nothing creates it any more,
+# but every installation that predates the switch still has one sitting in the
+# checkout -- and it holds the Postgres cluster, so a stray `git add .` would
+# publish accounts, documents and the credentials encrypted under SECRET_KEY.
+nas-data/
 frontend/node_modules/
 frontend/.next/
 .DS_Store

@@ -24,6 +24,8 @@ from app.core.config import settings
 from app.models.models import VlConnection
 from app.services import safe_fetch as safe_fetch_module
 from app.services.quality_gate import evaluate_document_quality
+from app.services.form_latex import normalize_form_latex
+from app.services.field_validation import validate_document
 from app.services.mail_ingest import (
     _parse_bytes as _parse_eml_bytes,
     _walk_tree,
@@ -600,34 +602,202 @@ def _clean_block_text(value: str) -> str:
     return re.sub(r'\s+', ' ', value or '').strip()
 
 
+# A3: PaddleOCR-VL emits five different codepoints for what is really only
+# two checkbox states -- measured across 9 documents: 30x '□', 53x
+# '☐', 32x '☒', 6x '☑'. Retrieval on "is this checked" is
+# impossible against five spellings, so every glyph collapses to plain-text
+# `[x]` / `[ ]` here, independent of block label (see its call site in
+# _render_block_content).
+#
+# U+25CB ('○', a hollow circle) is deliberately NOT in this map: in the
+# measured data it only ever shows up as a mis-recognized digit, never as a
+# checkbox glyph. Don't "helpfully" add it back without re-measuring --
+# doing so would turn real numbers into false checkboxes.
+_CHECKBOX_MAP: dict[str, str] = {
+    '☒': '[x]',  # ☒ BALLOT BOX WITH X
+    '☑': '[x]',  # ☑ BALLOT BOX WITH CHECK
+    '⊠': '[x]',  # ⊠ SQUARED TIMES
+    '□': '[ ]',  # □ WHITE SQUARE
+    '☐': '[ ]',  # ☐ BALLOT BOX
+    '▢': '[ ]',  # ▢ WHITE SQUARE WITH ROUNDED CORNERS
+}
+
+# The LaTeX rendering PaddleOCR-VL uses for a checked box in form fields
+# (`$ \checkmark $`). Handled here rather than by form_latex.py's generic
+# LaTeX flattening: turning a checkmark into `[x]` is a checkbox-semantics
+# decision, not a generic "simplify this LaTeX span" one.
+_CHECKMARK_LATEX_RE = re.compile(r'\$\s*\\checkmark\s*\$')
+
+
+def _normalize_checkbox_glyphs(text: str) -> str:
+    """Unify every checkbox spelling PaddleOCR-VL emits into `[x]` / `[ ]`.
+
+    Runs ahead of `normalize_form_latex` (see _render_block_content) so this
+    fixed, well-measured substitution can never be affected by however that
+    still-evolving normalizer ends up treating a `$ \\checkmark $` span.
+    """
+    if not text:
+        return text
+    result = _CHECKMARK_LATEX_RE.sub('[x]', text)
+    for glyph, replacement in _CHECKBOX_MAP.items():
+        if glyph in result:
+            result = result.replace(glyph, replacement)
+    return result
+
+
+_TABLE_ROW_RE = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+# Backreference (`</t\1>`) so an opening `<td>` can't be closed by a stray
+# `</th>` or vice versa -- P1's `format_block_content=True` output carries
+# presentational attributes on both (`<td style='text-align: center; ...'>`),
+# which this still matches via `[^>]*`.
+_TABLE_CELL_RE = re.compile(r'<t([dh])([^>]*)>(.*?)</t\1>', re.DOTALL | re.IGNORECASE)
+_COLSPAN_RE = re.compile(r'colspan\s*=\s*["\']?(\d+)', re.IGNORECASE)
+
+# Checkbox glyphs are already normalised to these two tokens by
+# _normalize_checkbox_glyphs, which runs on the whole block content before
+# _render_block_content ever reaches the table branch -- see
+# _first_row_is_header below, which keys off exactly these tokens.
+_HEADER_OPTION_TOKENS = frozenset({'[x]', '[ ]'})
+
+
+def _table_row_cells(row_html: str) -> tuple[list[str], bool]:
+    """Extract one `<tr>`'s cell texts.
+
+    `colspan` is expanded into extra blank cells so a spanning cell doesn't
+    shift every column after it out of alignment with rows that don't span
+    (measured need: bug 4). `rowspan` is deliberately left alone -- full
+    rowspan support isn't required, and the spanned cell's content is still
+    kept exactly once rather than dropped, which is all "ohne Inhalte zu
+    verlieren" asks for.
+    """
+    cells: list[str] = []
+    has_th = False
+    for tag, attrs, body in _TABLE_CELL_RE.findall(row_html):
+        if tag.lower() == 'h':
+            has_th = True
+        cell_text = re.sub(r'<[^>]+>', '', body)
+        cell_text = html.unescape(cell_text)
+        # PaddleOCR-VL sometimes emits a literal two-character '\n' inside a
+        # cell (measured 39x) instead of a real line break -- e.g. a label
+        # and a parenthetical clarification stacked on separate visual
+        # lines. A real newline would be harmless here (the \s+ collapse
+        # below folds it to a space); this literal backslash-n is NOT
+        # whitespace, so it survives untouched and corrupts the row once
+        # written into a GFM table cell (bug 2). `<br>` is chosen over a
+        # plain space because collapsing distinct lines into one sentence
+        # would blur content that was visually and semantically separate.
+        cell_text = cell_text.replace('\\n', '<br>')
+        cell_text = re.sub(r'\s+', ' ', cell_text).strip()
+        # A bare '|' would otherwise be read as a new column boundary (bug 3).
+        cell_text = cell_text.replace('|', '\\|')
+        cell_text = cell_text or ' '
+        colspan_match = _COLSPAN_RE.search(attrs)
+        span = max(int(colspan_match.group(1)), 1) if colspan_match else 1
+        cells.append(cell_text)
+        cells.extend([' '] * (span - 1))
+    return cells, has_th
+
+
+def _first_row_is_header(rows: list[list[str]], first_row_has_th: bool) -> bool:
+    """Decide whether `rows[0]` is a real header or the first data row
+    (bug 1).
+
+    Two shapes measured in the actual data are structurally identical
+    without this check: a form's label/value row (`Nachname: | Cicekli`,
+    where treating it as a header would turn "Cicekli" into a column name
+    and delete it from the data) and a genuine option-header row
+    (`... beigefuegt: | Ja | Nein`) with no `<th>` either. What tells them
+    apart is what sits under columns 2..N in every *other* row: for the
+    option-header shape, that's a checkbox mark (already normalised to
+    '[x]'/'[ ]' upstream) or blank in every row -- a form never repeats the
+    literal string 'Ja'/'Nein' as a *value*. For the label/value shape,
+    those columns hold arbitrary data (names, dates, ...), which fails the
+    check and correctly keeps it out of the header.
+
+    Honest failure modes, accepted rather than chased further:
+      - A genuine header whose columns are words (not checkbox marks) is
+        missed. Falls back to a blank synthetic header, so no data is lost
+        -- the would-be header row just prints as an ordinary data row too.
+      - A coincidental table where columns 2..N are blank in every row is
+        misclassified as a header (blank cells don't fail the check, since
+        an all-blank option column is indistinguishable from
+        "nobody checked either box").
+    """
+    if first_row_has_th:
+        return True
+    if len(rows) < 2 or len(rows[0]) < 2:
+        return False
+    saw_marker = False
+    for col in range(1, len(rows[0])):
+        for row in rows[1:]:
+            cell = row[col].strip() if col < len(row) else ''
+            if cell in _HEADER_OPTION_TOKENS:
+                saw_marker = True
+            elif cell != '':
+                return False
+    return saw_marker
+
+
 def _html_table_to_markdown(table_html: str) -> str:
-    """Convert a simple HTML table to GitHub Flavored Markdown table."""
+    """Convert a simple HTML table to a GitHub Flavored Markdown table.
+
+    Returns '' when the markup has no parseable `<tr>` rows -- callers must
+    not fall back to the raw HTML in that case (bug 5: that fallback used
+    to leak `<table ...>` straight into the generated markdown).
+    """
     rows: list[list[str]] = []
-    for row_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE):
-        cells: list[str] = []
-        for cell_match in re.finditer(r'<t[dh][^>]*>(.*?)</t[dh]>', row_match.group(1), re.DOTALL | re.IGNORECASE):
-            cell_text = re.sub(r'<[^>]+>', '', cell_match.group(1))
-            cell_text = html.unescape(cell_text)
-            cell_text = re.sub(r'\s+', ' ', cell_text).strip()
-            cells.append(cell_text or ' ')
-        if cells:
-            rows.append(cells)
+    first_row_has_th = False
+    for row_match in _TABLE_ROW_RE.finditer(table_html):
+        cells, has_th = _table_row_cells(row_match.group(1))
+        if not cells:
+            continue
+        if not rows:
+            first_row_has_th = has_th
+        rows.append(cells)
 
     if not rows:
         return ''
 
-    # Align all rows to the width of the widest row
+    # Align all rows to the width of the widest row.
     max_cols = max(len(row) for row in rows)
     rows = [row + [' '] * (max_cols - len(row)) for row in rows]
 
     def md_row(cells: list[str]) -> str:
         return '| ' + ' | '.join(cells) + ' |'
 
-    lines = [md_row(rows[0])]
-    lines.append('| ' + ' | '.join(['---'] * max_cols) + ' |')
-    for row in rows[1:]:
-        lines.append(md_row(row))
+    if _first_row_is_header(rows, first_row_has_th):
+        header, data_rows = rows[0], rows[1:]
+    else:
+        # GFM still requires a header line; emit a blank one rather than
+        # promoting a data row, and keep every row -- including this one
+        # -- in the data section so nothing measured gets lost.
+        header, data_rows = [' '] * max_cols, rows
+
+    lines = [md_row(header), '| ' + ' | '.join(['---'] * max_cols) + ' |']
+    lines.extend(md_row(row) for row in data_rows)
     return '\n'.join(lines)
+
+
+# A block whose content already opens with its own ATX heading marker. With
+# `format_block_content=True` (see `_paddlevl_to_structure`) PaddleOCR-VL puts
+# a real hierarchy there itself -- `#` on the document title, `##`/`###` on
+# nested section titles.
+_ATX_HEADING_RE = re.compile(r'^#{1,6}\s+\S')
+
+
+def _render_heading(cleaned: str, *, fallback_level: int) -> str:
+    """Render a title block, keeping a heading level the engine already chose.
+
+    Without `format_block_content` every title block arrives as bare text and
+    the only thing we can do is stamp one flat level on all of them -- which
+    is why untuned output has 105 `##` and not a single `#`, leaving
+    hierarchical chunking exactly one level to work with. When the engine does
+    supply a level, prefixing our own on top would produce `## # Title`, so
+    take what it gives.
+    """
+    if _ATX_HEADING_RE.match(cleaned):
+        return cleaned
+    return f'{"#" * fallback_level} {cleaned}'
 
 
 def _render_block_content(label: str, content: str, page_number: int) -> str:
@@ -635,23 +805,37 @@ def _render_block_content(label: str, content: str, page_number: int) -> str:
     if label == 'llm_markdown':
         return (content or '').strip()
 
-    cleaned = _clean_block_text(content)
+    # A3 + B1, both label-independent: checkbox glyphs and form-field LaTeX
+    # artifacts (underlined blanks, arrays, ICD codes, ...) show up on
+    # ordinary 'text' blocks too -- 3 of the 16 LaTeX-carrying blocks
+    # measured have label 'text', so gating either step behind a label
+    # branch below would silently miss them.
+    normalised = _normalize_checkbox_glyphs(content or '')
+    normalised, _latex_hits = normalize_form_latex(normalised)
+    cleaned = _clean_block_text(normalised)
 
     if label in {'paragraph_title', 'doc_title'} and cleaned:
-        return f'## {cleaned}'
+        return _render_heading(cleaned, fallback_level=2)
     if label in {'text', 'paragraph', 'content'} and cleaned:
         return cleaned
     if label == 'table_title' and cleaned:
-        return f'### {cleaned}'
+        return _render_heading(cleaned, fallback_level=3)
     if label == 'table':
         if cleaned and '<table' in cleaned.lower():
-            md_table = _html_table_to_markdown(cleaned)
-            if md_table:
-                return md_table
+            # Trust this fully, including an empty result: falling through
+            # to the `cleaned` passthrough below on '' used to leak the raw
+            # `<table ...>` markup straight into the generated markdown
+            # (bug 5) whenever no `<tr>` row could be parsed out of it.
+            return _html_table_to_markdown(cleaned)
         if cleaned:
             return cleaned
         return ''
     if label in {'figure', 'image'}:
+        # Filled-in forms carry signatures and handwriting inside figure/image
+        # regions -- keep the placeholder (downstream systems and tests rely
+        # on it) but don't discard whatever content the block actually held.
+        if cleaned:
+            return f'*[Figure on page {page_number}]* {cleaned}'
         return f'*[Figure on page {page_number}]*'
     if label in {'header', 'footer', 'footnote', 'aside_text', 'reference'}:
         if cleaned:
@@ -675,7 +859,7 @@ def _build_rag_frontmatter(
     `metadata` carries everything the caller already knows about this
     conversion: the worker (app/workers/tasks.py) enriches it from the Job
     row (job_id, document_version, content_sha256, previous_job_id,
-    uploaded_by, team, tags) before calling convert_to_markdown_with_details;
+    uploaded_by, team, tags, original_filename) before calling convert_to_markdown_with_details;
     profile_id/engine/used_fallback are set by this module's own call sites,
     which are the only ones that actually know which pipeline/fallback ran.
 
@@ -689,17 +873,24 @@ def _build_rag_frontmatter(
     mode = str(metadata.get('mode') or 'single')
     email = str(metadata.get('email') or '')
     department = str(metadata.get('department') or '')
+    original_filename = str(metadata.get('original_filename') or '')
     document_version = metadata.get('document_version')
     tags = metadata.get('tags')
     used_fallback = bool(metadata.get('used_fallback'))
 
+    # source_name is the UUID filename on disk -- useless as a citation target
+    # in RAG. original_filename (when the caller supplies it) is the name the
+    # user actually uploaded, so it's added right after `source` rather than
+    # replacing it, keeping existing consumers of `source` unaffected.
     data: dict[str, object] = {
         'source': source_name,
-        'pages': page_count,
-        'profile': profile_label,
-        'profile_id': metadata.get('profile_id'),
-        'mode': mode,
     }
+    if original_filename:
+        data['original_filename'] = original_filename
+    data['pages'] = page_count
+    data['profile'] = profile_label
+    data['profile_id'] = metadata.get('profile_id')
+    data['mode'] = mode
     if email:
         data['email'] = email
     if department:
@@ -724,6 +915,288 @@ def _build_rag_frontmatter(
     return f'---\n{dumped}---\n'
 
 
+def _prepend_frontmatter(frontmatter: str, body: str) -> str:
+    """Join a `_build_rag_frontmatter` block with the document body WITHOUT
+    the extra '---' a plain `'\\n\\n---\\n\\n'.join([frontmatter, body])`
+    would add (A8): the frontmatter already ends in its own closing '---\\n'
+    YAML delimiter, so treating it as just another list item to join
+    doubles up -- measured as 8 `^---$` lines across 6 pages before this
+    fix (2 real YAML delimiters + 6 redundant join separators, one per
+    page). `body` may be empty, in which case the frontmatter is the whole
+    document.
+    """
+    if not body:
+        return frontmatter.strip()
+    return (frontmatter.rstrip('\n') + '\n\n' + body).strip()
+
+
+# A5 probe: measures whether the active engine emits per-block coordinates,
+# which a geometric label/value pairing for form fields would need.
+#
+# Measured against paddleocr 3.7.0 / PaddleOCR-VL 1.6 on a six-page scanned
+# form: every one of the 115 blocks carried BOTH `block_bbox` and
+# `block_polygon_points`. The probe stays in place because that is one engine
+# at one version -- the ppocrv6/PP-StructureV3 profiles and any future
+# pipeline version emit their own shapes, and `keys_seen` is what tells us
+# which. Note the plural: a block carrying two geometry keys must report both,
+# otherwise the probe hides exactly the richer shape it exists to find.
+_BLOCK_BBOX_KEY_CANDIDATES: tuple[str, ...] = (
+    'block_bbox', 'block_polygon_points', 'bbox', 'block_box', 'box',
+    'layout_bbox', 'coordinate', 'coordinates', 'poly', 'polygon',
+)
+
+
+def _is_usable_bbox_value(value: object) -> bool:
+    """True if `value` looks like real per-block geometry: a flat sequence of
+    at least 4 numbers (x0, y0, x1, y1, ...), or a polygon of at least 3
+    [x, y]/(x, y) points.
+
+    Deliberately tolerant on both shape and length: since the actual schema
+    PaddleOCR-VL uses (if any) is exactly what this probe is trying to find
+    out, over-fitting to one guessed format would just make the probe blind
+    to whichever format is really in use. `bool` is excluded from "numeric"
+    despite being an int subclass in Python, so a stray True/False can never
+    be mistaken for a coordinate. Never raises -- broken/unexpected shapes
+    simply count as "not usable".
+    """
+    try:
+        if not isinstance(value, (list, tuple)) or len(value) == 0:
+            return False
+
+        def _is_number(item: object) -> bool:
+            return isinstance(item, (int, float)) and not isinstance(item, bool)
+
+        if all(_is_number(item) for item in value):
+            return len(value) >= 4
+
+        def _is_point(item: object) -> bool:
+            return (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and all(_is_number(coord) for coord in item)
+            )
+
+        if all(_is_point(item) for item in value):
+            return len(value) >= 3
+
+        return False
+    except Exception:
+        return False
+
+
+def _find_usable_bbox_keys(block: dict) -> list[str]:
+    """Return EVERY bbox-candidate key on `block` that carries a usable value
+    (see `_is_usable_bbox_value`), in candidate order; empty if none do.
+
+    All of them, not just the first: PaddleOCR-VL puts `block_bbox` and
+    `block_polygon_points` on the same block, and stopping at the first match
+    would report only the rectangle and leave the polygon undiscovered.
+    """
+    return [
+        key for key in _BLOCK_BBOX_KEY_CANDIDATES
+        if key in block and _is_usable_bbox_value(block[key])
+    ]
+
+
+# B2: module-level on/off switch for repeated-boilerplate suppression --
+# a plain constant rather than a config system, since this is the kind of
+# thing that might need a quick global revert if some consumer turns out to
+# need every repeated header/footer/page-number on every page.
+_DEDUPLICATE_REPEATED_BOILERPLATE = True
+
+# Labels this applies to. Measured boilerplate (80x footer address, 47+6x
+# "Seite X von Y", 42x "> Versicherungsnummer", ...) all comes from these
+# three -- never from 'text', where the same suppression would risk
+# collapsing genuinely distinct field values.
+_BOILERPLATE_DEDUP_LABELS = frozenset({'header', 'footer', 'number'})
+
+# Digit runs fold to '#' so "Seite 2 von 6" and "Seite 3 von 6" compare
+# equal. Only ever applied to header/footer/number content (see
+# _BOILERPLATE_DEDUP_LABELS) -- doing this on ordinary text would collapse
+# an IBAN, a claim number, or a date into a false duplicate of an unrelated
+# one.
+_DIGIT_RUN_RE = re.compile(r'\d+')
+
+
+def _boilerplate_key(content: str) -> str:
+    """Normalize a header/footer/number block's raw content for repeat
+    detection across pages: whitespace-collapsed, lowercased, digit runs
+    folded to '#'.
+    """
+    return _DIGIT_RUN_RE.sub('#', _clean_block_text(content).lower())
+
+
+# B3: module-level on/off switch for geometric label/value pairing -- same
+# pattern as _DEDUPLICATE_REPEATED_BOILERPLATE (B2): a plain constant so a
+# quick global revert is one line away if some consumer needs the old
+# one-block-per-line output back.
+_PAIR_LABEL_VALUE_GEOMETRY = True
+
+# Labels that can be the LABEL half of a pair. Deliberately narrow (mirrors
+# _render_block_content's own 'text'/'paragraph'/'content' passthrough
+# group) -- a paragraph_title or table cell ending in ':' is not a form
+# field waiting for a value next to it.
+_LABEL_VALUE_LABEL_LABELS = frozenset({'text', 'paragraph', 'content'})
+
+# Labels that can be the VALUE half of a pair. Formula labels are included
+# on top of the plain-text ones because that is the measured failure mode
+# (groups.json page 2: "Buchungsdatum:" is a 'text' block, but its value,
+# "20 01 2026", is an 'inline_formula' block) -- excluding formulas would
+# make the whole feature a no-op on the real data.
+_LABEL_VALUE_VALUE_LABELS = frozenset({'text', 'paragraph', 'content', 'inline_formula', 'display_formula'})
+
+# Vertical overlap a value candidate must share with the label, as a
+# fraction of the LABEL's own height. 50% is chosen as the loosest
+# threshold that still tells "same form line" apart from "next line down":
+# measured label blocks are one text line tall (~25-30px in groups.json),
+# so anything sharing less than half of that band is a different row, not
+# a value sitting beside this label.
+_LABEL_VALUE_MIN_OVERLAP_RATIO = 0.5
+
+# Maximum horizontal gap allowed between a label's right edge and a value
+# candidate's left edge, as a fraction of the page's estimated width (the
+# widest block x1 seen on the page -- the real page width isn't threaded
+# this deep into the pipeline, so the blocks themselves are the only
+# available proxy for it). Calibrated against groups.json page 2: the real
+# "Buchungsdatum:" value sits 125px to its right (10.5% of the ~1191px
+# page), while the second date column two columns over -- which trap 3
+# requires NOT be picked up -- sits 531px away (44.6%). 25% sits cleanly
+# between the two, rejecting the cross-column jump while keeping the real
+# pair.
+_LABEL_VALUE_MAX_GAP_RATIO = 0.25
+
+
+def _label_value_is_label_text(rendered: str) -> bool:
+    """True when `rendered` (already cleaned/normalized) is a bare
+    'Something:' label.
+
+    This single check is what defeats trap 1 (side-by-side labels, e.g.
+    'Nachname:' immediately followed by 'Vorname:' in the same form row): a
+    block ending in ':' is excluded from being anyone's VALUE, so a naive
+    "nearest block to the right" search can never swallow one label as
+    another's value.
+    """
+    return rendered.rstrip().endswith(':')
+
+
+def _extract_bbox_rect(block: dict, bbox_keys: list[str]) -> tuple[float, float, float, float] | None:
+    """Reduce whichever geometry key(s) `_find_usable_bbox_keys` found on
+    `block` to a single (x0, y0, x1, y1) rectangle for the label/value
+    pairing geometry (B3).
+
+    Prefers a flat bbox (already validated by `_is_usable_bbox_value` as
+    >= 4 numbers) since it already IS the rectangle; falls back to the
+    bounding box of a polygon of points. `bbox_keys` is candidate-ordered
+    (see `_BLOCK_BBOX_KEY_CANDIDATES`) so a flat `block_bbox` wins over a
+    `block_polygon_points` on the same block when both are present.
+    """
+    for key in bbox_keys:
+        items = list(block[key])
+        if all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in items):
+            x0, y0, x1, y1 = items[0], items[1], items[2], items[3]
+            return float(x0), float(y0), float(x1), float(y1)
+        xs = [float(point[0]) for point in items]
+        ys = [float(point[1]) for point in items]
+        if xs and ys:
+            return min(xs), min(ys), max(xs), max(ys)
+    return None
+
+
+def _pair_label_value_blocks(records: list[dict]) -> list[str]:
+    """Fold decoupled 'Label:' / value block pairs into single
+    'Label: Wert' lines (B3), for one page's already-rendered,
+    already-boilerplate-filtered blocks.
+
+    `records` items are {'label', 'rendered', 'bbox'} in document order;
+    'bbox' is an (x0, y0, x1, y1) tuple or None. A block with no bbox can
+    never be matched as either half of a pair -- it just passes through
+    unchanged, which is the required fallback for engines/older jobs that
+    don't emit block geometry at all.
+
+    Deliberately conservative, per the brief: "a wrong pairing is worse
+    than no pairing." A label with no value inside the vertical-overlap /
+    max-gap window is emitted unchanged (trap 2: a value with no nearby
+    label is likewise left standalone, never reached for from afar), and
+    every value is consumed by at most one label (first-come by document
+    order -- there is exactly one label per value in every measured case,
+    so no ordering scheme has been observed to matter).
+    """
+    page_width = max((r['bbox'][2] for r in records if r['bbox']), default=0.0)
+    max_gap = page_width * _LABEL_VALUE_MAX_GAP_RATIO
+
+    value_indices = [
+        i for i, r in enumerate(records)
+        if r['bbox'] is not None
+        and r['label'] in _LABEL_VALUE_VALUE_LABELS
+        and not _label_value_is_label_text(r['rendered'])
+    ]
+    # Every OTHER label ("Something:") on the page with geometry -- used
+    # below to stop a label reaching PAST a nearer label for a value that
+    # is really the nearer label's. Without this, "Nachname: Vorname: Peter"
+    # with Nachname's own field left blank (no value block emitted for it
+    # at all) lets 'Nachname:' steal 'Peter' just because it is still
+    # within the generic gap budget -- a wrong pairing, which is exactly
+    # what the brief calls worse than no pairing.
+    label_positions = [
+        record['bbox']
+        for record in records
+        if record['bbox'] is not None
+        and record['label'] in _LABEL_VALUE_LABEL_LABELS
+        and _label_value_is_label_text(record['rendered'])
+    ]
+    used_values: set[int] = set()
+    paired_into: dict[int, int] = {}  # label index -> its value's index
+
+    for i, record in enumerate(records):
+        if record['bbox'] is None or record['label'] not in _LABEL_VALUE_LABEL_LABELS:
+            continue
+        if not _label_value_is_label_text(record['rendered']):
+            continue
+
+        lx0, ly0, lx1, ly1 = record['bbox']
+        label_height = ly1 - ly0
+        if label_height <= 0:
+            continue
+
+        best_value: int | None = None
+        best_gap = 0.0
+        for j in value_indices:
+            if j in used_values:
+                continue
+            vx0, vy0, vx1, vy1 = records[j]['bbox']
+            if vx0 <= lx1:
+                continue  # not to the label's right (trap 1/3 guard)
+            overlap = min(ly1, vy1) - max(ly0, vy0)
+            if overlap < label_height * _LABEL_VALUE_MIN_OVERLAP_RATIO:
+                continue  # different form row
+            gap = vx0 - lx1
+            if gap > max_gap:
+                continue  # too far -- likely a different column (trap 3)
+            if any(
+                lx1 <= mx0 < vx0
+                and min(ly1, my1) - max(ly0, my0) >= label_height * _LABEL_VALUE_MIN_OVERLAP_RATIO
+                for mx0, my0, mx1, my1 in label_positions
+                if (mx0, my0, mx1, my1) != record['bbox']
+            ):
+                continue  # a nearer label sits between this label and the value
+            if best_value is None or gap < best_gap:
+                best_value, best_gap = j, gap
+
+        if best_value is not None:
+            paired_into[i] = best_value
+            used_values.add(best_value)
+
+    parts: list[str] = []
+    for i, record in enumerate(records):
+        if i in used_values:
+            continue  # folded into its label's line below
+        if i in paired_into:
+            parts.append(f"{record['rendered']} {records[paired_into[i]]['rendered']}".strip())
+        else:
+            parts.append(record['rendered'])
+    return parts
+
+
 def _convert_structure_to_markdown(
     page_structures: list[dict],
     source_name: str = '',
@@ -734,13 +1207,23 @@ def _convert_structure_to_markdown(
     block_count = 0
     labels: dict[str, int] = {}
     page_count = len(page_structures)
+    bbox_blocks_total = 0
+    bbox_blocks_with_bbox = 0
+    bbox_keys_seen: set[str] = set()
+    # B2: tracked across the whole document (not reset per page) -- the
+    # point is exactly to catch the SAME header/footer/number repeating on
+    # every page and keep only its first occurrence.
+    seen_boilerplate: set[str] = set()
 
     frontmatter = _build_rag_frontmatter(source_name, page_count, profile_label, metadata=metadata)
-    sections.append(frontmatter)
 
     for page_index, page in enumerate(page_structures, start=1):
         page_blocks = page.get('parsing_res_list', []) or []
-        page_parts: list[str] = []
+        # Rendered blocks kept for this page, geometry attached (B3 needs the
+        # whole page assembled before it can look for a value to a label's
+        # right -- unlike boilerplate dedup above, pairing can't be decided
+        # block-by-block as the loop goes).
+        page_records: list[dict] = []
 
         ordered_blocks = sorted(
             page_blocks,
@@ -754,26 +1237,57 @@ def _convert_structure_to_markdown(
         for block in ordered_blocks:
             label = str(block.get('block_label') or 'unknown')
             labels[label] = labels.get(label, 0) + 1
+            # Counted over every block on the page (not just the ones that end
+            # up with rendered content below) -- this is a probe into what the
+            # pipeline emits, independent of what _render_block_content keeps.
+            bbox_blocks_total += 1
+            block_bbox_keys = _find_usable_bbox_keys(block)
+            block_bbox_rect = None
+            if block_bbox_keys:
+                bbox_blocks_with_bbox += 1
+                bbox_keys_seen.update(block_bbox_keys)
+                block_bbox_rect = _extract_bbox_rect(block, block_bbox_keys)
+            block_content = str(block.get('block_content') or '')
             rendered = _render_block_content(
                 label=label,
-                content=str(block.get('block_content') or ''),
+                content=block_content,
                 page_number=page_index,
             )
+            if rendered and _DEDUPLICATE_REPEATED_BOILERPLATE and label in _BOILERPLATE_DEDUP_LABELS:
+                boilerplate_key = _boilerplate_key(block_content)
+                if boilerplate_key in seen_boilerplate:
+                    # Repeat of a header/footer/number already emitted on an
+                    # earlier page -- drop it instead of stamping it onto
+                    # every page again (B2).
+                    rendered = ''
+                else:
+                    seen_boilerplate.add(boilerplate_key)
             if rendered:
-                page_parts.append(rendered)
+                page_records.append({'label': label, 'rendered': rendered, 'bbox': block_bbox_rect})
                 block_count += 1
+
+        if _PAIR_LABEL_VALUE_GEOMETRY:
+            page_parts = _pair_label_value_blocks(page_records)
+        else:
+            page_parts = [record['rendered'] for record in page_records]
 
         if page_parts:
             page_header = f'<!-- page:{page_index}/{page_count} -->'
             sections.append(page_header + '\n\n' + '\n\n'.join(page_parts))
 
-    markdown = ('\n\n---\n\n'.join(sections)).strip()
+    body = ('\n\n---\n\n'.join(sections)).strip()
+    markdown = _prepend_frontmatter(frontmatter, body)
     if not markdown or markdown == frontmatter.strip():
         raise RuntimeError('Structured PP-Structure conversion produced empty markdown')
     return markdown, {
         'page_count': page_count,
         'block_count': block_count,
         'block_labels': labels,
+        'bbox_coverage': {
+            'blocks_total': bbox_blocks_total,
+            'blocks_with_bbox': bbox_blocks_with_bbox,
+            'keys_seen': sorted(bbox_keys_seen),
+        },
     }
 
 
@@ -1233,7 +1747,27 @@ def _paddlevl_to_structure(
         _PADDLE_VL_PIPELINES[pipeline_key] = cached_pipeline
     pipeline = cast(PaddleOCRVL, cached_pipeline)
 
-    results = list(pipeline.predict(str(source)))
+    # `format_block_content=True` is the one predict() parameter measured to
+    # change what lands in `parsing_res_list`: title blocks arrive with the
+    # heading level the pipeline itself assigned (`#` document title, `##`/
+    # `###` sections) instead of bare text, so `_render_heading` can keep a
+    # real hierarchy rather than flattening everything to `##`. Table blocks
+    # additionally gain presentational HTML attributes, which
+    # `_html_table_to_markdown` already strips.
+    #
+    # Measured on a six-page scanned form, nine parameter sets against one
+    # input, and deliberately NOT set here:
+    #   temperature / top_p        -- byte-identical output; this pipeline
+    #                                 already decodes greedily
+    #   max_pixels                 -- byte-identical on this input; unproven
+    #   merge_layout_blocks        -- byte-identical
+    #   markdown_ignore_labels     -- only shapes PaddleOCR's own markdown
+    #                                 rendering, which this module does not
+    #                                 consume; header/footer blocks stay in
+    #                                 `parsing_res_list` regardless
+    # None of them changed the number of LaTeX-carrying blocks (16 in every
+    # run), so the formula artefacts cannot be configured away here.
+    results = list(pipeline.predict(str(source), format_block_content=True))
     if not results:
         raise RuntimeError('PaddleOCR-VL produced no results')
 
@@ -1575,8 +2109,8 @@ def _fallback_convert_with_frontmatter(
     frontmatter = _build_rag_frontmatter(
         source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
     )
-    markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
-    quality_gate = evaluate_document_quality(markdown)
+    markdown = _prepend_frontmatter(frontmatter, body)
+    quality_gate = evaluate_document_quality(markdown, field_validation=validate_document(markdown))
     return markdown, {
         'engine': engine,
         'used_fallback': True,
@@ -1617,8 +2151,8 @@ def convert_to_markdown_with_details(
             frontmatter = _build_rag_frontmatter(
                 source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
             )
-            markdown = ('\n\n---\n\n'.join([frontmatter, body])).strip()
-            quality_gate = evaluate_document_quality(markdown)
+            markdown = _prepend_frontmatter(frontmatter, body)
+            quality_gate = evaluate_document_quality(markdown, field_validation=validate_document(markdown))
             return markdown, {
                 'engine': 'mail-eml',
                 'used_fallback': False,
@@ -1674,6 +2208,7 @@ def convert_to_markdown_with_details(
             page_structures=page_structures,
             raw_outputs=cast(list[dict], extraction_meta.get('raw_outputs', [])),
             block_stats=block_stats,
+            field_validation=validate_document(markdown),
         )
         return markdown, {
             'engine': 'paddleocr',
@@ -1686,6 +2221,7 @@ def convert_to_markdown_with_details(
                 'page_count': block_stats['page_count'],
                 'block_count': block_stats['block_count'],
                 'block_labels': block_stats['block_labels'],
+                'bbox_coverage': block_stats['bbox_coverage'],
             },
             'quality_gate': quality_gate,
             'pdf_chunking': extraction_meta.get('pdf_chunking'),
