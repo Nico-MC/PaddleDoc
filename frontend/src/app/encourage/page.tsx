@@ -1,13 +1,19 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { API_BASE_URL } from '@/lib/api-base';
+import { EncourageDatasetWorkbench } from '@/components/encourage-dataset-workbench';
+import { apiFetch } from '@/lib/api';
 
 type MarkdownFileEntry = {
   path: string;
   filename: string;
   folder: string;
+  job_id: string;
+  original_filename: string;
+  original_extension: string;
+  workspace_folder: string;
+  profile_id: string | null;
   size_bytes: number;
   updated_at: string;
 };
@@ -144,35 +150,89 @@ type RagMethodOption = {
   id: string;
   label: string;
   description: string;
+  disabled?: boolean;
 };
+
+type RagTab = 'indexing' | 'retrieval' | 'generation' | 'benchmarking';
+type BenchmarkTab = 'datasets' | 'evaluation' | 'metrics';
 
 const RAG_METHOD_OPTIONS: RagMethodOption[] = [
   {
     id: 'Base',
     label: 'Base RAG',
-    description: 'Dense retrieval baseline using embeddings.',
+    description: 'Semantische Basissuche mit Embeddings.',
   },
   {
     id: 'BM25',
     label: 'BM25',
-    description: 'Sparse keyword retrieval for exact term matches.',
+    description: 'Schlagwortsuche für genaue Begriffsübereinstimmungen.',
   },
   {
     id: 'HybridBM25',
     label: 'Hybrid BM25',
-    description: 'Combines dense semantic retrieval with BM25 lexical signals.',
+    description: 'Kombiniert semantische Suche mit lexikalischen BM25-Signalen.',
+  },
+  {
+    id: 'Hyde',
+    label: 'HyDE',
+    description: 'Sucht mit einer vom LLM erzeugten hypothetischen Antwort.',
+    disabled: true,
+  },
+  {
+    id: 'Reranker',
+    label: 'Reranker',
+    description: 'Sortiert eine größere Treffermenge mit einem Cross-Encoder neu.',
+    disabled: true,
+  },
+  {
+    id: 'HydeReranker',
+    label: 'HyDE + Reranker',
+    description: 'Kombiniert hypothetische Suche mit Cross-Encoder-Reranking.',
+    disabled: true,
+  },
+  {
+    id: 'Summarization',
+    label: 'Summarization',
+    description: 'Indexiert vom LLM erzeugte Zusammenfassungen der Quell-Chunks.',
+    disabled: true,
+  },
+  {
+    id: 'SummarizationContextRAG',
+    label: 'Summary Context',
+    description: 'Durchsucht Zusammenfassungen und liefert die ursprünglichen Chunks.',
+    disabled: true,
+  },
+  {
+    id: 'SelfRAG',
+    label: 'Self-RAG',
+    description: 'Bewertet Relevanz, Belegbarkeit und Nutzen bei der Generierung.',
+    disabled: true,
+  },
+  {
+    id: 'KnownContext',
+    label: 'Known Context',
+    description: 'Verwendet festgelegten Kontext ohne dynamische Suche.',
+    disabled: true,
+  },
+  {
+    id: 'NoContext',
+    label: 'No Context',
+    description: 'Nutzt das LLM ohne Retrieval als Vergleichsbasis.',
+    disabled: true,
   },
 ];
 
-const API = API_BASE_URL;
 const DEFAULT_STEP_TWO_QUERY = 'Variiert die Hoehe der Pauschalerstattung nach Tarifklasse?';
 
 export default function EncouragePage() {
+  const [activeRagTab, setActiveRagTab] = useState<RagTab>('indexing');
+  const [activeBenchmarkTab, setActiveBenchmarkTab] = useState<BenchmarkTab>('datasets');
   const [items, setItems] = useState<MarkdownFileEntry[]>([]);
   const [datasets, setDatasets] = useState<EvaluationDatasetEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>('');
   const [selectedDatasetPath, setSelectedDatasetPath] = useState<string>('');
   const [ingested, setIngested] = useState<EncourageIngestResponse | null>(null);
+  const [ingestedSource, setIngestedSource] = useState<MarkdownFileEntry | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
@@ -189,10 +249,37 @@ export default function EncouragePage() {
   );
   const [error, setError] = useState<string | null>(null);
   const [showChunks, setShowChunks] = useState(false);
-  const [showTopKChunks, setShowTopKChunks] = useState(false);
   const [showDatasetDetails, setShowDatasetDetails] = useState(false);
   const [isLoadingDatasetDetails, setIsLoadingDatasetDetails] = useState(false);
   const [selectedDatasetDetails, setSelectedDatasetDetails] = useState<EvaluationDatasetDetail | null>(null);
+  const selectedItem = items.find((item) => item.path === selectedPath) ?? null;
+
+  const loadDatasets = useCallback(async (preferredPath?: string) => {
+    setIsLoadingDatasets(true);
+    try {
+      const response = await apiFetch('/api/v1/evaluation-datasets', { cache: 'no-store' });
+      if (!response.ok) {
+        setError('Failed to load evaluation datasets.');
+        return;
+      }
+      const payload = await response.json();
+      const nextDatasets = (payload.items ?? []) as EvaluationDatasetEntry[];
+      setDatasets(nextDatasets);
+      setSelectedDatasetPath((current) => {
+        if (preferredPath && nextDatasets.some((dataset) => dataset.path === preferredPath)) {
+          return preferredPath;
+        }
+        if (nextDatasets.some((dataset) => dataset.path === current)) {
+          return current;
+        }
+        return nextDatasets[0]?.path ?? '';
+      });
+    } catch {
+      setError('Failed to reach the backend while loading evaluation datasets.');
+    } finally {
+      setIsLoadingDatasets(false);
+    }
+  }, []);
 
   const formatNumber = (value: number | null) => {
     if (value === null || Number.isNaN(value)) {
@@ -254,7 +341,7 @@ export default function EncouragePage() {
       setIsLoading(true);
       setError(null);
       try {
-        const response = await fetch(`${API}/api/v1/markdown-files`, { cache: 'no-store' });
+        const response = await apiFetch('/api/v1/markdown-files', { cache: 'no-store' });
         if (!response.ok) {
           setError('Failed to load markdown files.');
           setIsLoading(false);
@@ -277,30 +364,8 @@ export default function EncouragePage() {
   }, []);
 
   useEffect(() => {
-    const loadDatasets = async () => {
-      setIsLoadingDatasets(true);
-      try {
-        const response = await fetch(`${API}/api/v1/evaluation-datasets`, { cache: 'no-store' });
-        if (!response.ok) {
-          setError('Failed to load evaluation datasets.');
-          setIsLoadingDatasets(false);
-          return;
-        }
-        const payload = await response.json();
-        const nextDatasets = (payload.items ?? []) as EvaluationDatasetEntry[];
-        setDatasets(nextDatasets);
-        if (nextDatasets.length > 0) {
-          setSelectedDatasetPath(nextDatasets[0].path);
-        }
-      } catch {
-        setError('Failed to reach the backend while loading evaluation datasets.');
-      } finally {
-        setIsLoadingDatasets(false);
-      }
-    };
-
     void loadDatasets();
-  }, []);
+  }, [loadDatasets]);
 
   useEffect(() => {
     if (!showDatasetDetails || !selectedDatasetPath) {
@@ -311,8 +376,8 @@ export default function EncouragePage() {
       setIsLoadingDatasetDetails(true);
       setError(null);
       try {
-        const response = await fetch(
-          `${API}/api/v1/evaluation-datasets/${encodeURI(selectedDatasetPath)}`,
+        const response = await apiFetch(
+          `/api/v1/evaluation-datasets/${encodeURI(selectedDatasetPath)}`,
           { cache: 'no-store' },
         );
         if (!response.ok) {
@@ -340,9 +405,8 @@ export default function EncouragePage() {
     setIsIngesting(true);
     setError(null);
     setShowChunks(false);
-    setShowTopKChunks(false);
     try {
-      const response = await fetch(`${API}/api/v1/encourage/ingest`, {
+      const response = await apiFetch('/api/v1/encourage/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -358,6 +422,7 @@ export default function EncouragePage() {
       }
       const payload = (await response.json()) as EncourageIngestResponse;
       setIngested(payload);
+      setIngestedSource(selectedItem);
       setRetrieval(null);
       setGeneration(null);
       setEvaluation(null);
@@ -375,7 +440,7 @@ export default function EncouragePage() {
     setIsRetrieving(true);
     setError(null);
     try {
-      const response = await fetch(`${API}/api/v1/encourage/retrieve`, {
+      const response = await apiFetch('/api/v1/encourage/retrieve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -407,7 +472,7 @@ export default function EncouragePage() {
     setIsGenerating(true);
     setError(null);
     try {
-      const response = await fetch(`${API}/api/v1/encourage/generate`, {
+      const response = await apiFetch('/api/v1/encourage/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -445,7 +510,7 @@ export default function EncouragePage() {
     setIsEvaluating(true);
     setError(null);
     try {
-      const response = await fetch(`${API}/api/v1/encourage/evaluate`, {
+      const response = await apiFetch('/api/v1/encourage/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -468,6 +533,7 @@ export default function EncouragePage() {
       }
       const payload = (await response.json()) as EncourageEvaluationResponse;
       setEvaluation(payload);
+      setActiveBenchmarkTab('metrics');
     } catch {
       setError('Failed to reach the backend while running evaluation.');
     } finally {
@@ -481,10 +547,12 @@ export default function EncouragePage() {
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 px-4 py-8 text-slate-950 sm:px-6 lg:px-8">
-      <div className="mx-auto w-full max-w-5xl">
-        <div className="mb-12 text-center">
+      <div className="mx-auto w-full max-w-7xl">
+        <div className="mb-8 text-center">
           <h1 className="font-serif text-4xl font-bold">Encourage RAG Pipeline</h1>
-          <p className="mt-3 text-lg text-slate-600">3-Step Workflow: Ingest → Retrieve → Evaluate</p>
+          <p className="mt-3 text-lg text-slate-600">
+            Indexierung, Retrieval, Generierung und Benchmarking gezielt bearbeiten.
+          </p>
         </div>
 
         {error && (
@@ -493,21 +561,71 @@ export default function EncouragePage() {
           </div>
         )}
 
+        <nav aria-label="RAG Bereiche" className="mb-6 grid gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm sm:grid-cols-4">
+          {([
+            ['indexing', 'Indexing', 'Dokumente und Chunks'],
+            ['retrieval', 'Retrieval', 'Treffer gezielt prüfen'],
+            ['generation', 'Generation', 'Antworten generieren'],
+            ['benchmarking', 'Benchmarking', 'Datasets und Metriken'],
+          ] as const).map(([id, label, description]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setActiveRagTab(id)}
+              aria-current={activeRagTab === id ? 'page' : undefined}
+              className={`rounded-xl px-4 py-3 text-left transition ${
+                activeRagTab === id
+                  ? 'bg-slate-950 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
+              }`}
+            >
+              <span className="block text-sm font-semibold">{label}</span>
+              <span className={`mt-0.5 block text-xs ${activeRagTab === id ? 'text-slate-300' : 'text-slate-400'}`}>
+                {description}
+              </span>
+            </button>
+          ))}
+        </nav>
+
+        {activeRagTab === 'benchmarking' && (
+          <nav aria-label="Benchmarking Bereiche" className="mb-6 flex flex-wrap gap-2 rounded-xl border border-purple-100 bg-purple-50 p-2">
+            {([
+              ['datasets', 'Data Sets'],
+              ['evaluation', 'Evaluation'],
+              ['metrics', 'Metrics'],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveBenchmarkTab(id)}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  activeBenchmarkTab === id
+                    ? 'bg-white text-purple-800 shadow-sm'
+                    : 'text-purple-600 hover:bg-white/60 hover:text-purple-900'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
+
         <div className="space-y-6">
           {/* STEP 1: INGEST */}
+          {activeRagTab === 'indexing' && (
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 font-semibold text-emerald-700">
                 1
               </div>
-              <h2 className="text-xl font-semibold text-slate-950">Ingest Markdown</h2>
+              <h2 className="text-xl font-semibold text-slate-950">Markdown indexieren</h2>
             </div>
             <p className="mb-4 text-sm text-slate-600">
-              Select a markdown file from PaddleDoc and ingest it into the Encourage vector store.
+              Wähle eine Markdown-Datei für den Encourage RAG-Index.
             </p>
 
             <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <label className="text-sm font-medium text-slate-700">Select Markdown File</label>
+              <label className="text-sm font-medium text-slate-700">Markdown-Datei auswählen</label>
               {isLoading ? (
                 <p className="text-sm text-slate-500">Loading markdown files...</p>
               ) : items.length === 0 ? (
@@ -524,29 +642,76 @@ export default function EncouragePage() {
                           : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
                       }`}
                     >
-                      <p className="font-medium">{item.filename}</p>
-                      <p className="text-xs text-slate-500">{item.path}</p>
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="break-words font-semibold">
+                            {item.filename}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Quelle: <span className="font-medium">{item.original_filename || 'nicht gespeichert'}</span>
+                          </p>
+                        </div>
+                        <span className="rounded-full border border-current/15 bg-white/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide">
+                          Markdown
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-1 text-xs text-slate-500 sm:grid-cols-2">
+                        <p>Ordner: <span className="font-medium">{item.workspace_folder || 'inbox'}</span></p>
+                        <p>Profil: <span className="font-medium">{item.profile_id || 'nicht gespeichert'}</span></p>
+                      </div>
+                      <p className="mt-2 break-all text-[11px] text-slate-400">Technischer Pfad: {item.path}</p>
                     </button>
                   ))}
                 </div>
               )}
             </div>
 
+            {selectedItem && (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Ausgewähltes Markdown</p>
+                <div className="mt-2 grid gap-3 text-sm sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs text-slate-500">Markdown-Datei</p>
+                    <p className="break-all font-semibold text-slate-900">{selectedItem.filename}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500">Quelle</p>
+                    <p className="break-words font-semibold text-slate-900">
+                      {selectedItem.original_filename || 'nicht gespeichert'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="mt-4 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
               <label className="text-sm font-medium text-slate-700">Select RAG Method</label>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {RAG_METHOD_OPTIONS.map((method) => (
                   <button
                     key={method.id}
+                    type="button"
+                    disabled={method.disabled}
                     onClick={() => setSelectedRagMethod(method.id)}
                     className={`rounded-lg border-2 p-3 text-left transition ${
-                      selectedRagMethod === method.id
+                      method.disabled
+                        ? 'cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400 opacity-70'
+                        : selectedRagMethod === method.id
                         ? 'border-emerald-500 bg-emerald-50 text-emerald-900'
                         : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
                     }`}
                   >
-                    <p className="text-sm font-medium">{method.label}</p>
-                    <p className="mt-1 text-xs text-slate-500">{method.description}</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium">{method.label}</p>
+                      {method.disabled && (
+                        <span className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                          Geplant
+                        </span>
+                      )}
+                    </div>
+                    <p className={`mt-1 text-xs ${method.disabled ? 'text-slate-400' : 'text-slate-500'}`}>
+                      {method.description}
+                    </p>
                   </button>
                 ))}
               </div>
@@ -558,13 +723,18 @@ export default function EncouragePage() {
                 disabled={!selectedPath || isIngesting || isLoading}
                 className="ml-auto bg-emerald-600 hover:bg-emerald-700"
               >
-                {isIngesting ? 'Ingesting...' : 'Ingest MD File'}
+                {isIngesting ? 'Wird indexiert...' : 'Ausgewähltes Markdown indexieren'}
               </Button>
             </div>
 
             {ingested && (
               <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-                <p className="font-medium text-emerald-900">✓ Markdown Ingested</p>
+                <p className="font-medium text-emerald-900">✓ Markdown indexiert</p>
+                {ingestedSource && (
+                  <p className="mt-2 text-sm text-emerald-900">
+                    Erstellt aus: <strong>{ingestedSource.original_filename || 'nicht gespeichert'}</strong>
+                  </p>
+                )}
                 <p className="mt-2 text-xs text-emerald-700">
                   <strong>{ingested.source_markdown.filename}</strong> · {ingested.source_markdown.document_count} chunks
                 </p>
@@ -596,9 +766,6 @@ export default function EncouragePage() {
                       <span className="break-all">{ingested.pipeline.collection_name}</span>
                     </p>
                     <p>
-                      <span className="font-semibold">top_k:</span> {ingested.pipeline.top_k}
-                    </p>
-                    <p>
                       <span className="font-semibold">rag_method:</span> {ingested.pipeline.rag_method}
                     </p>
                     <p className="sm:col-span-2 lg:col-span-2 break-all">
@@ -612,45 +779,14 @@ export default function EncouragePage() {
                 </div>
 
                 {/* Chunks Preview */}
-                <div className="mt-3 flex flex-wrap items-center gap-3">
+                <div className="mt-3">
                   <button
                     onClick={() => setShowChunks(!showChunks)}
                     className="text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
                   >
                     {showChunks ? '▼ Hide' : '▶ Show'} All Chunks ({ingested.source_markdown.document_count})
                   </button>
-                  <button
-                    onClick={() => setShowTopKChunks(!showTopKChunks)}
-                    className="text-xs font-medium text-emerald-700 underline hover:text-emerald-900"
-                  >
-                    {showTopKChunks ? '▼ Hide' : '▶ Show'} Top-{ingested.pipeline.top_k} Chunks
-                  </button>
                 </div>
-
-                {showTopKChunks && (
-                  <div className="mt-3 space-y-2 max-h-96 overflow-y-auto">
-                    {ingested.source_markdown.chunk_preview.length > 0 ? (
-                      <>
-                        <p className="text-xs text-emerald-700">
-                          Showing first {Math.min(ingested.pipeline.top_k, ingested.source_markdown.chunk_preview.length)} of{' '}
-                          {ingested.source_markdown.chunk_preview.length} chunks
-                        </p>
-                        {ingested.source_markdown.chunk_preview
-                          .slice(0, ingested.pipeline.top_k)
-                          .map((chunk, idx) => (
-                            <div key={`topk-${idx}`} className="rounded border border-emerald-200 bg-white p-3">
-                              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
-                                Chunk {idx + 1}
-                              </p>
-                              <p className="text-xs font-mono leading-relaxed text-slate-600">{chunk}</p>
-                            </div>
-                          ))}
-                      </>
-                    ) : (
-                      <p className="text-xs text-slate-500">No chunk preview returned by the backend.</p>
-                    )}
-                  </div>
-                )}
 
                 {showChunks && (
                   <div className="mt-3 space-y-2 max-h-96 overflow-y-auto">
@@ -673,8 +809,10 @@ export default function EncouragePage() {
               </div>
             )}
           </div>
+          )}
 
           {/* STEP 2: RETRIEVE */}
+          {(activeRagTab === 'retrieval' || activeRagTab === 'generation') && (
           <div
             className={`rounded-2xl border p-6 ${
               ingested
@@ -691,11 +829,13 @@ export default function EncouragePage() {
                 2
               </div>
               <h2 className={`text-xl font-semibold ${ingested ? 'text-slate-950' : 'text-slate-500'}`}>
-                Retrieve & Generate
+                {activeRagTab === 'retrieval' ? 'Retrieval' : 'Generation'}
               </h2>
             </div>
             <p className={`mb-4 text-sm ${ingested ? 'text-slate-600' : 'text-slate-500'}`}>
-              Ask your own question, inspect retrieved chunks, and generate an answer from top-k context.
+              {activeRagTab === 'retrieval'
+                ? 'Stelle eine Frage und untersuche die gefundenen Chunks und Scores getrennt von der Generierung.'
+                : 'Generiere eine Antwort aus dem Top-k-Kontext der aktuell indexierten Pipeline.'}
             </p>
 
             {ingested ? (
@@ -707,7 +847,8 @@ export default function EncouragePage() {
                   rows={3}
                   className="w-full rounded-lg border border-slate-200 p-3 text-sm"
                 />
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  {activeRagTab === 'retrieval' && (
                   <Button
                     onClick={retrieveFromPipeline}
                     disabled={isRetrieving || !query.trim()}
@@ -715,6 +856,8 @@ export default function EncouragePage() {
                   >
                     {isRetrieving ? 'Retrieving...' : 'Retrieve'}
                   </Button>
+                  )}
+                  {activeRagTab === 'generation' && (
                   <Button
                     onClick={generateFromPipeline}
                     disabled={isGenerating || !query.trim()}
@@ -722,9 +865,10 @@ export default function EncouragePage() {
                   >
                     {isGenerating ? 'Generating...' : 'Generate Answer'}
                   </Button>
+                  )}
                 </div>
 
-                {generation && (
+                {activeRagTab === 'generation' && generation && (
                   <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-4 shadow-sm">
                     <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
                       Generated Answer
@@ -752,15 +896,15 @@ export default function EncouragePage() {
                   </div>
                 )}
 
-                {retrieval && (
+                {activeRagTab === 'retrieval' && retrieval && (
                   <div className="mt-4 space-y-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
-                          Retrieval Results
+                          Top-{retrieval.top_k} Retrieval Results
                         </p>
                         <p className="mt-1 text-sm text-blue-950">
-                          {retrieval.results.length} result(s) from {retrieval.collection_name}
+                          {retrieval.results.length} gerankte Chunks für „{retrieval.query}“
                         </p>
                       </div>
                       <div className="rounded-full bg-white px-3 py-1 text-xs font-medium text-blue-700 shadow-sm">
@@ -826,14 +970,18 @@ export default function EncouragePage() {
                 )}
               </div>
             ) : (
-              <p className="text-sm text-slate-500">Complete Step 1 (Ingest) to enable retrieval.</p>
+              <p className="text-sm text-slate-500">
+                Indexiere zuerst im Tab „Indexing“ ein Markdown-Dokument.
+              </p>
             )}
           </div>
+          )}
 
           {/* STEP 3: EVALUATE */}
+          {activeRagTab === 'benchmarking' && (
           <div
             className={`rounded-2xl border p-6 ${
-              ingested
+              activeBenchmarkTab === 'datasets' || ingested
                 ? 'border-slate-200 bg-white shadow-sm'
                 : 'border-slate-200 bg-slate-50 opacity-50'
             }`}
@@ -841,21 +989,41 @@ export default function EncouragePage() {
             <div className="mb-4 flex items-center gap-3">
               <div
                 className={`flex h-10 w-10 items-center justify-center rounded-full font-semibold ${
-                  ingested ? 'bg-purple-100 text-purple-700' : 'bg-slate-200 text-slate-500'
+                  activeBenchmarkTab === 'datasets' || ingested
+                    ? 'bg-purple-100 text-purple-700'
+                    : 'bg-slate-200 text-slate-500'
                 }`}
               >
-                3
+                B
               </div>
-              <h2 className={`text-xl font-semibold ${ingested ? 'text-slate-950' : 'text-slate-500'}`}>
-                Evaluate
+              <h2 className={`text-xl font-semibold ${activeBenchmarkTab === 'datasets' || ingested ? 'text-slate-950' : 'text-slate-500'}`}>
+                {activeBenchmarkTab === 'datasets'
+                  ? 'Data Sets'
+                  : activeBenchmarkTab === 'evaluation'
+                    ? 'Evaluation'
+                    : 'Metrics'}
               </h2>
             </div>
-            <p className={`mb-4 text-sm ${ingested ? 'text-slate-600' : 'text-slate-500'}`}>
-              Run evaluation metrics against an evaluation dataset.
+            <p className={`mb-4 text-sm ${activeBenchmarkTab === 'datasets' || ingested ? 'text-slate-600' : 'text-slate-500'}`}>
+              {activeBenchmarkTab === 'datasets'
+                ? 'Erstelle, prüfe und bearbeite Retrieval-Evaluationsdaten für eure Word-Dokumente.'
+                : activeBenchmarkTab === 'evaluation'
+                  ? 'Lass ein ausgewähltes Dataset gegen die aktuelle Encourage-Retrieval-Pipeline laufen.'
+                  : 'Untersuche die Ergebnisse und Einzelabfragen des letzten Benchmark-Laufs.'}
             </p>
 
-            {ingested ? (
+            {activeBenchmarkTab === 'datasets' ? (
+              <EncourageDatasetWorkbench
+                datasets={datasets}
+                markdownFiles={items}
+                selectedDatasetPath={selectedDatasetPath}
+                onSelectDataset={setSelectedDatasetPath}
+                onDatasetSaved={loadDatasets}
+              />
+            ) : ingested ? (
               <div className="space-y-3">
+                {activeBenchmarkTab === 'evaluation' && (
+                <>
                 <div>
                   <div className="flex items-center justify-between gap-3">
                     <label className="text-sm font-medium text-slate-700">Select Dataset</label>
@@ -1010,8 +1178,19 @@ export default function EncouragePage() {
                     </button>
                   </div>
                 </div>
+                </>
+                )}
 
-                {evaluation && (
+                {activeBenchmarkTab === 'metrics' && !evaluation && (
+                  <div className="rounded-xl border border-dashed border-purple-200 bg-purple-50/50 p-8 text-center">
+                    <p className="font-medium text-purple-900">Noch kein Benchmark-Ergebnis vorhanden.</p>
+                    <p className="mt-1 text-sm text-purple-700">
+                      Starte zuerst im Tab „Evaluation“ einen Lauf.
+                    </p>
+                  </div>
+                )}
+
+                {activeBenchmarkTab === 'metrics' && evaluation && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50 p-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium text-purple-900">✓ Evaluation Complete</p>
@@ -1324,9 +1503,12 @@ export default function EncouragePage() {
                 )}
               </div>
             ) : (
-              <p className="text-sm text-slate-500">Complete Step 1 (Ingest) to enable evaluation.</p>
+              <p className="text-sm text-slate-500">
+                Indexiere zuerst im Tab „Indexing“ ein Dokument, damit Encourage eine aktive Pipeline hat.
+              </p>
             )}
           </div>
+          )}
         </div>
       </div>
     </main>

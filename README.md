@@ -1,5 +1,15 @@
-﻿docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+﻿docker compose \
+  -f docker-compose.dev.yml \
+  -f docker-compose.gpu.yml \
+  -f ~/.config/paddledoc/compose.local.yml \
+  up -d --no-build --wait
 
+
+docker compose \
+  -f docker-compose.dev.yml \
+  -f docker-compose.gpu.yml \
+  -f ~/.config/paddledoc/compose.local.yml \
+  down
 
 # PaddleDoc
 # <img src="docs/logo.svg" width="30" alt="" align="top"> PaddleDoc

@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import re
 import sys
+import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from types import ModuleType
 from typing import Any
-import uuid
 
 
 _RAG_PIPELINES: dict[str, Any] = {}
@@ -21,6 +22,108 @@ _DEFAULT_TOP_K = 5
 _DEFAULT_CHUNK_MAX_CHARS = 1100
 _DEFAULT_CHUNK_OVERLAP_CHARS = 140
 _SUPPORTED_RAG_METHODS: tuple[str, ...] = ('Base', 'BM25', 'HybridBM25')
+_ATX_HEADING_RE = re.compile(r'^(#{1,6})\s+\S')
+
+
+def _split_oversized_markdown_block(
+    block: str,
+    *,
+    max_chars: int,
+    overlap_chars: int,
+) -> list[str]:
+    """Split a single oversized block without cutting through words."""
+
+    if len(block) <= max_chars:
+        return [block]
+    parts: list[str] = []
+    start = 0
+    while start < len(block):
+        limit = min(len(block), start + max_chars)
+        end = limit
+        if limit < len(block):
+            boundary = block.rfind(' ', start, limit + 1)
+            if boundary > start:
+                end = boundary
+        part = block[start:end].strip()
+        if part:
+            parts.append(part)
+        if end >= len(block):
+            break
+        next_start = max(start + 1, end - overlap_chars)
+        while next_start < end and not block[next_start].isspace():
+            next_start += 1
+        start = next_start
+    return parts
+
+
+def _chunk_markdown_by_sections(
+    text: str,
+    *,
+    max_chars: int,
+    overlap_chars: int,
+) -> list[str]:
+    """Create retrieval chunks that retain their Markdown heading path."""
+
+    normalized = text.replace('\r\n', '\n').strip()
+    if not normalized:
+        return []
+    blocks = [block.strip() for block in re.split(r'\n{2,}', normalized) if block.strip()]
+    chunks: list[str] = []
+    heading_stack: dict[int, str] = {}
+    active_prefix = ''
+    content_blocks: list[str] = []
+
+    def emit() -> None:
+        nonlocal content_blocks
+        if not content_blocks:
+            return
+        prefix_length = len(active_prefix) + 2 if active_prefix else 0
+        content_limit = max(80, max_chars - prefix_length)
+        current: list[str] = []
+
+        def flush_current() -> None:
+            if not current:
+                return
+            body = '\n\n'.join(current)
+            chunks.append(f'{active_prefix}\n\n{body}'.strip() if active_prefix else body)
+            current.clear()
+
+        for block in content_blocks:
+            candidate = '\n\n'.join([*current, block])
+            if current and len(candidate) > content_limit:
+                flush_current()
+            if len(block) <= content_limit:
+                current.append(block)
+                continue
+            flush_current()
+            for part in _split_oversized_markdown_block(
+                block,
+                max_chars=content_limit,
+                overlap_chars=min(overlap_chars, content_limit // 2),
+            ):
+                chunks.append(
+                    f'{active_prefix}\n\n{part}'.strip() if active_prefix else part
+                )
+        flush_current()
+        content_blocks = []
+
+    for block in blocks:
+        heading = _ATX_HEADING_RE.match(block)
+        if not heading:
+            content_blocks.append(block)
+            continue
+        emit()
+        level = len(heading.group(1))
+        for deeper in [candidate for candidate in heading_stack if candidate >= level]:
+            del heading_stack[deeper]
+        heading_stack[level] = block
+        active_prefix = '\n\n'.join(heading_stack[key] for key in sorted(heading_stack))
+    emit()
+
+    # A heading-only document still needs to remain indexable.
+    if not chunks and active_prefix:
+        chunks.append(active_prefix)
+    return chunks
 
 
 class _PaddleDocSamplingParams:
@@ -52,12 +155,58 @@ def _encourage_src_path() -> Path:
     raise RuntimeError(f'Encourage source path not found. Checked: {searched_paths}')
 
 
+def _ensure_namespace_package(name: str, path: Path) -> ModuleType:
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = name
+    module.__path__ = [str(path)]  # type: ignore[attr-defined]
+    sys.modules[name] = module
+    return module
+
+
 @lru_cache(maxsize=1)
-def _markdown_ingestion_class() -> type:
+def prepare_encourage_runtime() -> None:
+    """Load Encourage as a lean source checkout integration.
+
+    Encourage's package initializers eagerly import optional reranker,
+    sentence-transformer, Qdrant and MLflow integrations. PaddleDoc uses the
+    Chroma, BM25, prompting and retrieval-metric modules only, so importing
+    every optional backend would unnecessarily pull CUDA/PyTorch into the API
+    image. Namespace packages let Python load the selected Encourage modules
+    directly while retaining Encourage's own implementations.
+    """
+
     encourage_src = _encourage_src_path()
     encourage_src_str = str(encourage_src)
     if encourage_src_str not in sys.path:
         sys.path.insert(0, encourage_src_str)
+
+    package_root = encourage_src / 'encourage'
+    _ensure_namespace_package('encourage', package_root)
+    _ensure_namespace_package('encourage.rag', package_root / 'rag')
+    _ensure_namespace_package('encourage.metrics', package_root / 'metrics')
+    vector_store_package = _ensure_namespace_package(
+        'encourage.vector_store',
+        package_root / 'vector_store',
+    )
+
+    # BaseRAG imports these symbols from the package instead of their modules.
+    # Populate just the Chroma implementation and the interface; Qdrant stays
+    # an optional Encourage concern and does not belong in this API image.
+    from encourage.vector_store.chroma import ChromaClient  # type: ignore[reportMissingImports]
+    from encourage.vector_store.vector_store import VectorStore  # type: ignore[reportMissingImports]
+
+    vector_store_package.ChromaClient = ChromaClient  # type: ignore[attr-defined]
+    vector_store_package.VectorStore = VectorStore  # type: ignore[attr-defined]
+
+
+@lru_cache(maxsize=1)
+def _markdown_ingestion_class() -> type:
+    prepare_encourage_runtime()
 
     try:
         from encourage.utils.markdown_ingestion import MarkdownIngestion  # type: ignore[reportMissingImports]
@@ -147,22 +296,11 @@ def _markdown_ingestion_class() -> type:
                 return text[end + 5 :].lstrip('\n')
 
             def _chunk_text(self, text: str) -> list[str]:
-                normalized = text.replace('\r\n', '\n').strip()
-                if not normalized:
-                    return []
-
-                blocks = [block.strip() for block in re.split(r'\n{2,}', normalized) if block.strip()]
-                chunks: list[str] = []
-                for block in blocks:
-                    if len(block) <= self.chunk_max_chars:
-                        chunks.append(block)
-                        continue
-                    step = max(1, self.chunk_max_chars - self.chunk_overlap_chars)
-                    for start in range(0, len(block), step):
-                        part = block[start : start + self.chunk_max_chars].strip()
-                        if part:
-                            chunks.append(part)
-                return chunks
+                return _chunk_markdown_by_sections(
+                    text,
+                    max_chars=self.chunk_max_chars,
+                    overlap_chars=self.chunk_overlap_chars,
+                )
 
         return MarkdownIngestion
 
@@ -187,10 +325,7 @@ def _normalize_rag_method_name(rag_method: str | None) -> str:
 
 @lru_cache(maxsize=None)
 def _rag_pipeline_components(rag_method: str) -> tuple[type, type, str]:
-    encourage_src = _encourage_src_path()
-    encourage_src_str = str(encourage_src)
-    if encourage_src_str not in sys.path:
-        sys.path.insert(0, encourage_src_str)
+    prepare_encourage_runtime()
 
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
@@ -238,10 +373,7 @@ def _rag_pipeline_components(rag_method: str) -> tuple[type, type, str]:
 
 @lru_cache(maxsize=1)
 def _batch_inference_runner_class() -> type:
-    encourage_src = _encourage_src_path()
-    encourage_src_str = str(encourage_src)
-    if encourage_src_str not in sys.path:
-        sys.path.insert(0, encourage_src_str)
+    prepare_encourage_runtime()
 
     from encourage.llm import BatchInferenceRunner  # type: ignore[reportMissingImports]
 
@@ -452,10 +584,7 @@ def load_markdown_chunks(
 
 
 def _query_collection(collection_name: str, query: str, *, top_k: int) -> list[Any]:
-    encourage_src = _encourage_src_path()
-    encourage_src_str = str(encourage_src)
-    if encourage_src_str not in sys.path:
-        sys.path.insert(0, encourage_src_str)
+    prepare_encourage_runtime()
 
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
     from encourage.vector_store.chroma import ChromaClient  # type: ignore[reportMissingImports]

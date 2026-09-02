@@ -598,10 +598,8 @@ def test_collection_persists_in_db_across_sessions(tmp_path):
 
 
 def test_markdown_browser_lists_files(tmp_path):
-    """DB-derived: the browser tree is built from Job rows with
-    result_markdown, not from anything on disk. Field-for-field the response
-    shape (path/filename/folder/size_bytes/updated_at) matches what the old
-    filesystem-scanning handler produced.
+    """DB-derived entries retain both the Markdown artifact and its source
+    document provenance, without consulting the filesystem.
     """
     db = TestingSessionLocal()
     db.query(Job).filter(Job.id.in_(['job-1', 'job-2'])).delete(synchronize_session=False)
@@ -627,7 +625,13 @@ def test_markdown_browser_lists_files(tmp_path):
                 upload_size_bytes=1,
                 status=JobStatus.FINISHED,
                 result_markdown='# collection',
-                processing_info={'settings': {'folder': 'collections', 'subfolder': 'collection-1'}},
+                processing_info={
+                    'settings': {
+                        'folder': 'collections',
+                        'subfolder': 'collection-1',
+                        'profile_id': 'ppocrv6_medium',
+                    }
+                },
             ),
         ]
     )
@@ -644,12 +648,20 @@ def test_markdown_browser_lists_files(tmp_path):
     entry_one = items_by_path['inbox/job-1/job-1.md']
     assert entry_one['filename'] == 'job-1.md'
     assert entry_one['folder'] == 'inbox/job-1'
+    assert entry_one['job_id'] == 'job-1'
+    assert entry_one['original_filename'] == 'single.pdf'
+    assert entry_one['original_extension'] == 'pdf'
+    assert entry_one['workspace_folder'] == 'inbox'
+    assert entry_one['profile_id'] is None
     assert entry_one['size_bytes'] == len('# single'.encode('utf-8'))
     assert 'updated_at' in entry_one
 
     entry_two = items_by_path['collections/collection-1/job-2/job-2.md']
     assert entry_two['filename'] == 'job-2.md'
     assert entry_two['folder'] == 'collections/collection-1/job-2'
+    assert entry_two['original_filename'] == 'collection.pdf'
+    assert entry_two['workspace_folder'] == 'collections/collection-1'
+    assert entry_two['profile_id'] == 'ppocrv6_medium'
     assert entry_two['size_bytes'] == len('# collection'.encode('utf-8'))
 
     file_resp = client.get('/api/v1/markdown-files/inbox/job-1/job-1.md')

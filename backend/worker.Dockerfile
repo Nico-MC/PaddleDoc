@@ -21,6 +21,7 @@ ENV no_proxy=${NO_PROXY}
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		build-essential \
+		pandoc \
 		libglib2.0-0 \
 		libsm6 \
 		libxext6 \

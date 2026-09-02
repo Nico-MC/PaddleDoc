@@ -19,6 +19,7 @@ import {
   LogOut,
   ChevronDown,
   ChevronRight,
+  BrainCircuit,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
@@ -41,6 +42,7 @@ const navGroups = [
         description: 'Upload and process documents',
         children: processingChildren,
       },
+      { href: '/encourage', label: 'RAG', icon: BrainCircuit, description: 'Encourage RAG and benchmarking' },
       { href: '/mail', label: 'Mail API', icon: Inbox, description: 'API-ingested messages' },
     ],
   },

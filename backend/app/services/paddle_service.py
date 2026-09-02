@@ -8,10 +8,12 @@ import logging
 import platform
 import re
 import time
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from xml.etree import ElementTree as ET
 
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from fastapi import HTTPException, status
@@ -24,6 +26,7 @@ from app.core.config import settings
 from app.models.models import VlConnection
 from app.services import safe_fetch as safe_fetch_module
 from app.services.quality_gate import evaluate_document_quality
+from app.services.docx_pandoc import PandocDocxError, pandoc_docx_to_markdown
 from app.services.form_latex import normalize_form_latex
 from app.services.field_validation import validate_document
 from app.services.mail_ingest import (
@@ -2080,31 +2083,56 @@ def _fallback_convert_with_frontmatter(
     metadata: dict[str, object] | None,
     fallback_reason: str,
     capability: dict,
+    *,
+    used_fallback: bool = True,
 ) -> tuple[str, dict]:
-    """Shared pypdf/spreadsheet fallback body for both call sites in
-    `convert_to_markdown_with_details` (PaddleOCR unavailable, and the
-    primary PP-StructureV3 path raising). Prepends the same RAG frontmatter
-    the successful path emits -- with used_fallback: true and the applicable
-    fallback engine -- so fallback output is never missing the header that
-    `PUT /jobs/{id}/save` and downstream RAG ingestion both expect.
-    `suffix` must be '.pdf', '.xls', or '.xlsx'.
+    """Run a native PDF, spreadsheet, or DOCX extractor with frontmatter.
+
+    OCR failures set ``used_fallback`` while the explicit ``no_profile``
+    selection uses the same extractors as the requested native pipeline.
     """
-    engine = 'pypdf-fallback' if suffix == '.pdf' else 'spreadsheet-fallback'
+    if suffix not in {'.pdf', '.docx', '.xls', '.xlsx'}:
+        raise RuntimeError(
+            'Native extraction supports only .pdf, .docx, .xls, and .xlsx. '
+            'Use an OCR profile for images and other formats.'
+        )
+
+    extra: dict[str, object] = {}
+    if suffix == '.pdf':
+        engine_prefix = 'pypdf'
+        body = _fallback_pdf_to_markdown(source)
+        page_count = _pdf_page_count(source)
+    elif suffix in {'.xls', '.xlsx'}:
+        engine_prefix = 'spreadsheet'
+        body, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
+        page_count = max(1, sheet_count)
+        extra = {'sheet_count': sheet_count, 'row_count': row_count}
+    else:
+        try:
+            body, pandoc_details = pandoc_docx_to_markdown(
+                source,
+                timeout_seconds=settings.pandoc_timeout_seconds,
+            )
+            engine_prefix = 'pandoc-docx'
+            extra = pandoc_details
+        except PandocDocxError as exc:
+            logger.warning('Pandoc DOCX conversion unavailable; using XML fallback: %s', exc)
+            body, paragraph_count = _fallback_docx_to_markdown(source)
+            engine_prefix = 'docx'
+            extra = {
+                'paragraph_count': paragraph_count,
+                'docx_converter': 'legacy_xml',
+                'docx_converter_fallback_reason': str(exc),
+            }
+        page_count = 1
+
+    engine = f'{engine_prefix}-fallback' if used_fallback else f'{engine_prefix}-native'
     frontmatter_metadata = {
         **(metadata or {}),
         'profile_id': selected_profile_id,
         'engine': engine,
-        'used_fallback': True,
+        'used_fallback': used_fallback,
     }
-
-    extra: dict[str, object] = {}
-    if suffix == '.pdf':
-        body = _fallback_pdf_to_markdown(source)
-        page_count = _pdf_page_count(source)
-    else:
-        body, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
-        page_count = max(1, sheet_count)
-        extra = {'sheet_count': sheet_count, 'row_count': row_count}
 
     frontmatter = _build_rag_frontmatter(
         source.name, page_count, selected_profile['label'], metadata=frontmatter_metadata
@@ -2113,7 +2141,7 @@ def _fallback_convert_with_frontmatter(
     quality_gate = evaluate_document_quality(markdown, field_validation=validate_document(markdown))
     return markdown, {
         'engine': engine,
-        'used_fallback': True,
+        'used_fallback': used_fallback,
         'fallback_reason': fallback_reason,
         'profile_id': selected_profile_id,
         'profile_label': selected_profile['label'],
@@ -2165,8 +2193,20 @@ def convert_to_markdown_with_details(
         except Exception as exc:
             raise RuntimeError(f'Failed to convert .eml file: {exc}') from exc
 
+    if selected_profile.get('pipeline') == 'native':
+        return _fallback_convert_with_frontmatter(
+            source,
+            suffix,
+            selected_profile_id,
+            selected_profile,
+            metadata,
+            'OCR disabled by profile selection',
+            capability,
+            used_fallback=False,
+        )
+
     if not _paddleocr_available():
-        if suffix in {'.pdf', '.xls', '.xlsx'}:
+        if suffix in {'.pdf', '.docx', '.xls', '.xlsx'}:
             return _fallback_convert_with_frontmatter(
                 source, suffix, selected_profile_id, selected_profile, metadata,
                 'PaddleOCR is not installed in this worker image', capability,
@@ -2230,7 +2270,7 @@ def convert_to_markdown_with_details(
         }
     except Exception as exc:
         suffix = source.suffix.lower()
-        if suffix in {'.pdf', '.xls', '.xlsx'}:
+        if suffix in {'.pdf', '.docx', '.xls', '.xlsx'}:
             return _fallback_convert_with_frontmatter(
                 source, suffix, selected_profile_id, selected_profile, metadata, str(exc), capability,
             )

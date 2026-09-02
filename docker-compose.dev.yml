@@ -19,12 +19,22 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: development
     restart: unless-stopped
     ports:
       - '3000:3000'
     environment:
       PADDLEDOC_PUBLIC_API_URL: http://localhost:8000
+      # Docker Desktop/WSL file notification forwarding is not reliable on
+      # every host. Polling keeps Next.js Fast Refresh deterministic.
+      WATCHPACK_POLLING: 'true'
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+      - ./frontend/next.config.ts:/app/next.config.ts:ro
+      - ./frontend/tsconfig.json:/app/tsconfig.json:ro
     depends_on:
       - backend
 
@@ -79,8 +89,19 @@ services:
       WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-true}
       WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
+      UVICORN_RELOAD: 'true'
     volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
       - ./backend/storage:/app/backend/storage
+      # The RAG workbench uses Encourage directly and keeps editable JSONL
+      # datasets next to the shared Word source documents.
+      - ../encourage:/app/encourage:ro
+      - ../.docs:/app/docs
+      # Chroma downloads its 79 MB ONNX embedding model on first use. Keep it
+      # across backend recreates so later ingest runs start immediately.
+      - encourage_models:/home/paddledoc/.cache/chroma
     depends_on:
       - postgres
       - redis
@@ -166,6 +187,9 @@ services:
       WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
+      # Worker code is mounted as well, so a lightweight `restart worker`
+      # picks up task changes without rebuilding the PaddleOCR image.
+      - ./backend/app:/app/app:ro
       - ./backend/storage:/app/backend/storage
       # PaddleOCR writes model weights into $HOME/.paddlex and
       # $HOME/.paddleocr; the container home is /home/paddledoc since the
@@ -236,3 +260,4 @@ services:
 volumes:
   pgdata:
   paddlex_models:
+  encourage_models:

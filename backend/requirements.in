@@ -31,3 +31,17 @@ email-validator==2.3.0
 markdownify==1.2.0
 beautifulsoup4==4.14.2
 PyYAML==6.0.3
+
+# Lean runtime subset used by app/services/encourage_bridge.py. The mounted
+# Encourage checkout also offers PyTorch/CUDA rerankers and Qdrant, but the
+# PaddleDoc workbench uses Chroma/default ONNX embeddings, BM25, prompting and
+# classical retrieval metrics only.
+chromadb==1.4.1
+ir-measures==0.3.7
+jinja2==3.1.6
+msgspec==0.20.0
+nltk==3.9.3
+numpy==2.2.6
+openai==1.98.0
+rank-bm25==0.2.2
+tqdm==4.67.3

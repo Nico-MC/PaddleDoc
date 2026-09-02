@@ -45,6 +45,10 @@ from app.schemas.jobs import (
     EncourageRagRunResponse,
     EncourageRetrieveRequest,
     EncourageRetrieveResponse,
+    EvaluationDatasetBrowserResponse,
+    EvaluationDatasetDetailResponse,
+    EvaluationDatasetWriteRequest,
+    EvaluationSourceDocumentBrowserResponse,
     CollectionStartRequest,
     CollectionStartResponse,
     DashboardStatsResponse,
@@ -70,6 +74,20 @@ from app.schemas.jobs import (
     UploadResponse,
 )
 from app.schemas.import_ import JobArtifactListResponse, JobArtifactResponse
+from app.services.encourage_bridge import (
+    get_pipeline_metadata,
+    ingest_markdown_file,
+    retrieve_from_pipeline,
+    run_pipeline_once,
+)
+from app.services.encourage_evaluation import (
+    get_evaluation_dataset_details,
+    list_evaluation_datasets,
+    list_evaluation_source_documents,
+    run_encourage_evaluation,
+    save_evaluation_dataset,
+)
+from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     effective_pipeline_profile_id,
     get_paddle_capabilities,
@@ -474,10 +492,18 @@ def _synthetic_markdown_path(job: Job) -> str:
 def _markdown_entry_from_job(job: Job) -> MarkdownFileEntry:
     path = _synthetic_markdown_path(job)
     content = job.result_markdown or ''
+    info = job.processing_info if isinstance(job.processing_info, dict) else {}
+    settings_info = info.get('settings') if isinstance(info.get('settings'), dict) else {}
+    profile_id = settings_info.get('profile_id')
     return MarkdownFileEntry(
         path=path,
         filename=f'{job.id}.md',
         folder=path.rsplit('/', 1)[0],
+        job_id=job.id,
+        original_filename=job.original_filename,
+        original_extension=Path(job.original_filename).suffix.lower().lstrip('.'),
+        workspace_folder=_job_folder_path(job),
+        profile_id=profile_id if isinstance(profile_id, str) and profile_id else None,
         size_bytes=len(content.encode('utf-8')),
         updated_at=job.updated_at,
     )
@@ -1969,6 +1995,24 @@ def get_markdown_file(
 @router.get('/evaluation-datasets', response_model=EvaluationDatasetBrowserResponse)
 def list_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse:
     return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets())
+
+
+@router.post('/evaluation-datasets', response_model=EvaluationDatasetDetailResponse)
+def upsert_evaluation_dataset(payload: EvaluationDatasetWriteRequest) -> EvaluationDatasetDetailResponse:
+    try:
+        return EvaluationDatasetDetailResponse(**save_evaluation_dataset(payload.filename, payload.rows))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Failed to save evaluation dataset: {exc}',
+        ) from exc
+
+
+@router.get('/evaluation-source-documents', response_model=EvaluationSourceDocumentBrowserResponse)
+def list_evaluation_source_document_files() -> EvaluationSourceDocumentBrowserResponse:
+    return EvaluationSourceDocumentBrowserResponse(items=list_evaluation_source_documents())
 
 
 @router.get('/evaluation-datasets/{dataset_path:path}', response_model=EvaluationDatasetDetailResponse)

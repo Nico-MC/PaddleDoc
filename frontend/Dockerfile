@@ -12,6 +12,16 @@ ENV no_proxy=${NO_PROXY}
 COPY package*.json ./
 RUN npm ci
 
+FROM deps AS development
+WORKDIR /app
+COPY --chown=node:node . .
+RUN mkdir -p /app/.next && chown node:node /app /app/.next
+
+USER node
+
+EXPOSE 3000
+CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
+
 FROM node:26-alpine AS builder
 WORKDIR /app
 ARG HTTP_PROXY

@@ -38,7 +38,7 @@ RUN tr -d '\r' < /app/entrypoint.sh > /app/entrypoint.sh.tmp && mv /app/entrypoi
 # of running as root in the one and as 1000 in the other.
 RUN groupadd --gid 1000 paddledoc \
 	&& useradd --uid 1000 --gid 1000 --home-dir /home/paddledoc --create-home paddledoc \
-	&& mkdir -p /app/backend/storage \
+	&& mkdir -p /app/backend/storage /home/paddledoc/.cache/chroma \
 	&& chown -R paddledoc:paddledoc /app /home/paddledoc
 
 USER paddledoc

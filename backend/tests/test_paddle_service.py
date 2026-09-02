@@ -136,6 +136,90 @@ def test_convert_to_markdown_falls_back_to_docx_when_paddle_missing(monkeypatch,
     assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 
+def test_convert_to_markdown_falls_back_to_docx_when_paddle_returns_no_results(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.docx'
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:body><w:p><w:r><w:t>Hello after OCR failure</w:t></w:r></w:p></w:body>'
+        '</w:document>'
+    )
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('word/document.xml', document_xml)
+
+    monkeypatch.setattr(paddle_service, '_paddleocr_available', lambda: True)
+
+    def raise_no_results(*_args, **_kwargs):
+        raise RuntimeError('PaddleOCR PP-StructureV3 produced no results')
+
+    monkeypatch.setattr(paddle_service, '_paddleocr_to_structure', raise_no_results)
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(source), profile_id='ppocrv6_tiny')
+
+    assert 'Hello after OCR failure' in markdown
+    assert details['engine'] == 'docx-fallback'
+    assert details['used_fallback'] is True
+    assert details['fallback_reason'] == 'PaddleOCR PP-StructureV3 produced no results'
+
+
+def test_no_profile_uses_native_docx_extraction(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.docx'
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:body><w:p><w:r><w:t>Hello without OCR</w:t></w:r></w:p></w:body>'
+        '</w:document>'
+    )
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('word/document.xml', document_xml)
+
+    monkeypatch.setattr(
+        paddle_service,
+        '_paddleocr_available',
+        lambda: pytest.fail('no_profile must not initialize PaddleOCR'),
+    )
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(str(source), profile_id='no_profile')
+
+    assert 'Hello without OCR' in markdown
+    assert details['engine'] == 'docx-native'
+    assert details['used_fallback'] is False
+
+
+def test_no_profile_prefers_pandoc_for_docx(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.docx'
+    source.write_bytes(b'word package')
+    monkeypatch.setattr(
+        paddle_service,
+        'pandoc_docx_to_markdown',
+        lambda _source, *, timeout_seconds: (
+            '# Generic title\n\nNative content',
+            {
+                'docx_converter': 'pandoc',
+                'paragraphs': 1,
+                'headings': 1,
+                'custom_styles': {'Body Text': 1},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        '_fallback_docx_to_markdown',
+        lambda _source: pytest.fail('the XML fallback must not run when Pandoc succeeds'),
+    )
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(
+        str(source),
+        profile_id='no_profile',
+    )
+
+    assert '# Generic title' in markdown
+    assert details['engine'] == 'pandoc-docx-native'
+    assert details['docx_converter'] == 'pandoc'
+    assert details['headings'] == 1
+    assert details['used_fallback'] is False
+
+
 def test_target_docx_preserves_native_structure():
     candidates = [
         Path(__file__).resolve().parents[2] / 'docs' / 'TypischeDokumente' / 'AZS 2512[87].docx',
@@ -246,7 +330,7 @@ def test_get_paddle_capabilities_appends_vl_entries_static_profiles_first():
     caps = paddle_service.get_paddle_capabilities(vl_connections=[connection])
     profiles = caps['profiles']
 
-    static_count = 8  # 6 ppocrv6 presets + paddlevl_1_6_0_9b + openai_vision
+    static_count = 9  # no_profile + 6 ppocrv6 presets + paddlevl_1_6_0_9b + openai_vision
     assert [p['kind'] for p in profiles[:static_count]] == ['ocr'] * static_count
     vl_entry = profiles[static_count]
     assert vl_entry == {

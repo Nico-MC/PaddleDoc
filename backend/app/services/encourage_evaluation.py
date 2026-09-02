@@ -11,6 +11,7 @@ from app.services.encourage_bridge import (
     get_pipeline_metadata,
     get_pipeline_rag,
     load_markdown_chunks,
+    prepare_encourage_runtime,
     retrieve_from_pipeline,
 )
 from app.services.encourage_mlflow import log_evaluation_run
@@ -28,11 +29,33 @@ def _evaluation_root() -> Path:
     return _repo_root() / 'docs' / 'evaluation'
 
 
-def _resolve_repo_path(relative_path: str) -> Path:
-    root = _repo_root().resolve()
-    candidate = (root / relative_path).resolve()
-    if root not in candidate.parents and candidate != root:
-        raise ValueError(f'Invalid path outside repository: {relative_path}')
+def _source_documents_root() -> Path:
+    docker_path = Path('/app/docs')
+    if docker_path.exists():
+        return docker_path
+
+    checkout_path = _repo_root().parent.parent / '.docs'
+    if checkout_path.exists():
+        return checkout_path
+
+    return _repo_root() / 'docs'
+
+
+def _dataset_public_path(path: Path) -> str:
+    return f'docs/evaluation/{path.name}'
+
+
+def _resolve_dataset_path(dataset_path: str) -> Path:
+    normalized = dataset_path.strip().replace('\\', '/').lstrip('/')
+    prefix = 'docs/evaluation/'
+    filename = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    if not filename or Path(filename).name != filename or not filename.lower().endswith('.jsonl'):
+        raise ValueError(f'Invalid evaluation dataset path: {dataset_path}')
+
+    root = _evaluation_root().resolve()
+    candidate = (root / filename).resolve()
+    if candidate.parent != root:
+        raise ValueError(f'Invalid evaluation dataset path: {dataset_path}')
     return candidate
 
 
@@ -65,10 +88,9 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
                     if str(row.get('source_document', '')).strip()
                 }
             )
-            relative_path = str(path.resolve().relative_to(_repo_root().resolve()))
             items.append(
                 {
-                    'path': relative_path,
+                    'path': _dataset_public_path(path),
                     'filename': path.name,
                     'row_count': len(rows),
                     'source_documents': source_documents,
@@ -82,7 +104,7 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
 
 
 def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
-    dataset_file = _resolve_repo_path(dataset_path)
+    dataset_file = _resolve_dataset_path(dataset_path)
     if not dataset_file.exists() or not dataset_file.is_file() or dataset_file.suffix.lower() != '.jsonl':
         raise FileNotFoundError(f'Dataset file not found: {dataset_file}')
 
@@ -96,7 +118,7 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
     )
 
     return {
-        'path': str(dataset_file.relative_to(_repo_root().resolve())),
+        'path': _dataset_public_path(dataset_file),
         'filename': dataset_file.name,
         'row_count': len(rows),
         'source_documents': source_documents,
@@ -104,6 +126,67 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
         'updated_at': datetime.fromtimestamp(dataset_file.stat().st_mtime, tz=timezone.utc),
         'rows': rows,
     }
+
+
+def list_evaluation_source_documents() -> list[dict[str, Any]]:
+    root = _source_documents_root().resolve()
+    if not root.exists():
+        return []
+
+    supported_suffixes = {'.doc', '.docx', '.docm'}
+    items: list[dict[str, Any]] = []
+    for path in sorted(root.rglob('*')):
+        if (
+            not path.is_file()
+            or path.suffix.lower() not in supported_suffixes
+            or path.name.startswith('._')
+            or '__MACOSX' in path.parts
+        ):
+            continue
+        items.append(
+            {
+                'path': str(path.relative_to(root)),
+                'filename': path.name,
+                'extension': path.suffix.lower(),
+                'size_bytes': path.stat().st_size,
+                'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+            }
+        )
+    return items
+
+
+def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    dataset_file = _resolve_dataset_path(filename)
+    if not rows:
+        raise ValueError('An evaluation dataset must contain at least one row.')
+
+    normalized_rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    required_fields = ('id', 'question', 'gold_answer', 'source_document')
+    for index, row in enumerate(rows, start=1):
+        normalized = dict(row)
+        for field in required_fields:
+            value = str(normalized.get(field, '')).strip()
+            if not value:
+                raise ValueError(f'Row {index}: {field} is required.')
+            normalized[field] = value
+
+        row_id = normalized['id']
+        if row_id in seen_ids:
+            raise ValueError(f'Row {index}: duplicate id {row_id!r}.')
+        seen_ids.add(row_id)
+
+        for field in ('evidence_anchor', 'evidence_quote', 'notes', 'source_file'):
+            if field in normalized:
+                normalized[field] = str(normalized[field]).strip()
+        normalized_rows.append(normalized)
+
+    dataset_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_file = dataset_file.with_suffix('.jsonl.tmp')
+    payload = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in normalized_rows)
+    temporary_file.write_text(payload, encoding='utf-8')
+    temporary_file.replace(dataset_file)
+    return get_evaluation_dataset_details(_dataset_public_path(dataset_file))
 
 
 def _normalize_text(text: str) -> str:
@@ -236,7 +319,12 @@ def _resolve_dataset_rows(rows: list[dict[str, Any]], *, markdown_path: str) -> 
             candidate = (root / candidate).resolve()
         else:
             candidate = candidate.resolve()
-        if candidate == selected_markdown:
+        relative_source = source_document.replace('\\', '/').lstrip('./')
+        selected_path_text = selected_markdown.as_posix()
+        if candidate == selected_markdown or (
+            not Path(source_document).is_absolute()
+            and selected_path_text.endswith(f'/{relative_source}')
+        ):
             matched_rows.append(row)
     return matched_rows
 
@@ -340,7 +428,7 @@ def run_encourage_evaluation(
             'source_md_filename': Path(markdown_path).name,
         }
 
-    dataset_file = _resolve_repo_path(dataset_path)
+    dataset_file = _resolve_dataset_path(dataset_path)
     if not dataset_file.exists() or not dataset_file.is_file() or dataset_file.suffix.lower() != '.jsonl':
         raise FileNotFoundError(f'Dataset file not found: {dataset_file}')
 
@@ -352,6 +440,8 @@ def run_encourage_evaluation(
             'No evaluation rows matched the selected markdown file. '
             'Make sure source_document in the dataset points to the same markdown.'
         )
+
+    prepare_encourage_runtime()
 
     from encourage.llm import Response, ResponseWrapper  # type: ignore[reportMissingImports]
     from encourage.metrics.classic import (  # type: ignore[reportMissingImports]

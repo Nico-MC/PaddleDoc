@@ -95,4 +95,10 @@ else
 fi
 
 echo "Starting server..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+set -- app.main:app --host 0.0.0.0 --port 8000
+case "${UVICORN_RELOAD:-false}" in
+  1|true|TRUE|yes|YES)
+    set -- "$@" --reload --reload-dir /app/app
+    ;;
+esac
+exec uvicorn "$@"

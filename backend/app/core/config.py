@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     results_dir: Path = Path('backend/storage/results')
     paddle_default_profile: str = 'ppocrv6_tiny'
     paddle_timeout_seconds: int = 300
+    # Pandoc handles native DOCX parsing in the worker. A separate, shorter
+    # timeout prevents a pathological office document from occupying the OCR
+    # worker until the much larger Celery task limit is reached.
+    pandoc_timeout_seconds: int = 120
     worker_concurrency: int = 1
 
     # Celery task hard/soft time limits. Long OCR jobs on CPU can legitimately

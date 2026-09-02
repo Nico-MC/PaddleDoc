@@ -175,6 +175,11 @@ class MarkdownFileEntry(BaseModel):
     path: str
     filename: str
     folder: str
+    job_id: str
+    original_filename: str
+    original_extension: str
+    workspace_folder: str
+    profile_id: str | None = None
     size_bytes: int
     updated_at: datetime
 
@@ -204,6 +209,23 @@ class EvaluationDatasetDetailResponse(BaseModel):
     size_bytes: int
     updated_at: datetime
     rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvaluationDatasetWriteRequest(BaseModel):
+    filename: str = Field(min_length=1)
+    rows: list[dict[str, Any]] = Field(min_length=1)
+
+
+class EvaluationSourceDocumentEntry(BaseModel):
+    path: str
+    filename: str
+    extension: str
+    size_bytes: int
+    updated_at: datetime
+
+
+class EvaluationSourceDocumentBrowserResponse(BaseModel):
+    items: list[EvaluationSourceDocumentEntry]
 
 
 class EncourageIngestRequest(BaseModel):
