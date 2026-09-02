@@ -23,6 +23,7 @@ type EvaluationDatasetEntry = {
   filename: string;
   row_count: number;
   source_documents: string[];
+  source_files: string[];
   size_bytes: number;
   updated_at: string;
 };
@@ -237,6 +238,7 @@ export default function EncouragePage() {
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
   const [selectedRagMethod, setSelectedRagMethod] = useState<string>('Base');
+  const [includeFrontmatter, setIncludeFrontmatter] = useState(false);
   const [query, setQuery] = useState(DEFAULT_STEP_TWO_QUERY);
   const [isRetrieving, setIsRetrieving] = useState(false);
   const [retrieval, setRetrieval] = useState<EncourageRetrieveResponse | null>(null);
@@ -412,6 +414,7 @@ export default function EncouragePage() {
         body: JSON.stringify({
           path: selectedPath,
           rag_method: selectedRagMethod,
+          include_frontmatter: includeFrontmatter,
         }),
       });
       if (!response.ok) {
@@ -717,6 +720,21 @@ export default function EncouragePage() {
               </div>
             </div>
 
+            <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={includeFrontmatter}
+                onChange={(event) => setIncludeFrontmatter(event.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-emerald-600"
+              />
+              <span>
+                <span className="block font-medium">Dokumentmetadaten indexieren</span>
+                <span className="mt-1 block text-xs text-slate-500">
+                  Erstellt einen separaten Chunk aus dem YAML-Frontmatter, etwa für Dateiname, Quelle und Verarbeitungszeit.
+                </span>
+              </span>
+            </label>
+
             <div className="mt-4 flex items-center gap-3">
               <Button
                 onClick={ingestSelectedFile}
@@ -760,6 +778,10 @@ export default function EncouragePage() {
                     <p>
                       <span className="font-semibold">chunk_overlap_chars:</span>{' '}
                       {formatValue(ingested.debug.config.chunk_overlap_chars)}
+                    </p>
+                    <p>
+                      <span className="font-semibold">include_frontmatter:</span>{' '}
+                      {formatValue(ingested.debug.config.include_frontmatter)}
                     </p>
                     <p>
                       <span className="font-semibold">collection_name:</span>{' '}

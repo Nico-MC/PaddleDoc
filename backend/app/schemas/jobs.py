@@ -193,6 +193,7 @@ class EvaluationDatasetEntry(BaseModel):
     filename: str
     row_count: int
     source_documents: list[str] = Field(default_factory=list)
+    source_files: list[str] = Field(default_factory=list)
     size_bytes: int
     updated_at: datetime
 
@@ -206,6 +207,7 @@ class EvaluationDatasetDetailResponse(BaseModel):
     filename: str
     row_count: int
     source_documents: list[str] = Field(default_factory=list)
+    source_files: list[str] = Field(default_factory=list)
     size_bytes: int
     updated_at: datetime
     rows: list[dict[str, Any]] = Field(default_factory=list)
@@ -234,6 +236,7 @@ class EncourageIngestRequest(BaseModel):
     model_name: str | None = None
     run_generation: bool = False
     rag_method: str = 'Base'
+    include_frontmatter: bool = False
 
 
 class EncourageRetrieveRequest(BaseModel):

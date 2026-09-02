@@ -88,12 +88,20 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
                     if str(row.get('source_document', '')).strip()
                 }
             )
+            source_files = sorted(
+                {
+                    str(row.get('source_file', '')).strip()
+                    for row in rows
+                    if str(row.get('source_file', '')).strip()
+                }
+            )
             items.append(
                 {
                     'path': _dataset_public_path(path),
                     'filename': path.name,
                     'row_count': len(rows),
                     'source_documents': source_documents,
+                    'source_files': source_files,
                     'size_bytes': path.stat().st_size,
                     'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
                 }
@@ -116,12 +124,20 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
             if str(row.get('source_document', '')).strip()
         }
     )
+    source_files = sorted(
+        {
+            str(row.get('source_file', '')).strip()
+            for row in rows
+            if str(row.get('source_file', '')).strip()
+        }
+    )
 
     return {
         'path': _dataset_public_path(dataset_file),
         'filename': dataset_file.name,
         'row_count': len(rows),
         'source_documents': source_documents,
+        'source_files': source_files,
         'size_bytes': dataset_file.stat().st_size,
         'updated_at': datetime.fromtimestamp(dataset_file.stat().st_mtime, tz=timezone.utc),
         'rows': rows,

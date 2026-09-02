@@ -9,6 +9,7 @@ type DatasetEntry = {
   filename: string;
   row_count: number;
   source_documents: string[];
+  source_files: string[];
 };
 
 type DatasetDetail = DatasetEntry & {
@@ -70,6 +71,8 @@ const textValue = (row: Record<string, unknown>, key: keyof DatasetRow) => {
   return value === null || value === undefined ? '' : String(value);
 };
 
+const sourceFilename = (path: string) => path.split('/').at(-1) || path;
+
 export function EncourageDatasetWorkbench({
   datasets,
   markdownFiles,
@@ -88,6 +91,17 @@ export function EncourageDatasetWorkbench({
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  const datasetWordSources = (dataset: DatasetEntry) => {
+    const explicitSources = dataset.source_files.map(sourceFilename);
+    if (explicitSources.length > 0) return explicitSources;
+    return dataset.source_documents
+      .map((documentPath) => markdownFiles.find(
+        (file) => documentPath === file.path || documentPath.endsWith(`/${file.path}`),
+      ))
+      .map((file) => file?.original_filename || file?.filename || '')
+      .filter(Boolean);
+  };
 
   useEffect(() => {
     const loadWordSources = async () => {
@@ -256,34 +270,28 @@ export function EncourageDatasetWorkbench({
                       : 'border-slate-200 hover:border-slate-300'
                   }`}
                 >
+                  {(() => {
+                    const originalFiles = datasetWordSources(dataset);
+                    return (
+                      <>
                   <p className="font-medium text-slate-900">{dataset.filename}</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    {dataset.row_count} Fragen · {dataset.source_documents.length} Markdown-Quelle(n)
+                    {dataset.row_count} Fragen
                   </p>
+                  <p className="mt-1 text-xs text-slate-600">
+                    Word-Original: {originalFiles.length > 0
+                      ? originalFiles.join(', ')
+                      : 'nicht zugeordnet'}
+                  </p>
+                      </>
+                    );
+                  })()}
                 </button>
               ))
             )}
           </div>
         </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Word-Quellen</h3>
-          <p className="mt-1 text-xs text-slate-500">
-            Dateien aus <code>.docs</code>. Die Evaluation verwendet zusätzlich die konvertierte Markdown-Datei.
-          </p>
-          <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
-            {wordSources.length === 0 ? (
-              <p className="text-sm text-slate-500">Keine Word-Dateien gefunden oder .docs ist nicht gemountet.</p>
-            ) : (
-              wordSources.map((source) => (
-                <div key={source.path} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                  <p className="text-sm font-medium text-slate-800">{source.filename}</p>
-                  <p className="break-all text-xs text-slate-500">{source.path}</p>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
       </div>
 
       {localError && (
@@ -394,6 +402,11 @@ export function EncourageDatasetWorkbench({
                 <div>
                   <h3 className="text-lg font-semibold text-slate-950">{details.filename}</h3>
                   <p className="mt-1 text-sm text-slate-500">{details.row_count} Fragen</p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Word-Original: {details.source_files.length > 0
+                      ? details.source_files.map(sourceFilename).join(', ')
+                      : 'nicht zugeordnet'}
+                  </p>
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={downloadDataset}>JSONL herunterladen</Button>
@@ -409,8 +422,7 @@ export function EncourageDatasetWorkbench({
                     <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{String(row.gold_answer ?? '')}</p>
                     {Boolean(row.evidence_quote) && <p className="mt-3 rounded-lg bg-white p-3 text-xs text-slate-600">{String(row.evidence_quote)}</p>}
                     <div className="mt-3 grid gap-1 text-xs text-slate-500">
-                      <p className="break-all">Markdown: {String(row.source_document ?? 'n/a')}</p>
-                      <p className="break-all">Word: {String(row.source_file ?? 'n/a')}</p>
+                      <p>Word-Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
                     </div>
                   </article>
                 ))}

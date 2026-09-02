@@ -2035,7 +2035,11 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
 
     try:
-        document = ingest_markdown_file(candidate, rag_method=payload.rag_method)
+        document = ingest_markdown_file(
+            candidate,
+            rag_method=payload.rag_method,
+            include_frontmatter=payload.include_frontmatter,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     except ValueError as exc:

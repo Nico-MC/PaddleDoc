@@ -23,6 +23,42 @@ _DEFAULT_CHUNK_MAX_CHARS = 1100
 _DEFAULT_CHUNK_OVERLAP_CHARS = 140
 _SUPPORTED_RAG_METHODS: tuple[str, ...] = ('Base', 'BM25', 'HybridBM25')
 _ATX_HEADING_RE = re.compile(r'^(#{1,6})\s+\S')
+_MARKDOWN_TABLE_DELIMITER_RE = re.compile(r'^\|(?:\s*:?-{3,}:?\s*\|)+$')
+
+
+def _table_first_cell_is_blank(line: str) -> bool:
+    cells = line.split('|')
+    return len(cells) > 2 and not cells[1].strip()
+
+
+def _split_oversized_markdown_table(block: str, *, max_chars: int) -> list[str] | None:
+    """Split a GFM table by rows while repeating its header rows."""
+
+    lines = block.splitlines()
+    if len(lines) < 3 or not _MARKDOWN_TABLE_DELIMITER_RE.fullmatch(lines[1].strip()):
+        return None
+
+    header_end = 2
+    while header_end < len(lines) and _table_first_cell_is_blank(lines[header_end]):
+        header_end += 1
+    header = lines[:header_end]
+    data_rows = lines[header_end:]
+    if not data_rows or len('\n'.join(header)) >= max_chars:
+        return None
+
+    chunks: list[str] = []
+    current_rows: list[str] = []
+    for row in data_rows:
+        candidate_rows = [*current_rows, row]
+        candidate = '\n'.join([*header, *candidate_rows])
+        if current_rows and len(candidate) > max_chars:
+            chunks.append('\n'.join([*header, *current_rows]))
+            current_rows = [row]
+        else:
+            current_rows = candidate_rows
+    if current_rows:
+        chunks.append('\n'.join([*header, *current_rows]))
+    return chunks
 
 
 def _split_oversized_markdown_block(
@@ -96,6 +132,13 @@ def _chunk_markdown_by_sections(
                 current.append(block)
                 continue
             flush_current()
+            table_parts = _split_oversized_markdown_table(block, max_chars=content_limit)
+            if table_parts is not None:
+                chunks.extend(
+                    f'{active_prefix}\n\n{part}'.strip() if active_prefix else part
+                    for part in table_parts
+                )
+                continue
             for part in _split_oversized_markdown_block(
                 block,
                 max_chars=content_limit,
@@ -228,6 +271,7 @@ def _markdown_ingestion_class() -> type:
                 chunk_documents: bool = False,
                 chunk_max_chars: int = 1200,
                 chunk_overlap_chars: int = 150,
+                include_frontmatter: bool = False,
                 encoding: str = 'utf-8',
                 **_: Any,
             ) -> None:
@@ -237,6 +281,7 @@ def _markdown_ingestion_class() -> type:
                     0,
                     min(int(chunk_overlap_chars), self.chunk_max_chars // 2),
                 )
+                self.include_frontmatter = include_frontmatter
                 self.encoding = encoding
 
             def load(self, path: str | Path) -> list[Any]:
@@ -245,7 +290,7 @@ def _markdown_ingestion_class() -> type:
                     raise FileNotFoundError(f'File not found: {file_path}')
 
                 raw = file_path.read_text(encoding=self.encoding)
-                content = self._strip_frontmatter(raw)
+                frontmatter, content = self._split_frontmatter(raw)
                 base_doc = Document(
                     id=uuid.uuid5(uuid.NAMESPACE_URL, str(file_path)),
                     content=content,
@@ -263,6 +308,8 @@ def _markdown_ingestion_class() -> type:
                     return [base_doc]
 
                 chunk_texts = self._chunk_text(content)
+                if self.include_frontmatter and frontmatter:
+                    chunk_texts.insert(0, f'# Dokumentmetadaten\n\n{frontmatter}')
                 if len(chunk_texts) <= 1:
                     return [base_doc]
 
@@ -287,13 +334,13 @@ def _markdown_ingestion_class() -> type:
                 return chunked_docs
 
             @staticmethod
-            def _strip_frontmatter(text: str) -> str:
+            def _split_frontmatter(text: str) -> tuple[str, str]:
                 if not text.startswith('---\n'):
-                    return text
+                    return '', text
                 end = text.find('\n---\n', 4)
                 if end == -1:
-                    return text
-                return text[end + 5 :].lstrip('\n')
+                    return '', text
+                return text[4:end].strip(), text[end + 5 :].lstrip('\n')
 
             def _chunk_text(self, text: str) -> list[str]:
                 return _chunk_markdown_by_sections(
@@ -423,7 +470,12 @@ def _configure_encourage_mlflow_tracing() -> None:
         return
 
 
-def ingest_markdown_file(path: Path, *, rag_method: str = 'Base') -> dict[str, Any]:
+def ingest_markdown_file(
+    path: Path,
+    *,
+    rag_method: str = 'Base',
+    include_frontmatter: bool = False,
+) -> dict[str, Any]:
     loader_cls = _markdown_ingestion_class()
     method_key = _normalize_rag_method_name(rag_method)
     rag_cls, rag_config_cls, method_label = _rag_pipeline_components(method_key)
@@ -437,6 +489,7 @@ def ingest_markdown_file(path: Path, *, rag_method: str = 'Base') -> dict[str, A
         path,
         chunk_max_chars=chunk_max_chars,
         chunk_overlap_chars=chunk_overlap_chars,
+        include_frontmatter=include_frontmatter,
     )
 
     if not documents:
@@ -465,6 +518,7 @@ def ingest_markdown_file(path: Path, *, rag_method: str = 'Base') -> dict[str, A
         'document_count': len(documents),
         'chunk_max_chars': chunk_max_chars,
         'chunk_overlap_chars': chunk_overlap_chars,
+        'include_frontmatter': include_frontmatter,
         'source_md_path': str(path),
         'source_md_filename': path.name,
     }
@@ -481,6 +535,7 @@ def ingest_markdown_file(path: Path, *, rag_method: str = 'Base') -> dict[str, A
         'batch_size_query': rag_config.batch_size_query,
         'chunk_max_chars': chunk_max_chars,
         'chunk_overlap_chars': chunk_overlap_chars,
+        'include_frontmatter': include_frontmatter,
         'rag_method': method_label,
         'rag_method_key': method_key,
         'source_md_path': str(path),
@@ -566,6 +621,7 @@ def load_markdown_chunks(
     *,
     chunk_max_chars: int | None = None,
     chunk_overlap_chars: int | None = None,
+    include_frontmatter: bool = False,
 ) -> list[Any]:
     loader_cls = _markdown_ingestion_class()
     resolved_chunk_max_chars, resolved_chunk_overlap_chars = _resolve_chunk_settings(
@@ -576,6 +632,7 @@ def load_markdown_chunks(
         chunk_documents=True,
         chunk_max_chars=resolved_chunk_max_chars,
         chunk_overlap_chars=resolved_chunk_overlap_chars,
+        include_frontmatter=include_frontmatter,
     )
     documents = loader.load(path)
     if not documents:
