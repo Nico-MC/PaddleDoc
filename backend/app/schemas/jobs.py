@@ -237,6 +237,7 @@ class EncourageIngestRequest(BaseModel):
     run_generation: bool = False
     rag_method: str = 'Base'
     include_frontmatter: bool = False
+    embedding_model: Literal['default', 'multilingual-e5-base'] = 'default'
 
 
 class EncourageRetrieveRequest(BaseModel):

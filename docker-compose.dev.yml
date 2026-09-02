@@ -99,9 +99,9 @@ services:
       # datasets next to the shared Word source documents.
       - ../encourage:/app/encourage:ro
       - ../.docs:/app/docs
-      # Chroma downloads its 79 MB ONNX embedding model on first use. Keep it
+      # Keep Chroma's ONNX model and optional Hugging Face embedding models
       # across backend recreates so later ingest runs start immediately.
-      - encourage_models:/home/paddledoc/.cache/chroma
+      - encourage_models:/home/paddledoc/.cache
     depends_on:
       - postgres
       - redis

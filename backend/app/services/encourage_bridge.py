@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, ClassVar
 
 
 _RAG_PIPELINES: dict[str, Any] = {}
@@ -22,6 +22,7 @@ _DEFAULT_TOP_K = 5
 _DEFAULT_CHUNK_MAX_CHARS = 1100
 _DEFAULT_CHUNK_OVERLAP_CHARS = 140
 _SUPPORTED_RAG_METHODS: tuple[str, ...] = ('Base', 'BM25', 'HybridBM25')
+_SUPPORTED_EMBEDDING_MODELS: tuple[str, ...] = ('default', 'multilingual-e5-base')
 _ATX_HEADING_RE = re.compile(r'^(#{1,6})\s+\S')
 _MARKDOWN_TABLE_DELIMITER_RE = re.compile(r'^\|(?:\s*:?-{3,}:?\s*\|)+$')
 
@@ -371,10 +372,61 @@ def _normalize_rag_method_name(rag_method: str | None) -> str:
 
 
 @lru_cache(maxsize=None)
-def _rag_pipeline_components(rag_method: str) -> tuple[type, type, str]:
+class _MultilingualE5EmbeddingFunction:
+    """Chroma embedding adapter for asymmetric multilingual E5 retrieval."""
+
+    model_name: ClassVar[str] = 'intfloat/multilingual-e5-base'
+
+    def __init__(self, *, device: str = 'cpu') -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                'multilingual-e5-base requires sentence-transformers in the backend runtime.'
+            ) from exc
+        self._model = SentenceTransformer(self.model_name, device=device)
+
+    def _encode(self, values: list[str], *, prefix: str) -> list[list[float]]:
+        embeddings = self._model.encode(
+            [f'{prefix}{value}' for value in values],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return embeddings.tolist()
+
+    def __call__(self, input: list[str]) -> list[list[float]]:
+        return self._encode(input, prefix='passage: ')
+
+    def embed_query(self, input: list[str]) -> list[list[float]]:
+        return self._encode(input, prefix='query: ')
+
+    @staticmethod
+    def name() -> str:
+        return 'multilingual-e5-base'
+
+    @staticmethod
+    def build_from_config(config: dict[str, Any]) -> '_MultilingualE5EmbeddingFunction':
+        return _MultilingualE5EmbeddingFunction(device=str(config.get('device', 'cpu')))
+
+    def get_config(self) -> dict[str, str]:
+        return {'device': str(getattr(self._model, 'device', 'cpu'))}
+
+
+def _normalize_embedding_model_name(embedding_model: str | None) -> str:
+    normalized = (embedding_model or 'default').strip().lower()
+    if normalized not in _SUPPORTED_EMBEDDING_MODELS:
+        supported = ', '.join(_SUPPORTED_EMBEDDING_MODELS)
+        raise ValueError(f'Unsupported embedding_model: {embedding_model!r}. Supported models: {supported}')
+    return normalized
+
+
+@lru_cache(maxsize=None)
+def _rag_pipeline_components(rag_method: str, embedding_model: str = 'default') -> tuple[type, type, str]:
     prepare_encourage_runtime()
 
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+    resolved_embedding_model = _normalize_embedding_model_name(embedding_model)
 
     method = _normalize_rag_method_name(rag_method)
     if method == 'Base':
@@ -413,6 +465,8 @@ def _rag_pipeline_components(rag_method: str) -> tuple[type, type, str]:
 
     class PaddleDocMarkdownRAG(base_cls):  # type: ignore[misc, valid-type]
         def get_embedding_model(self, name: str, device: str = 'cpu') -> Any:
+            if resolved_embedding_model == 'multilingual-e5-base':
+                return _MultilingualE5EmbeddingFunction(device=device)
             return DefaultEmbeddingFunction()
 
     return PaddleDocMarkdownRAG, config_cls, method_label
@@ -475,10 +529,15 @@ def ingest_markdown_file(
     *,
     rag_method: str = 'Base',
     include_frontmatter: bool = False,
+    embedding_model: str = 'default',
 ) -> dict[str, Any]:
     loader_cls = _markdown_ingestion_class()
     method_key = _normalize_rag_method_name(rag_method)
-    rag_cls, rag_config_cls, method_label = _rag_pipeline_components(method_key)
+    resolved_embedding_model = _normalize_embedding_model_name(embedding_model)
+    rag_cls, rag_config_cls, method_label = _rag_pipeline_components(
+        method_key,
+        resolved_embedding_model,
+    )
     source_loader = loader_cls()
     source_documents = source_loader.load(path)
     if not source_documents:
@@ -519,6 +578,7 @@ def ingest_markdown_file(
         'chunk_max_chars': chunk_max_chars,
         'chunk_overlap_chars': chunk_overlap_chars,
         'include_frontmatter': include_frontmatter,
+        'embedding_model': resolved_embedding_model,
         'source_md_path': str(path),
         'source_md_filename': path.name,
     }
@@ -536,6 +596,7 @@ def ingest_markdown_file(
         'chunk_max_chars': chunk_max_chars,
         'chunk_overlap_chars': chunk_overlap_chars,
         'include_frontmatter': include_frontmatter,
+        'embedding_model': resolved_embedding_model,
         'rag_method': method_label,
         'rag_method_key': method_key,
         'source_md_path': str(path),

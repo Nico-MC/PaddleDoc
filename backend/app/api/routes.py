@@ -2039,6 +2039,7 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
             candidate,
             rag_method=payload.rag_method,
             include_frontmatter=payload.include_frontmatter,
+            embedding_model=payload.embedding_model,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc

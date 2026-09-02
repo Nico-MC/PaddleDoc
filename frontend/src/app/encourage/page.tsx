@@ -238,6 +238,7 @@ export default function EncouragePage() {
   const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
   const [selectedRagMethod, setSelectedRagMethod] = useState<string>('Base');
+  const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState<'default' | 'multilingual-e5-base'>('default');
   const [includeFrontmatter, setIncludeFrontmatter] = useState(false);
   const [query, setQuery] = useState(DEFAULT_STEP_TWO_QUERY);
   const [isRetrieving, setIsRetrieving] = useState(false);
@@ -415,6 +416,7 @@ export default function EncouragePage() {
           path: selectedPath,
           rag_method: selectedRagMethod,
           include_frontmatter: includeFrontmatter,
+          embedding_model: selectedEmbeddingModel,
         }),
       });
       if (!response.ok) {
@@ -720,6 +722,18 @@ export default function EncouragePage() {
               </div>
             </div>
 
+            <label className="mt-4 block text-sm font-medium text-slate-700">
+              Embedding-Modell
+              <select
+                value={selectedEmbeddingModel}
+                onChange={(event) => setSelectedEmbeddingModel(event.target.value as 'default' | 'multilingual-e5-base')}
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              >
+                <option value="default">Chroma Default: ONNXMiniLM_L6_V2</option>
+                <option value="multilingual-e5-base">Multilingual E5 Base: Deutsch und Retrieval</option>
+              </select>
+            </label>
+
             <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">
               <input
                 type="checkbox"
@@ -782,6 +796,10 @@ export default function EncouragePage() {
                     <p>
                       <span className="font-semibold">include_frontmatter:</span>{' '}
                       {formatValue(ingested.debug.config.include_frontmatter)}
+                    </p>
+                    <p>
+                      <span className="font-semibold">embedding_model:</span>{' '}
+                      {formatValue(ingested.debug.config.embedding_model)}
                     </p>
                     <p>
                       <span className="font-semibold">collection_name:</span>{' '}
@@ -1263,12 +1281,14 @@ export default function EncouragePage() {
                         typeof ingested?.debug.config.chunk_overlap_chars === 'number'
                           ? ingested.debug.config.chunk_overlap_chars
                           : null;
+                      const embeddingModel = ingested?.debug.config.embedding_model ?? null;
 
                       const ingestionIndexingMetrics: Array<[string, unknown]> = [
                         ['chunk_count', ingested?.pipeline.document_count ?? null],
                         ['document_count', ingested?.pipeline.document_count ?? null],
                         ['chunk_max_chars', chunkMaxChars],
                         ['chunk_overlap_chars', chunkOverlapChars],
+                        ['embedding_model', embeddingModel],
                         ['collection_name', evaluation.collection_name],
                         ['rag_method', ingested?.pipeline.rag_method ?? null],
                         ['source_md_filename', ingested?.source_markdown.filename ?? null],
@@ -1285,6 +1305,7 @@ export default function EncouragePage() {
                         ['query', resolvedQuery],
                         ['question_count', evaluation.question_count],
                         ['evaluation_mode', evaluation.evaluation_mode],
+                        ['embedding_model', embeddingModel],
                         ['recall_k', evaluation.recall_k],
                         ['context_length_source', evaluation.context_length_metric_source],
                       ];
