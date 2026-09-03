@@ -1,4 +1,14 @@
-from app.services.encourage_bridge import _chunk_markdown_by_sections
+from app.services.encourage_bridge import _chunk_markdown_by_sections, _read_frontmatter_text
+
+
+def test_read_frontmatter_text_returns_raw_yaml(tmp_path):
+    markdown = tmp_path / 'document.md'
+    markdown.write_text(
+        '---\ntitle: Tarif AZS\ntags:\n  - test\n---\n\n# Inhalt\n',
+        encoding='utf-8',
+    )
+
+    assert _read_frontmatter_text(markdown) == 'title: Tarif AZS\ntags:\n  - test'
 
 
 def test_chunking_keeps_heading_path_with_section_content():

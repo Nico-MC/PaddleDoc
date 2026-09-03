@@ -1081,7 +1081,7 @@ export default function EncouragePage() {
                     <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                       <p className="font-medium">⚠ No evaluation datasets found</p>
                       <p className="mt-1 text-xs">Expected location: <code className="bg-amber-100 px-2 py-1 rounded">docs/evaluation/*.jsonl</code></p>
-                      <p className="mt-1 text-xs">Check if <code className="bg-amber-100 px-2 py-1 rounded">retrieval_dataset_template.jsonl</code> exists in the docs/evaluation folder.</p>
+                      <p className="mt-1 text-xs">Add at least one descriptively named <code className="bg-amber-100 px-2 py-1 rounded">*.jsonl</code> dataset to the docs/evaluation folder.</p>
                     </div>
                   ) : (
                     <div className="mt-2 grid gap-2">

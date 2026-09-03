@@ -93,6 +93,18 @@ def _split_oversized_markdown_block(
     return parts
 
 
+def _read_frontmatter_text(path: Path, *, encoding: str = 'utf-8') -> str:
+    """Return raw YAML frontmatter without depending on a loader API version."""
+
+    raw = path.read_text(encoding=encoding)
+    if not raw.startswith('---\n'):
+        return ''
+    end = raw.find('\n---\n', 4)
+    if end == -1:
+        return ''
+    return raw[4:end].strip()
+
+
 def _chunk_markdown_by_sections(
     text: str,
     *,
@@ -689,13 +701,62 @@ def load_markdown_chunks(
         chunk_max_chars=chunk_max_chars,
         chunk_overlap_chars=chunk_overlap_chars,
     )
-    loader = loader_cls(
-        chunk_documents=True,
-        chunk_max_chars=resolved_chunk_max_chars,
-        chunk_overlap_chars=resolved_chunk_overlap_chars,
-        include_frontmatter=include_frontmatter,
-    )
-    documents = loader.load(path)
+    # Encourage's MarkdownIngestion API has evolved independently from
+    # PaddleDoc: older variants accepted ``include_frontmatter`` while newer
+    # ones expose ``keep_frontmatter_in_content`` and use a different chunker.
+    # Load only the source document here and keep PaddleDoc's retrieval
+    # chunking stable across Encourage versions. This is important for both
+    # reproducible evaluations and the heading/table context guarantees above.
+    source_documents = loader_cls(chunk_documents=False).load(path)
+    if not source_documents:
+        raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
+
+    prepare_encourage_runtime()
+    from encourage.prompts.context import Document  # type: ignore[reportMissingImports]
+    from encourage.prompts.meta_data import MetaData  # type: ignore[reportMissingImports]
+
+    documents: list[Any] = []
+    for source_document in source_documents:
+        chunk_texts = _chunk_markdown_by_sections(
+            str(source_document.content),
+            max_chars=resolved_chunk_max_chars,
+            overlap_chars=resolved_chunk_overlap_chars,
+        )
+        if include_frontmatter:
+            source_path = Path(
+                str(source_document.meta_data['filepath'] or path)
+            ).expanduser()
+            frontmatter = _read_frontmatter_text(source_path)
+            if frontmatter:
+                chunk_texts.insert(0, f'# Dokumentmetadaten\n\n{frontmatter}')
+
+        if len(chunk_texts) == 1 and not include_frontmatter:
+            documents.append(source_document)
+            continue
+
+        base_tags = dict(source_document.meta_data.to_dict(truncated=False))
+        for chunk_index, chunk_text in enumerate(chunk_texts):
+            tags = dict(base_tags)
+            tags.update(
+                {
+                    'source_document_id': str(source_document.id),
+                    'chunk_index': chunk_index,
+                    'chunk_count': len(chunk_texts),
+                }
+            )
+            documents.append(
+                Document(
+                    id=uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f'{source_document.id}::chunk::{chunk_index}',
+                    ),
+                    content=chunk_text,
+                    score=source_document.score,
+                    distance=source_document.distance,
+                    meta_data=MetaData(tags=tags),
+                )
+            )
+
     if not documents:
         raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
     return documents
