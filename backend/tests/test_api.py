@@ -696,6 +696,65 @@ def test_markdown_browser_ignores_orphan_disk_files(tmp_path):
     assert file_resp.status_code == 404
 
 
+def test_dataset_ai_assist_uses_visible_markdown_from_database(tmp_path, monkeypatch):
+    from app.api import routes
+
+    db = TestingSessionLocal()
+    db.query(Job).filter(Job.id == 'dataset-ai-job').delete(synchronize_session=False)
+    db.add(
+        Job(
+            id='dataset-ai-job',
+            original_filename='tarif.docx',
+            upload_path=str(tmp_path / 'tarif.docx'),
+            upload_content=b'docx',
+            upload_mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            upload_size_bytes=4,
+            status=JobStatus.FINISHED,
+            result_markdown='# Erstattung\n\nDie Erstattung beträgt 42 Euro.',
+        )
+    )
+    db.commit()
+    db.close()
+
+    captured = {}
+
+    def fake_prepare_dataset_answer(**kwargs):
+        captured.update(kwargs)
+        return {
+            'question': kwargs['question'],
+            'answerable': True,
+            'gold_answer': 'Die Erstattung beträgt 42 Euro.',
+            'evidence_quote': 'Die Erstattung beträgt 42 Euro.',
+            'evidence_anchor': 'Erstattung',
+            'model_name': 'test-model',
+            'search_mode': 'full_document',
+            'review_note': 'Bitte prüfen.',
+        }
+
+    monkeypatch.setattr(routes, 'prepare_dataset_answer', fake_prepare_dataset_answer)
+
+    response = client.post(
+        '/api/v1/evaluation-datasets/ai-assist',
+        json={
+            'markdown_path': 'inbox/dataset-ai-job/dataset-ai-job.md',
+            'question': 'Wie hoch ist die Erstattung?',
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['gold_answer'] == 'Die Erstattung beträgt 42 Euro.'
+    assert captured['markdown'] == '# Erstattung\n\nDie Erstattung beträgt 42 Euro.'
+
+    missing = client.post(
+        '/api/v1/evaluation-datasets/ai-assist',
+        json={
+            'markdown_path': 'inbox/other/dataset-ai-job.md',
+            'question': 'Wie hoch ist die Erstattung?',
+        },
+    )
+    assert missing.status_code == 404
+
+
 def test_search_filters_by_name_and_tag(tmp_path):
     db = TestingSessionLocal()
     job_one = Job(

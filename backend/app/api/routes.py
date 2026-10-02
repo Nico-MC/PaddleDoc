@@ -45,6 +45,8 @@ from app.schemas.jobs import (
     EncourageRagRunResponse,
     EncourageRetrieveRequest,
     EncourageRetrieveResponse,
+    EvaluationDatasetAiAssistRequest,
+    EvaluationDatasetAiAssistResponse,
     EvaluationDatasetBrowserResponse,
     EvaluationDatasetDetailResponse,
     EvaluationDatasetWriteRequest,
@@ -87,6 +89,7 @@ from app.services.encourage_evaluation import (
     run_encourage_evaluation,
     save_evaluation_dataset,
 )
+from app.services.dataset_assistant import prepare_dataset_answer
 from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     effective_pipeline_profile_id,
@@ -1993,8 +1996,12 @@ def get_markdown_file(
 
 
 @router.get('/evaluation-datasets', response_model=EvaluationDatasetBrowserResponse)
-def list_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse:
-    return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets())
+def list_evaluation_dataset_files(
+    markdown_path: str | None = Query(default=None, max_length=4096),
+) -> EvaluationDatasetBrowserResponse:
+    return EvaluationDatasetBrowserResponse(
+        items=list_evaluation_datasets(markdown_path=markdown_path),
+    )
 
 
 @router.post('/evaluation-datasets', response_model=EvaluationDatasetDetailResponse)
@@ -2008,6 +2015,44 @@ def upsert_evaluation_dataset(payload: EvaluationDatasetWriteRequest) -> Evaluat
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f'Failed to save evaluation dataset: {exc}',
         ) from exc
+
+
+@router.post('/evaluation-datasets/ai-assist', response_model=EvaluationDatasetAiAssistResponse)
+def assist_evaluation_dataset_question(
+    payload: EvaluationDatasetAiAssistRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> EvaluationDatasetAiAssistResponse:
+    enforce_rate_limit(request)
+
+    if not payload.markdown_path.lower().endswith('.md'):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+    job_id = Path(payload.markdown_path).stem
+    job = db.get(Job, job_id, options=[defer(Job.upload_content)])
+    if (
+        job is None
+        or job.status != JobStatus.FINISHED
+        or job.result_markdown is None
+        or _synthetic_markdown_path(job) != payload.markdown_path
+        or not _owner_visible(db, job.owner_id, user)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+
+    try:
+        result = prepare_dataset_answer(
+            markdown=job.result_markdown,
+            question=payload.question,
+            api_base_url=settings.openai_api_base_url,
+            api_key=settings.openai_api_bearer_token,
+            model_name=payload.model_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return EvaluationDatasetAiAssistResponse(**result)
 
 
 @router.get('/evaluation-source-documents', response_model=EvaluationSourceDocumentBrowserResponse)

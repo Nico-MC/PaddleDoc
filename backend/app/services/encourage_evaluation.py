@@ -69,7 +69,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def list_evaluation_datasets() -> list[dict[str, Any]]:
+def list_evaluation_datasets(*, markdown_path: str | None = None) -> list[dict[str, Any]]:
     root = _evaluation_root().resolve()
     if not root.exists():
         root.mkdir(parents=True, exist_ok=True)
@@ -81,6 +81,13 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
     for path in sorted(files):
         try:
             rows = _load_jsonl(path)
+            matching_rows = (
+                _resolve_dataset_rows(rows, markdown_path=markdown_path)
+                if markdown_path
+                else rows
+            )
+            if markdown_path and not matching_rows:
+                continue
             source_documents = sorted(
                 {
                     str(row.get('source_document', '')).strip()
@@ -100,6 +107,7 @@ def list_evaluation_datasets() -> list[dict[str, Any]]:
                     'path': _dataset_public_path(path),
                     'filename': path.name,
                     'row_count': len(rows),
+                    'matching_row_count': len(matching_rows),
                     'source_documents': source_documents,
                     'source_files': source_files,
                     'size_bytes': path.stat().st_size,
@@ -178,7 +186,7 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
 
     normalized_rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    required_fields = ('id', 'question', 'gold_answer', 'source_document')
+    required_fields = ('id', 'question', 'gold_answer', 'evidence_quote', 'source_document')
     for index, row in enumerate(rows, start=1):
         normalized = dict(row)
         for field in required_fields:
@@ -196,6 +204,23 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
             if field in normalized:
                 normalized[field] = str(normalized[field]).strip()
         normalized_rows.append(normalized)
+
+    source_documents = {row['source_document'] for row in normalized_rows}
+    if len(source_documents) != 1:
+        raise ValueError(
+            'An evaluation dataset must reference exactly one source_document. '
+            'Create a separate dataset for each indexed markdown file.'
+        )
+
+    source_files = {
+        str(row.get('source_file', '')).strip()
+        for row in normalized_rows
+        if str(row.get('source_file', '')).strip()
+    }
+    if len(source_files) > 1:
+        raise ValueError(
+            'An evaluation dataset must not reference multiple source_file values.'
+        )
 
     dataset_file.parent.mkdir(parents=True, exist_ok=True)
     temporary_file = dataset_file.with_suffix('.jsonl.tmp')

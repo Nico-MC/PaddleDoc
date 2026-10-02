@@ -34,6 +34,30 @@ def test_save_list_and_load_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert loaded['rows'][0]['question'] == 'Wie hoch ist die Erstattung?'
 
 
+def test_list_datasets_filters_for_selected_markdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation_root = tmp_path / 'evaluation'
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: evaluation_root)
+
+    encourage_evaluation.save_evaluation_dataset(
+        'job-1.jsonl',
+        [_row(source_document='backend/storage/results/word/job-1/job-1.md')],
+    )
+    encourage_evaluation.save_evaluation_dataset(
+        'job-2.jsonl',
+        [_row(id='q-002', source_document='backend/storage/results/word/job-2/job-2.md')],
+    )
+
+    items = encourage_evaluation.list_evaluation_datasets(
+        markdown_path='/app/backend/storage/results/word/job-1/job-1.md',
+    )
+
+    assert [item['filename'] for item in items] == ['job-1.jsonl']
+    assert items[0]['matching_row_count'] == 1
+
+
 @pytest.mark.parametrize('filename', ['../escape.jsonl', 'nested/data.jsonl', 'not-json.txt'])
 def test_save_rejects_invalid_dataset_paths(
     filename: str,
@@ -57,6 +81,28 @@ def test_save_validates_required_fields_and_unique_ids(
 
     with pytest.raises(ValueError, match='duplicate id'):
         encourage_evaluation.save_evaluation_dataset('duplicate.jsonl', [_row(), _row()])
+
+    with pytest.raises(ValueError, match='evidence_quote is required'):
+        encourage_evaluation.save_evaluation_dataset(
+            'missing-evidence.jsonl',
+            [_row(evidence_quote='')],
+        )
+
+
+def test_save_requires_one_markdown_source_per_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+
+    with pytest.raises(ValueError, match='exactly one source_document'):
+        encourage_evaluation.save_evaluation_dataset(
+            'mixed-sources.jsonl',
+            [
+                _row(id='q-001', source_document='word/job-1/job-1.md'),
+                _row(id='q-002', source_document='word/job-2/job-2.md'),
+            ],
+        )
 
 
 def test_lists_only_real_word_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

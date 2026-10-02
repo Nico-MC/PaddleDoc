@@ -22,6 +22,7 @@ type EvaluationDatasetEntry = {
   path: string;
   filename: string;
   row_count: number;
+  matching_row_count?: number | null;
   source_documents: string[];
   source_files: string[];
   size_bytes: number;
@@ -230,15 +231,17 @@ export default function EncouragePage() {
   const [activeBenchmarkTab, setActiveBenchmarkTab] = useState<BenchmarkTab>('datasets');
   const [items, setItems] = useState<MarkdownFileEntry[]>([]);
   const [datasets, setDatasets] = useState<EvaluationDatasetEntry[]>([]);
+  const [evaluationDatasets, setEvaluationDatasets] = useState<EvaluationDatasetEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>('');
   const [selectedDatasetPath, setSelectedDatasetPath] = useState<string>('');
+  const [selectedEvaluationDatasetPath, setSelectedEvaluationDatasetPath] = useState<string>('');
   const [ingested, setIngested] = useState<EncourageIngestResponse | null>(null);
   const [ingestedSource, setIngestedSource] = useState<MarkdownFileEntry | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingDatasets, setIsLoadingDatasets] = useState(true);
+  const [isLoadingEvaluationDatasets, setIsLoadingEvaluationDatasets] = useState(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [selectedRagMethod, setSelectedRagMethod] = useState<string>('Base');
-  const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState<'default' | 'multilingual-e5-base'>('default');
+  const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState<'default' | 'multilingual-e5-base'>('multilingual-e5-base');
   const [includeFrontmatter, setIncludeFrontmatter] = useState(false);
   const [query, setQuery] = useState(DEFAULT_STEP_TWO_QUERY);
   const [isRetrieving, setIsRetrieving] = useState(false);
@@ -258,7 +261,6 @@ export default function EncouragePage() {
   const selectedItem = items.find((item) => item.path === selectedPath) ?? null;
 
   const loadDatasets = useCallback(async (preferredPath?: string) => {
-    setIsLoadingDatasets(true);
     try {
       const response = await apiFetch('/api/v1/evaluation-datasets', { cache: 'no-store' });
       if (!response.ok) {
@@ -279,8 +281,41 @@ export default function EncouragePage() {
       });
     } catch {
       setError('Failed to reach the backend while loading evaluation datasets.');
+    }
+  }, []);
+
+  const loadEvaluationDatasets = useCallback(async (
+    markdownPath: string,
+    preferredPath?: string,
+  ) => {
+    setIsLoadingEvaluationDatasets(true);
+    setEvaluationDatasets([]);
+    setSelectedEvaluationDatasetPath('');
+    try {
+      const query = new URLSearchParams({ markdown_path: markdownPath });
+      const response = await apiFetch(`/api/v1/evaluation-datasets?${query.toString()}`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        setError('Passende Evaluationsdatensets konnten nicht geladen werden.');
+        return;
+      }
+      const payload = await response.json();
+      const nextDatasets = (payload.items ?? []) as EvaluationDatasetEntry[];
+      setEvaluationDatasets(nextDatasets);
+      setSelectedEvaluationDatasetPath((current) => {
+        if (preferredPath && nextDatasets.some((dataset) => dataset.path === preferredPath)) {
+          return preferredPath;
+        }
+        if (nextDatasets.some((dataset) => dataset.path === current)) {
+          return current;
+        }
+        return nextDatasets[0]?.path ?? '';
+      });
+    } catch {
+      setError('Das Backend ist beim Laden passender Evaluationsdatensets nicht erreichbar.');
     } finally {
-      setIsLoadingDatasets(false);
+      setIsLoadingEvaluationDatasets(false);
     }
   }, []);
 
@@ -371,7 +406,17 @@ export default function EncouragePage() {
   }, [loadDatasets]);
 
   useEffect(() => {
-    if (!showDatasetDetails || !selectedDatasetPath) {
+    if (!ingested?.source_markdown.path) {
+      setEvaluationDatasets([]);
+      setSelectedEvaluationDatasetPath('');
+      return;
+    }
+    void loadEvaluationDatasets(ingested.source_markdown.path);
+  }, [ingested?.source_markdown.path, loadEvaluationDatasets]);
+
+  useEffect(() => {
+    if (!showDatasetDetails || !selectedEvaluationDatasetPath) {
+      setSelectedDatasetDetails(null);
       return;
     }
 
@@ -380,7 +425,7 @@ export default function EncouragePage() {
       setError(null);
       try {
         const response = await apiFetch(
-          `/api/v1/evaluation-datasets/${encodeURI(selectedDatasetPath)}`,
+          `/api/v1/evaluation-datasets/${encodeURI(selectedEvaluationDatasetPath)}`,
           { cache: 'no-store' },
         );
         if (!response.ok) {
@@ -399,7 +444,14 @@ export default function EncouragePage() {
     };
 
     void loadDatasetDetails();
-  }, [selectedDatasetPath, showDatasetDetails]);
+  }, [selectedEvaluationDatasetPath, showDatasetDetails]);
+
+  const handleDatasetSaved = async (preferredPath: string) => {
+    await loadDatasets(preferredPath);
+    if (ingested?.source_markdown.path) {
+      await loadEvaluationDatasets(ingested.source_markdown.path, preferredPath);
+    }
+  };
 
   const ingestSelectedFile = async () => {
     if (!selectedPath) {
@@ -501,7 +553,7 @@ export default function EncouragePage() {
   };
 
   const runEvaluation = async () => {
-    if (!ingested?.pipeline.pipeline_id || !selectedDatasetPath) {
+    if (!ingested?.pipeline.pipeline_id || !selectedEvaluationDatasetPath) {
       return;
     }
     const chunkMaxChars =
@@ -520,7 +572,7 @@ export default function EncouragePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pipeline_id: ingested.pipeline.pipeline_id,
-          dataset_path: selectedDatasetPath,
+          dataset_path: selectedEvaluationDatasetPath,
           recall_k: 3,
           evaluation_mode: selectedEvaluationMode,
           collection_name: ingested.pipeline.collection_name,
@@ -1056,9 +1108,10 @@ export default function EncouragePage() {
               <EncourageDatasetWorkbench
                 datasets={datasets}
                 markdownFiles={items}
+                preferredMarkdownPath={selectedPath}
                 selectedDatasetPath={selectedDatasetPath}
                 onSelectDataset={setSelectedDatasetPath}
-                onDatasetSaved={loadDatasets}
+                onDatasetSaved={handleDatasetSaved}
               />
             ) : ingested ? (
               <div className="space-y-3">
@@ -1066,7 +1119,12 @@ export default function EncouragePage() {
                 <>
                 <div>
                   <div className="flex items-center justify-between gap-3">
-                    <label className="text-sm font-medium text-slate-700">Select Dataset</label>
+                    <div>
+                      <label className="text-sm font-medium text-slate-700">Passendes Dataset</label>
+                      <p className="mt-0.5 text-xs text-slate-500">
+                        Nur Datensets für {ingested.source_markdown.filename}
+                      </p>
+                    </div>
                     <button
                       type="button"
                       onClick={toggleDatasetDetails}
@@ -1075,34 +1133,37 @@ export default function EncouragePage() {
                       {showDatasetDetails ? 'Hide dataset' : 'Show dataset'}
                     </button>
                   </div>
-                  {isLoadingDatasets ? (
-                    <p className="mt-2 text-sm text-slate-500">Loading datasets...</p>
-                  ) : datasets.length === 0 ? (
+                  {isLoadingEvaluationDatasets ? (
+                    <p className="mt-2 text-sm text-slate-500">Passende Datensets werden geladen...</p>
+                  ) : evaluationDatasets.length === 0 ? (
                     <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                      <p className="font-medium">⚠ No evaluation datasets found</p>
-                      <p className="mt-1 text-xs">Expected location: <code className="bg-amber-100 px-2 py-1 rounded">docs/evaluation/*.jsonl</code></p>
-                      <p className="mt-1 text-xs">Add at least one descriptively named <code className="bg-amber-100 px-2 py-1 rounded">*.jsonl</code> dataset to the docs/evaluation folder.</p>
+                      <p className="font-medium">Für dieses Markdown gibt es noch kein Dataset.</p>
+                      <p className="mt-1 text-xs">
+                        Lege es unter „Data Sets“ an und ordne die Fragen dieser Markdown-Datei zu.
+                      </p>
                     </div>
                   ) : (
                     <div className="mt-2 grid gap-2">
-                      {datasets.map((item) => (
+                      {evaluationDatasets.map((item) => (
                         <button
                           key={item.path}
-                          onClick={() => setSelectedDatasetPath(item.path)}
+                          onClick={() => setSelectedEvaluationDatasetPath(item.path)}
                           className={`rounded-lg border-2 p-3 text-left transition ${
-                            selectedDatasetPath === item.path
+                            selectedEvaluationDatasetPath === item.path
                               ? 'border-purple-500 bg-purple-50 text-purple-900'
                               : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
                           }`}
                         >
                           <p className="font-medium">{item.filename}</p>
-                          <p className="text-xs text-slate-500">{item.row_count} questions</p>
+                          <p className="text-xs text-slate-500">
+                            {item.matching_row_count ?? item.row_count} passende Fragen
+                          </p>
                         </button>
                       ))}
                     </div>
                   )}
 
-                  {showDatasetDetails && selectedDatasetPath && (
+                  {showDatasetDetails && selectedEvaluationDatasetPath && (
                     <div className="mt-3 rounded-2xl border border-purple-200 bg-white p-4 shadow-sm">
                       <div className="flex items-start justify-between gap-3">
                         <div>
@@ -1179,7 +1240,7 @@ export default function EncouragePage() {
 
                 <Button
                   onClick={runEvaluation}
-                  disabled={isEvaluating || !selectedDatasetPath}
+                  disabled={isEvaluating || !selectedEvaluationDatasetPath}
                   className="w-full bg-purple-600 hover:bg-purple-700"
                 >
                   {isEvaluating ? 'Evaluating...' : 'Run Evaluation'}

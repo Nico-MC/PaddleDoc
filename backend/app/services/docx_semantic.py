@@ -340,7 +340,20 @@ class _DocxParser:
                         start=self._safe_int(self._attribute(start_override, 'val'), default=definition.start)
                         or definition.start,
                     )
-                self.numbering[(num_id, level)] = definition
+                # _parse_numbering_level() parses an abstract/inline level and
+                # therefore cannot know the concrete <w:numId> that owns an
+                # inline override. Rebind it here even when no startOverride
+                # is present. Otherwise these definitions are stored under
+                # the correct dictionary key but carry num_id='', so later
+                # semantic lookups miss Word's real format (notably bullet
+                # overrides) and fall back to decimal numbering.
+                self.numbering[(num_id, level)] = DocxNumberingDefinition(
+                    num_id=num_id,
+                    level=definition.level,
+                    number_format=definition.number_format,
+                    level_text=definition.level_text,
+                    start=definition.start,
+                )
 
     def _parse_numbering_level(
         self,

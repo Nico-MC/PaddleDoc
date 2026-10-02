@@ -134,6 +134,41 @@ def test_semantic_parser_uses_numbering_xml_without_inventing_labels(tmp_path):
     assert render_docx_markdown(parse_docx_semantic(source)) == markdown
 
 
+def test_semantic_parser_keeps_format_from_inline_numbering_override(tmp_path):
+    numbering = (
+        '<w:abstractNum w:abstractNumId="11"/>'
+        '<w:num w:numId="25">'
+        '<w:abstractNumId w:val="11"/>'
+        '<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0">'
+        '<w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="–"/>'
+        '</w:lvl></w:lvlOverride>'
+        '</w:num>'
+    )
+    body = (
+        '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="25"/>'
+        '</w:numPr></w:pPr><w:r><w:t>First bullet</w:t></w:r></w:p>'
+        '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="25"/>'
+        '</w:numPr></w:pPr><w:r><w:t>Second bullet</w:t></w:r></w:p>'
+    )
+    source = _write_docx(
+        tmp_path / 'inline-override.docx',
+        numbering=numbering,
+        body=body,
+    )
+
+    document = parse_docx_semantic(source)
+    definitions = {
+        (definition.num_id, definition.level): definition
+        for definition in document.numbering
+    }
+    hints = build_docx_structure_hints(document)
+
+    assert definitions[('25', 0)].number_format == 'bullet'
+    assert [hint.number_format for hint in hints] == ['bullet', 'bullet']
+    assert [hint.numbering_label for hint in hints] == ['-', '-']
+    assert render_docx_markdown(document) == '- First bullet\n- Second bullet'
+
+
 def test_structure_hints_distinguish_hidden_numbers_sections_and_real_lists(tmp_path):
     numbering = (
         '<w:abstractNum w:abstractNumId="1">'

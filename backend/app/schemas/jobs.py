@@ -192,6 +192,7 @@ class EvaluationDatasetEntry(BaseModel):
     path: str
     filename: str
     row_count: int
+    matching_row_count: int | None = None
     source_documents: list[str] = Field(default_factory=list)
     source_files: list[str] = Field(default_factory=list)
     size_bytes: int
@@ -216,6 +217,23 @@ class EvaluationDatasetDetailResponse(BaseModel):
 class EvaluationDatasetWriteRequest(BaseModel):
     filename: str = Field(min_length=1)
     rows: list[dict[str, Any]] = Field(min_length=1)
+
+
+class EvaluationDatasetAiAssistRequest(BaseModel):
+    markdown_path: str = Field(min_length=1, max_length=4096)
+    question: str = Field(min_length=1, max_length=2000)
+    model_name: str | None = Field(default=None, max_length=255)
+
+
+class EvaluationDatasetAiAssistResponse(BaseModel):
+    question: str
+    answerable: bool
+    gold_answer: str
+    evidence_quote: str
+    evidence_anchor: str
+    model_name: str
+    search_mode: Literal['full_document', 'exhaustive_passage_search']
+    review_note: str
 
 
 class EvaluationSourceDocumentEntry(BaseModel):

@@ -14,14 +14,21 @@ import type { NextRequest } from 'next/server';
  */
 
 // Next injects inline <style> and bootstrap <script> blocks, so 'unsafe-inline'
-// cannot be dropped without moving the whole app to nonces. The rest of the
-// policy still does real work: no foreign origins, no framing, no <base>
+// cannot be dropped without moving the whole app to nonces. React's development
+// runtime also uses eval() for debugging and reconstructed call stacks. Permit
+// that only for `next dev`; production keeps the stricter policy. The rest of
+// the policy still does real work: no foreign origins, no framing, no <base>
 // rewriting, and form posts only back to us.
 function contentSecurityPolicy(apiOrigin: string | null): string {
   const connect = ["'self'", apiOrigin].filter(Boolean).join(' ');
+  const script = [
+    "'self'",
+    "'unsafe-inline'",
+    ...(process.env.NODE_ENV === 'development' ? ["'unsafe-eval'"] : []),
+  ].join(' ');
   return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    `script-src ${script}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
