@@ -1,0 +1,2 @@
+# One public URL per line, e.g. URLs from a search API or manual research.
+# External page URLs are not fetched unless their host is in approved-hosts.txt.

@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.part
+/originale/
+/catalog.json
+/catalog-vor-nachdownload.json
+/sitemap-urls.json
+/summary.json
+/dateiliste.csv
+/dokumentkatalog.csv
+/seitenkatalog.csv
+/externe-kandidaten.csv
+/externe-seitenkandidaten.csv
+/ERGEBNIS.md
+/robots-*.txt

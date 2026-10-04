@@ -1,0 +1,2 @@
+# One verified and approved external domain per line.
+# The crawler checks that host's robots.txt before scanning it.
