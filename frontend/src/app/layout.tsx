@@ -40,7 +40,8 @@ export default function RootLayout({
         */}
         <Script src="/runtime-env.js" strategy="beforeInteractive" />
       </head>
-      <body className="min-h-full flex flex-col">
+      {/* Browser extensions may inject body attributes (e.g. cz-shortcut-listen) before hydration. */}
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <AppChrome>{children}</AppChrome>
       </body>
     </html>
