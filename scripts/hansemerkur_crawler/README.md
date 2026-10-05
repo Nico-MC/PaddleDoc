@@ -52,7 +52,7 @@ python3 scripts/hansemerkur_crawler/download_remaining.py
 python3 scripts/hansemerkur_crawler/report.py
 ```
 
-Adjust limits with `--max-pages` and `--max-bytes`. Add `--max-seconds 600` for an optional 10-minute cap.
+By default there is no per-response size limit. The UI's optional size override is off; turn it on to set a cap. The CLI equivalent is `--max-bytes N` (`0` means unlimited). Adjust crawl pages with `--max-pages` (the UI accepts up to 100,000 HTML pages); this is separate from document-list pagination. Add `--max-seconds 600` for an optional 10-minute cap.
 
 ## Inputs and Outputs
 

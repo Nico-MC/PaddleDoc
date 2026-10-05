@@ -101,6 +101,9 @@ services:
       # refuses to start without one against this postgres-backed compose
       # setup -- override in a .env file for anything beyond local/NAS dev.
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required (run scripts/init-env.sh or set it in .env) — it encrypts every stored OIDC/import/VL credential}
+      HANSEMERKUR_CRAWLER_DIR: /app/hansemerkur_crawler
+      HANSEMERKUR_CRAWLER_SCRIPT: /app/hansemerkur_crawler/crawl.py
+      HANSEMERKUR_CRAWL_DIR: /app/docs/hansemerkur-oeffentlich-2026-10-04
       # Base URL the backend is reachable at; used to build the OIDC
       # redirect_uri (`{PUBLIC_API_URL}/api/v1/auth/oidc/{slug}/callback`).
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
@@ -136,6 +139,8 @@ services:
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
     volumes:
       - storage:/app/backend/storage:rw
+      - ./scripts/hansemerkur_crawler:/app/hansemerkur_crawler:ro
+      - ../.docs/hansemerkur-oeffentlich-2026-10-04:/app/docs/hansemerkur-oeffentlich-2026-10-04:rw
     depends_on:
       - postgres
       - redis

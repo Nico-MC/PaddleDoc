@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronRight,
   BrainCircuit,
+  FileSearch,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
@@ -28,6 +29,11 @@ const processingChildren = [
   { href: '/processing/new', label: 'File Task', icon: FilePlus, description: 'Upload files for processing' },
   { href: '/jobs', label: 'Jobs', icon: FolderOpen, description: 'View processing jobs' },
   { href: '/imports', label: 'Imports', icon: FileInput, description: 'Confluence page imports' },
+];
+
+const evaluationChildren = [
+  { href: '/encourage', label: 'RAG', icon: BrainCircuit, description: 'RAG ingestion and evaluation' },
+  { href: '/evaluation/crawler', label: 'Crawler', icon: FileSearch, description: 'Discover and prepare source documents' },
 ];
 
 const navGroups = [
@@ -42,7 +48,6 @@ const navGroups = [
         description: 'Upload and process documents',
         children: processingChildren,
       },
-      { href: '/encourage', label: 'RAG', icon: BrainCircuit, description: 'Encourage RAG and benchmarking' },
       { href: '/mail', label: 'Mail API', icon: Inbox, description: 'API-ingested messages' },
     ],
   },
@@ -53,10 +58,23 @@ const navGroups = [
       { href: '/connections', label: 'Connections', icon: PlugZap },
     ],
   },
+  {
+    title: 'Evaluation',
+    items: [
+      {
+        href: '/evaluation',
+        label: 'Evaluation',
+        icon: BrainCircuit,
+        description: 'RAG datasets and source preparation',
+        children: evaluationChildren,
+      },
+    ],
+  },
 ];
 
 // Routes that should auto-expand the Processing submenu.
 const processingRoutes = ['/processing', '/jobs', '/imports'];
+const evaluationRoutes = ['/evaluation', '/encourage'];
 
 function isChildActive(href: string, pathname: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -81,6 +99,13 @@ export function SidebarNav() {
   if (autoProcessingOpen !== lastAutoProcessingOpen) {
     setLastAutoProcessingOpen(autoProcessingOpen);
     setSubmenuOpen(autoProcessingOpen);
+  }
+  const autoEvaluationOpen = evaluationRoutes.some((route) => isChildActive(route, pathname));
+  const [evaluationSubmenuOpen, setEvaluationSubmenuOpen] = useState(autoEvaluationOpen);
+  const [lastAutoEvaluationOpen, setLastAutoEvaluationOpen] = useState(autoEvaluationOpen);
+  if (autoEvaluationOpen !== lastAutoEvaluationOpen) {
+    setLastAutoEvaluationOpen(autoEvaluationOpen);
+    setEvaluationSubmenuOpen(autoEvaluationOpen);
   }
 
   // Close on outside click
@@ -142,7 +167,11 @@ export function SidebarNav() {
               </p>
               <div className="flex flex-col gap-1">
                 {group.items.map(({ href, label, icon: Icon, description, children }) => {
-                  const childActive = children?.some((child) => isChildActive(child.href, pathname)) ?? false;
+                  const visibleChildren = children;
+                  if (children && visibleChildren?.length === 0) return null;
+                  const childActive = visibleChildren?.some((child) => isChildActive(child.href, pathname)) ?? false;
+                  const isEvaluationMenu = href === '/evaluation';
+                  const expanded = isEvaluationMenu ? evaluationSubmenuOpen : submenuOpen;
                   // An entry with children (e.g. Processing) must only read as
                   // active on an exact pathname match — startsWith(href) would
                   // also fire for every child route (e.g. /processing/new),
@@ -212,18 +241,19 @@ export function SidebarNav() {
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setSubmenuOpen((v) => !v);
+                            if (isEvaluationMenu) setEvaluationSubmenuOpen((v) => !v);
+                            else setSubmenuOpen((v) => !v);
                           }}
-                          aria-expanded={submenuOpen}
-                          aria-label={submenuOpen ? `Collapse ${label} submenu` : `Expand ${label} submenu`}
+                          aria-expanded={expanded}
+                          aria-label={expanded ? `Collapse ${label} submenu` : `Expand ${label} submenu`}
                           className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
                         >
-                          {submenuOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                         </button>
                       </div>
-                      {submenuOpen && (
+                      {expanded && (
                         <div className="mt-1 flex flex-col gap-1">
-                          {children.map((child) => {
+                          {visibleChildren?.map((child) => {
                             const childIsActive = isChildActive(child.href, pathname);
                             return (
                               <Link

@@ -28,7 +28,16 @@ import xml.etree.ElementTree as ET
 import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA_DIR = SCRIPT_DIR.parents[2] / '.docs' / 'hansemerkur-oeffentlich-2026-10-04'
+
+
+def default_data_dir(script_dir: Path) -> Path:
+    data_folder = Path('.docs') / 'hansemerkur-oeffentlich-2026-10-04'
+    if len(script_dir.parents) > 2:
+        return script_dir.parents[2] / data_folder
+    return Path('/app/docs/hansemerkur-oeffentlich-2026-10-04')
+
+
+DEFAULT_DATA_DIR = default_data_dir(SCRIPT_DIR)
 ROOT = Path(os.environ.get('HANSEMERKUR_CRAWL_DIR', DEFAULT_DATA_DIR)).expanduser().resolve()
 FILES = ROOT / 'originale'
 FILES.mkdir(parents=True, exist_ok=True)
@@ -42,7 +51,7 @@ SITEMAPS = {
 }
 UA = 'HanseMerkurResearchCollector/1.0'
 INTERVAL = 1.0
-MAX_BYTES = 30 * 1024 * 1024
+MAX_BYTES = 0
 MAX_PAGES = 10000
 DOWNLOAD_EXTENSIONS = {'.doc', '.docm', '.docx', '.dot', '.dotm', '.dotx', '.pdf'}
 DOWNLOAD_CONTENT_TYPES = {
@@ -164,7 +173,7 @@ def raw(url):
                 if RUN_DEADLINE is not None and time.monotonic() >= RUN_DEADLINE:
                     raise CrawlDeadlineReached('Per-run time budget reached')
                 size += len(part)
-                if size > MAX_BYTES:
+                if MAX_BYTES and size > MAX_BYTES:
                     raise ValueError(f'Download exceeds {MAX_BYTES} bytes')
                 chunks.append(part)
             return r.status_code, dict(r.headers), b''.join(chunks)
@@ -446,7 +455,8 @@ def main():
     parser.add_argument('--include-robots-blocked', action='store_true',
                         help='After the normal crawl, attempt catalogued PDF/Word URLs disallowed by robots.txt.')
     parser.add_argument('--max-pages', type=int, default=MAX_PAGES, help='Maximum HTML pages to scan (default: %(default)s).')
-    parser.add_argument('--max-bytes', type=int, default=MAX_BYTES, help='Maximum bytes per response (default: %(default)s).')
+    parser.add_argument('--max-bytes', type=int, default=MAX_BYTES,
+                        help='Maximum bytes per response; 0 means unlimited (default).')
     parser.add_argument('--max-seconds', type=int, default=0,
                         help='Optional wall-clock limit in seconds; 0 means no limit (default).')
     args = parser.parse_args()
@@ -456,8 +466,8 @@ def main():
         parser.error('--include-robots-blocked cannot be used with --discover-only')
     if args.max_pages < 1:
         parser.error('--max-pages must be positive')
-    if args.max_bytes < 1:
-        parser.error('--max-bytes must be positive')
+    if args.max_bytes < 0:
+        parser.error('--max-bytes must be zero (unlimited) or positive')
     if args.max_seconds < 0:
         parser.error('--max-seconds must be zero (unlimited) or positive')
     MAX_BYTES = args.max_bytes
