@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 import ipaddress
 import json
 import mimetypes
+import os
 from pathlib import Path
 import re
 import socket
@@ -26,9 +27,11 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, unquote
 import xml.etree.ElementTree as ET
 import requests
 
-ROOT = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_DATA_DIR = SCRIPT_DIR.parents[2] / '.docs' / 'hansemerkur-oeffentlich-2026-10-04'
+ROOT = Path(os.environ.get('HANSEMERKUR_CRAWL_DIR', DEFAULT_DATA_DIR)).expanduser().resolve()
 FILES = ROOT / 'originale'
-FILES.mkdir(exist_ok=True)
+FILES.mkdir(parents=True, exist_ok=True)
 APPROVED_HOSTS_FILE = ROOT / 'approved-hosts.txt'
 DISCOVERY_SEEDS_FILE = ROOT / 'discovery-seeds.txt'
 PAGES = {'www.hansemerkur.de', 'k.hansemerkur.de', 'www.hmrv.de'}
@@ -86,10 +89,11 @@ def normalize(url):
 
 
 def load_approved_hosts():
-    if not APPROVED_HOSTS_FILE.exists():
+    source = APPROVED_HOSTS_FILE if APPROVED_HOSTS_FILE.exists() else SCRIPT_DIR / 'approved-hosts.txt'
+    if not source.exists():
         return set()
     hosts = set()
-    for line in APPROVED_HOSTS_FILE.read_text(encoding='utf-8').splitlines():
+    for line in source.read_text(encoding='utf-8').splitlines():
         value = line.strip()
         if not value or value.startswith('#'):
             continue
@@ -100,10 +104,11 @@ def load_approved_hosts():
 
 
 def load_discovery_seeds():
-    if not DISCOVERY_SEEDS_FILE.exists():
+    source = DISCOVERY_SEEDS_FILE if DISCOVERY_SEEDS_FILE.exists() else SCRIPT_DIR / 'discovery-seeds.txt'
+    if not source.exists():
         return []
     urls = []
-    for line in DISCOVERY_SEEDS_FILE.read_text(encoding='utf-8').splitlines():
+    for line in source.read_text(encoding='utf-8').splitlines():
         value = line.strip()
         if value and not value.startswith('#'):
             normalized = normalize(value)
@@ -438,21 +443,26 @@ def main():
     parser = argparse.ArgumentParser(description='Discover and collect public HanseMerkur RAG sources.')
     parser.add_argument('--discover-only', action='store_true', help='Scan pages and catalog candidate files without downloading them.')
     parser.add_argument('--download-pending-only', action='store_true', help='Download catalogued pending files without scanning more pages.')
+    parser.add_argument('--include-robots-blocked', action='store_true',
+                        help='After the normal crawl, attempt catalogued PDF/Word URLs disallowed by robots.txt.')
     parser.add_argument('--max-pages', type=int, default=MAX_PAGES, help='Maximum HTML pages to scan (default: %(default)s).')
     parser.add_argument('--max-bytes', type=int, default=MAX_BYTES, help='Maximum bytes per response (default: %(default)s).')
-    parser.add_argument('--max-seconds', type=int, default=600, help='Maximum wall-clock time per run in seconds (default: %(default)s).')
+    parser.add_argument('--max-seconds', type=int, default=0,
+                        help='Optional wall-clock limit in seconds; 0 means no limit (default).')
     args = parser.parse_args()
     if args.discover_only and args.download_pending_only:
         parser.error('--discover-only and --download-pending-only cannot be used together')
+    if args.discover_only and args.include_robots_blocked:
+        parser.error('--include-robots-blocked cannot be used with --discover-only')
     if args.max_pages < 1:
         parser.error('--max-pages must be positive')
     if args.max_bytes < 1:
         parser.error('--max-bytes must be positive')
-    if args.max_seconds < 1:
-        parser.error('--max-seconds must be positive')
+    if args.max_seconds < 0:
+        parser.error('--max-seconds must be zero (unlimited) or positive')
     MAX_BYTES = args.max_bytes
     RUN_STARTED_MONOTONIC = time.monotonic()
-    RUN_DEADLINE = RUN_STARTED_MONOTONIC + args.max_seconds
+    RUN_DEADLINE = RUN_STARTED_MONOTONIC + args.max_seconds if args.max_seconds else None
 
     state_file = ROOT / 'catalog.json'
     old = json.loads(state_file.read_text()) if state_file.exists() else {}
@@ -561,12 +571,14 @@ def main():
             host_priority = (0 if host == 'www.hansemerkur.de' else
                              1 if host == 'k.hansemerkur.de' else
                              2 if host == 'www.hmrv.de' else 3)
-            sitemap_priority = not any(source.get('page') == 'robots-sitemap'
-                                       for source in record.get('sources', []))
-            pending_documents.append((host_priority, sitemap_priority, url))
+            is_sitemap_document = any(source.get('page') == 'robots-sitemap'
+                                      for source in record.get('sources', []))
+            pending_documents.append((host_priority, not is_sitemap_document, url))
         else:
             record['status'] = 'ignored_type'
-    doc_queue = deque(url for _, _, url in sorted(pending_documents))
+    ordered_documents = sorted(pending_documents)
+    sitemap_doc_queue = deque(url for _, is_non_sitemap, url in ordered_documents if not is_non_sitemap)
+    doc_queue = deque(url for _, is_non_sitemap, url in ordered_documents if is_non_sitemap)
     hashes = {r['sha256']: r['local_path'] for r in records.values() if r.get('sha256')}
     futures = {}
     count = 0
@@ -575,7 +587,7 @@ def main():
         pending_pages = (list(old.get('pending_pages', [])) if args.download_pending_only
                          else list(page_queue) + [u for u, kind in futures.values() if kind == 'page'])
         elapsed_seconds = int(time.monotonic() - RUN_STARTED_MONOTONIC)
-        budget_exhausted = time.monotonic() >= RUN_DEADLINE
+        budget_exhausted = RUN_DEADLINE is not None and time.monotonic() >= RUN_DEADLINE
         out = {'started_at_utc': old.get('started_at_utc', started),
                'updated_at_utc': datetime.now(timezone.utc).isoformat(),
                                'scope': {'page_hosts': sorted(PAGE_SCOPE), 'document_hosts': '*.hansemerkur.de, *.hmrv.de',
@@ -602,16 +614,20 @@ def main():
         print(json.dumps(out['summary']), flush=True)
 
     def add_document(url, source, title):
+        queue = sitemap_doc_queue if source == 'robots-sitemap' else doc_queue
         if url not in records:
             status = 'pending' if in_scope(url) else 'outside_scope'
             records[url] = {'url': url, 'status': status, 'sources': []}
             if status == 'pending':
-                doc_queue.append(url)
+                queue.append(url)
         elif (in_scope(url) and is_downloadable(url, {})
               and records[url].get('status') in {'ignored_type', 'outside_scope', 'unsupported_content'}):
             records[url]['status'] = 'pending'
-            if url not in doc_queue:
-                doc_queue.append(url)
+            if url not in sitemap_doc_queue and url not in doc_queue:
+                queue.append(url)
+        if source == 'robots-sitemap' and url in doc_queue:
+            doc_queue.remove(url)
+            sitemap_doc_queue.append(url)
         source_entry = {'page': source, 'link_text': title}
         if source_entry not in records[url]['sources']:
             records[url]['sources'].append(source_entry)
@@ -633,15 +649,20 @@ def main():
                 continue
             seeds.append(candidate)
             if is_downloadable(candidate, {}):
-                add_document(candidate, 'https://' + host + '/robots.txt', 'Sitemap')
+                add_document(candidate, 'robots-sitemap', 'Sitemap')
             else:
                 queue_page(candidate)
         (ROOT / 'sitemap-urls.json').write_text(json.dumps(seeds, indent=2), encoding='utf-8')
 
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
-        while page_queue or (doc_queue and not args.discover_only) or futures:
-            while len(futures) < 4 and time.monotonic() < RUN_DEADLINE:
-                if page_queue:
+        while page_queue or ((sitemap_doc_queue or doc_queue) and not args.discover_only) or futures:
+            while (len(futures) < 4
+                   and (RUN_DEADLINE is None or time.monotonic() < RUN_DEADLINE)):
+                if sitemap_doc_queue and not args.discover_only:
+                    kind = 'sitemap_document'
+                elif any(future_kind == 'sitemap_document' for _, future_kind in futures.values()):
+                    break
+                elif page_queue:
                     kind = 'page'
                 elif any(future_kind == 'page' for _, future_kind in futures.values()):
                     break
@@ -649,7 +670,9 @@ def main():
                     kind = 'document'
                 else:
                     break
-                url = (page_queue if kind == 'page' else doc_queue).popleft()
+                queue = (page_queue if kind == 'page' else
+                         sitemap_doc_queue if kind == 'sitemap_document' else doc_queue)
+                url = queue.popleft()
                 if kind == 'page' and url in pages:
                     continue
                 futures[pool.submit(fetch, url)] = (url, kind)
@@ -661,8 +684,9 @@ def main():
                 try:
                     result = future.result()
                 except CrawlDeadlineReached:
-                    queue = page_queue if kind == 'page' else doc_queue
-                    queue.appendleft(url)
+                    retry_queue = (page_queue if kind == 'page' else
+                                   sitemap_doc_queue if kind == 'sitemap_document' else doc_queue)
+                    retry_queue.appendleft(url)
                     continue
                 except Exception as exc:
                     result = {'status': 'error', 'error': str(exc)}
@@ -682,12 +706,13 @@ def main():
                     dest = 'originale/' + name + ext
                     duplicate = digest in hashes
                     if not duplicate:
+                        FILES.mkdir(parents=True, exist_ok=True)
                         (ROOT / dest).write_bytes(data)
                         hashes[digest] = dest
                     records[url].update(result, status='duplicate' if duplicate else 'downloaded',
                                         sha256=digest, local_path=hashes[digest], size_bytes=len(data),
                                         last_modified=headers.get('Last-Modified'), etag=headers.get('ETag'))
-                elif kind == 'document':
+                elif kind in {'document', 'sitemap_document'}:
                     records[url].update(result)
                     if result['status'] == 'ok':
                         records[url]['status'] = 'unsupported_content' if is_html else 'ignored_type'
@@ -726,6 +751,11 @@ def main():
                 if count % 20 == 0:
                     save()
         save()
+    if (args.include_robots_blocked
+            and (RUN_DEADLINE is None or time.monotonic() < RUN_DEADLINE)):
+        from download_remaining import main as download_robots_blocked
+
+        download_robots_blocked()
 
 
 if __name__ == '__main__':
