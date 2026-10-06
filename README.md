@@ -61,19 +61,19 @@ Choose your deployment mode:
 | Mode | Best for | Command |
 |---|---|---|
 | Standalone Docker | Everyone — Windows, macOS, Linux, NAS | `./scripts/init-env.sh && docker compose up -d` |
-| Docker (Dev/Single Host) | Contributors, includes CPU local LLM and dataset worker | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800` |
-| Docker (Dev + LLM GPU) | NVIDIA GPU for local dataset generation only | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev/Single Host) | Contributors; OCR, backend and frontend, without a local LLM | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + local LLM) | Contributors who want local dataset generation | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + local LLM GPU) | NVIDIA GPU for local dataset generation only | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
 ### Local Dataset Generation (Developers)
 
-The development stack includes Ollama, automatically loads `qwen2.5:14b`,
-initializes the shared dataset directory for UID 1000, and starts a separate
-dataset worker alongside the other containers. The service definitions are
-reused from `docker-compose.local-llm.yml` via `extends`; no extra `-f` option
-is needed for them. Existing OCR and cloud-LLM configuration is unchanged.
-The standalone production Compose file does not include the local LLM.
+The regular development stack does not start a local LLM. To enable local
+dataset generation, add `docker-compose.local-llm.yml`; this starts Ollama,
+loads `qwen2.5:14b`, initializes the shared dataset directory for UID 1000,
+and adds a separate dataset worker. The standalone production Compose file
+does not include the local LLM.
 
 Requirements: approximately 10 GB for model weights and sufficient host memory
 in addition to the existing containers. CPU inference works but is slower.
@@ -86,13 +86,13 @@ From this directory, with the sibling `encourage` checkout present:
 
 ```bash
 ./scripts/init-env.sh
-docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800
+docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800
 ```
 
 For the RTX 4070 Ti Super, give only Ollama GPU access, leaving OCR unchanged:
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800
+docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800
 ```
 
 No separate model-pull command or LLM installation is needed. The first start
@@ -111,14 +111,14 @@ that run; changing the server default does not change queued runs. To add an
 extra model explicitly, for example:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec ollama ollama pull qwen2.5:3b
+docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml exec ollama ollama pull qwen2.5:3b
 ```
 
 Then refresh the model picker. Selecting a model does not download weights.
 Inspect startup with:
 
 ```bash
-docker compose -f docker-compose.dev.yml logs ollama-init dataset-worker
+docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml logs ollama-init dataset-worker
 ```
 
 In **RAG > Benchmark**, choose **Dataset generieren**, select finished Markdown
