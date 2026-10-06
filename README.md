@@ -1,14 +1,10 @@
 ﻿docker compose \
   -f docker-compose.dev.yml \
-  -f docker-compose.gpu.yml \
-  -f ~/.config/paddledoc/compose.local.yml \
-  up -d --no-build --wait
+  up --build -d --wait --wait-timeout 1800
 
 
 docker compose \
   -f docker-compose.dev.yml \
-  -f docker-compose.gpu.yml \
-  -f ~/.config/paddledoc/compose.local.yml \
   down
 
 # PaddleDoc
@@ -65,9 +61,102 @@ Choose your deployment mode:
 | Mode | Best for | Command |
 |---|---|---|
 | Standalone Docker | Everyone — Windows, macOS, Linux, NAS | `./scripts/init-env.sh && docker compose up -d` |
-| Docker (Dev/Single Host) | Contributors building the images from source | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build` |
+| Docker (Dev/Single Host) | Contributors, includes CPU local LLM and dataset worker | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + LLM GPU) | NVIDIA GPU for local dataset generation only | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
+
+### Local Dataset Generation (Developers)
+
+The development stack includes Ollama, automatically loads `qwen2.5:14b`,
+initializes the shared dataset directory for UID 1000, and starts a separate
+dataset worker alongside the other containers. The service definitions are
+reused from `docker-compose.local-llm.yml` via `extends`; no extra `-f` option
+is needed for them. Existing OCR and cloud-LLM configuration is unchanged.
+The standalone production Compose file does not include the local LLM.
+
+Requirements: approximately 10 GB for model weights and sufficient host memory
+in addition to the existing containers. CPU inference works but is slower.
+For acceleration, NVIDIA GPU access in Docker is required (for example Docker
+Desktop with WSL2 and a current NVIDIA driver). A 16 GB
+RTX 4070 Ti Super is a suitable starting point. Avoid simultaneous GPU OCR
+and LLM inference when they share this GPU.
+
+From this directory, with the sibling `encourage` checkout present:
+
+```bash
+./scripts/init-env.sh
+docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800
+```
+
+For the RTX 4070 Ti Super, give only Ollama GPU access, leaving OCR unchanged:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800
+```
+
+No separate model-pull command or LLM installation is needed. The first start
+downloads the images and model; later starts reuse the `ollama_models` volume.
+The initial download needs Internet access; subsequent inference runs locally.
+Ollama has no host port exposed. Set `LOCAL_LLM_MODEL` or `OLLAMA_TAG` in `.env`
+to select a different model or server version. After changing the model, rerun
+the same Compose command. For smaller machines, set `LOCAL_LLM_MODEL=qwen2.5:3b`
+before the first start to avoid downloading the 14B model. Smaller models use
+less memory but may produce lower-quality questions and answers.
+
+The dataset generator's model picker lists models installed on the local LLM
+server. Its refresh button reloads that list without restarting containers.
+The chosen model is stored per generation run and used for every document in
+that run; changing the server default does not change queued runs. To add an
+extra model explicitly, for example:
+
+```bash
+docker compose -f docker-compose.dev.yml exec ollama ollama pull qwen2.5:3b
+```
+
+Then refresh the model picker. Selecting a model does not download weights.
+Inspect startup with:
+
+```bash
+docker compose -f docker-compose.dev.yml logs ollama-init dataset-worker
+```
+
+In **RAG > Benchmark**, choose **Dataset generieren**, select finished Markdown
+documents and the question count/style/focus, then start the batch. Generation
+is explicit: startup does not process your corpus automatically. Progress and
+per-document errors appear in the UI. For existing datasets choose **skip**,
+**create an additional dataset**, or **overwrite**. In overwrite mode, select
+the target for each document when multiple datasets exist; a single matching
+dataset is preselected. Replacement requires confirmation and keeps the same
+filename. The old dataset remains intact if generation fails or is cancelled
+before saving. Other datasets for the document are not deleted.
+New or updated datasets appear in the existing dataset list. Cancel stops queued documents
+and discards the current document after its LLM calls finish. Generation status
+is retained for up to seven days in Redis (lost if Redis data is reset);
+JSONL datasets remain in `.docs/evaluation`.
+
+Generated rows are marked `synthetic`: exact source quotes are checked, but
+answers still need independent review before being treated as ground truth.
+Short documents may yield fewer questions than requested. The manual dataset
+editor remains available. This generation does not require an OCR profile.
+
+Generation uses stratified random sampling across the document. With 70 marked
+pages and 10 questions, it first seeks one question from each seven-page region.
+Existing `## Page N` and `<!-- page:N/total -->` markers determine real page
+numbers. Without complete page markers, regions are based on Markdown text
+positions instead; no page numbers are invented. Frontmatter, heading-only
+blocks and recognizable contents/navigation passages are excluded. Unproductive
+source selections are retried with different passages in the same region, within a
+bounded attempt budget, before successful regions can supply extra questions.
+Warnings report missing questions or uncovered regions.
+
+The optional seed makes passage selection reproducible for the same Markdown
+and settings. Leaving it empty chooses a fresh seed, stored with the run and
+each row. This does not guarantee identical LLM wording. Rows also record
+`sampling_method`, `sampling_region`, `sampling_region_count`,
+`evidence_passage_id`, exact evidence character offsets, and `source_page`
+only where a marker supplies it. Dataset details show the page/region next to
+the evidence. Ten questions are still a sample, not exhaustive page coverage.
 
 ### Standard Deployment (No Kubernetes)
 

@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { DatasetGenerator } from '@/components/dataset-generator';
+import { Sparkles } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
 type DatasetEntry = {
@@ -41,6 +43,8 @@ type DatasetRow = {
   source_document: string;
   source_file: string;
   notes: string;
+  review_status?: string;
+  generation_model?: string;
 };
 
 type DatasetAiAssistResponse = {
@@ -208,6 +212,7 @@ export function EncourageDatasetWorkbench({
   onDatasetSaved,
 }: Props) {
   const [wordSources, setWordSources] = useState<WordSource[]>([]);
+  const [showGenerator, setShowGenerator] = useState(false);
   const [details, setDetails] = useState<DatasetDetail | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -368,6 +373,7 @@ export function EncourageDatasetWorkbench({
     setDatasetSourceFile(sourceFiles[0] ?? matchingWordSource(markdownEntry?.path ?? ''));
     setRows(
       details.rows.map((row, index) => ({
+        ...row,
         id: textValue(row, 'id') || `q${String(index + 1).padStart(3, '0')}`,
         question: textValue(row, 'question'),
         gold_answer: textValue(row, 'gold_answer'),
@@ -376,6 +382,8 @@ export function EncourageDatasetWorkbench({
         source_document: textValue(row, 'source_document'),
         source_file: textValue(row, 'source_file'),
         notes: textValue(row, 'notes'),
+        review_status: textValue(row, 'review_status') || undefined,
+        generation_model: textValue(row, 'generation_model') || undefined,
       })),
     );
     setAiAssistFeedback({});
@@ -609,22 +617,28 @@ export function EncourageDatasetWorkbench({
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="grid gap-4">
+        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h3 className="text-lg font-semibold text-slate-950">Dataset erstellen</h3>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button onClick={() => setShowGenerator((previous) => !previous)} disabled={isEditing} className="bg-emerald-600 hover:bg-emerald-700">
+              <Sparkles className="mr-2 h-4 w-4" />Dataset generieren
+            </Button>
+            <Button onClick={startNewDataset} disabled={isEditing} variant="outline">
+              {isEditing ? 'Formular geöffnet' : 'Manuell erstellen'}
+            </Button>
+          </div>
+          {showGenerator && <DatasetGenerator files={markdownFiles} datasets={datasets} preferredPath={preferredMarkdownPath} onSaved={onDatasetSaved} />}
+        </section>
+
+        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="text-lg font-semibold text-slate-950">Evaluation Data Sets</h3>
+              <h3 className="text-lg font-semibold text-slate-950">Bestehende Evaluationssets</h3>
               <p className="mt-1 text-sm text-slate-500">
                 JSONL-Fragen, Goldantworten und Evidenz für eure Dokumente verwalten.
               </p>
             </div>
-            <Button
-              onClick={startNewDataset}
-              disabled={isEditing}
-              className="bg-emerald-600 hover:bg-emerald-700"
-            >
-              {isEditing ? 'Formular geöffnet' : 'Neues Dataset'}
-            </Button>
           </div>
 
           {isEditing && (
@@ -646,7 +660,7 @@ export function EncourageDatasetWorkbench({
                   type="button"
                   disabled={isEditing}
                   onClick={() => onSelectDataset(dataset.path)}
-                  className={`rounded-xl border-2 p-3 text-left transition ${
+                  className={`min-w-0 break-words rounded-xl border-2 p-3 text-left transition ${
                     isEditing
                       ? 'cursor-not-allowed border-slate-200 bg-slate-50 opacity-55'
                       : dataset.path === selectedDatasetPath
@@ -663,7 +677,7 @@ export function EncourageDatasetWorkbench({
                     {dataset.row_count} Fragen
                   </p>
                   <p className="mt-1 text-xs text-slate-600">
-                    Word-Original: {originalFiles.length > 0
+                    Original: {originalFiles.length > 0
                       ? originalFiles.join(', ')
                       : 'nicht zugeordnet'}
                   </p>
@@ -675,7 +689,6 @@ export function EncourageDatasetWorkbench({
             )}
           </div>
         </section>
-
       </div>
 
       {localError && (
@@ -723,13 +736,16 @@ export function EncourageDatasetWorkbench({
             </label>
 
             <label className="text-sm font-medium text-slate-700">
-              Word-Quelldatei
+              Quelldatei
               <select
                 value={datasetSourceFile}
                 onChange={(event) => setDatasetSourceFile(event.target.value)}
                 className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
               >
                 <option value="">Keine Zuordnung</option>
+                {datasetSourceFile && !wordSources.some((source) => source.path === datasetSourceFile) && (
+                  <option value={datasetSourceFile}>{sourceFilename(datasetSourceFile)}</option>
+                )}
                 {wordSources.map((source) => (
                   <option key={source.path} value={source.path}>{source.filename}</option>
                 ))}
@@ -938,7 +954,7 @@ export function EncourageDatasetWorkbench({
                   <h3 className="text-lg font-semibold text-slate-950">{details.filename}</h3>
                   <p className="mt-1 text-sm text-slate-500">{details.row_count} Fragen</p>
                   <p className="mt-1 text-sm text-slate-600">
-                    Word-Original: {details.source_files.length > 0
+                    Original: {details.source_files.length > 0
                       ? details.source_files.map(sourceFilename).join(', ')
                       : 'nicht zugeordnet'}
                   </p>
@@ -957,7 +973,10 @@ export function EncourageDatasetWorkbench({
                     <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{String(row.gold_answer ?? '')}</p>
                     {Boolean(row.evidence_quote) && <p className="mt-3 rounded-lg bg-white p-3 text-xs text-slate-600">{String(row.evidence_quote)}</p>}
                     <div className="mt-3 grid gap-1 text-xs text-slate-500">
-                      <p>Word-Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
+                      <p>Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
+                      {typeof row.source_page === 'number' && <p>Seite: {row.source_page}</p>}
+                      {typeof row.sampling_region === 'number' && <p>Dokumentbereich: {row.sampling_region} / {String(row.sampling_region_count ?? '')}{row.sampling_method === 'text_position' ? ' (Textposition)' : ''}</p>}
+                      {Boolean(row.evidence_anchor) && <p>Abschnitt: {String(row.evidence_anchor)}</p>}
                     </div>
                   </article>
                 ))}

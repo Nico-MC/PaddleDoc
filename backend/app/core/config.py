@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     celery_broker_visibility_timeout_seconds: int = 1800
     openai_api_base_url: str = ''
     openai_api_bearer_token: str = ''
+    dataset_llm_api_base_url: str = ''
+    dataset_llm_api_key: str = ''
+    dataset_llm_model: str = 'qwen2.5:14b'
     # Hostnames ('host' or 'host:port') of private-network VL endpoints
     # (self-hosted vLLM/Ollama/LiteLLM) that outbound benchmark and test
     # requests may reach. Same mechanism and parsing as

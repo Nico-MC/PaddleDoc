@@ -23,9 +23,9 @@ def _repo_root() -> Path:
 
 def _evaluation_root() -> Path:
     # Check /app/docs first (Docker mount), then relative to repo root
-    docker_path = Path('/app/docs/evaluation')
-    if docker_path.exists():
-        return docker_path
+    docker_root = Path('/app/docs')
+    if docker_root.exists():
+        return docker_root / 'evaluation'
     return _repo_root() / 'docs' / 'evaluation'
 
 

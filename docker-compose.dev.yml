@@ -91,6 +91,9 @@ services:
       WEBHOOK_PRIVATE_HOST_ALLOWLIST: ${WEBHOOK_PRIVATE_HOST_ALLOWLIST:-[]}
       WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER: ${WEBHOOK_MAX_PENDING_DELIVERIES_PER_USER:-50}
       UVICORN_RELOAD: 'true'
+      DATASET_LLM_API_BASE_URL: http://ollama:11434/v1
+      DATASET_LLM_API_KEY: ollama
+      DATASET_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:14b}
     volumes:
       - ./backend/app:/app/app:ro
       - ./backend/alembic:/app/alembic:ro
@@ -104,8 +107,14 @@ services:
       # across backend recreates so later ingest runs start immediately.
       - encourage_models:/home/paddledoc/.cache
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      dataset-storage-init:
+        condition: service_completed_successfully
     # /health only answers once the entrypoint's `alembic upgrade head` has
     # completed -- the worker gates on this (service_healthy below) so its
     # startup recovery query never races an unmigrated schema.
@@ -202,6 +211,26 @@ services:
       redis:
         condition: service_started
 
+  ollama:
+    extends:
+      file: docker-compose.local-llm.yml
+      service: ollama
+
+  ollama-init:
+    extends:
+      file: docker-compose.local-llm.yml
+      service: ollama-init
+
+  dataset-storage-init:
+    extends:
+      file: docker-compose.local-llm.yml
+      service: dataset-storage-init
+
+  dataset-worker:
+    extends:
+      file: docker-compose.local-llm.yml
+      service: dataset-worker
+
   postgres:
     # No privilege escalation, and every capability dropped except the five
     # the official entrypoint genuinely needs: it starts as root, chowns and
@@ -262,3 +291,4 @@ volumes:
   pgdata:
   paddlex_models:
   encourage_models:
+  ollama_models:

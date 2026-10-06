@@ -1,4 +1,5 @@
 import hashlib
+import json
 import uuid
 from datetime import date, datetime, time, timezone
 import io
@@ -47,6 +48,7 @@ from app.schemas.jobs import (
     EncourageRetrieveResponse,
     EvaluationDatasetAiAssistRequest,
     EvaluationDatasetAiAssistResponse,
+    EvaluationDatasetGenerateRequest,
     EvaluationDatasetBrowserResponse,
     EvaluationDatasetDetailResponse,
     EvaluationDatasetWriteRequest,
@@ -89,7 +91,7 @@ from app.services.encourage_evaluation import (
     run_encourage_evaluation,
     save_evaluation_dataset,
 )
-from app.services.dataset_assistant import prepare_dataset_answer
+from app.services.dataset_assistant import list_dataset_models, prepare_dataset_answer
 from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     effective_pipeline_profile_id,
@@ -103,6 +105,7 @@ from app.services.security import DUMMY_PASSWORD_HASH, enforce_rate_limit, hash_
 from app.services.storage import build_result_path, save_upload
 from app.workers.celery_app import celery_app
 from app.workers.tasks import process_job
+from app.workers.dataset_tasks import GENERATION_TTL, generate_document_dataset, generation_key, generation_store
 
 router = APIRouter(prefix='/api/v1')
 
@@ -2053,6 +2056,136 @@ def assist_evaluation_dataset_question(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return EvaluationDatasetAiAssistResponse(**result)
+
+
+@router.get('/evaluation-datasets/generation/config')
+def dataset_generation_config() -> dict:
+    configured = bool(settings.dataset_llm_api_base_url and settings.dataset_llm_api_key)
+    models = []
+    if configured:
+        try:
+            models = list_dataset_models(
+                api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        'configured': configured,
+        'model_name': settings.dataset_llm_model,
+        'models': models,
+    }
+
+
+@router.post('/evaluation-datasets/generation', status_code=status.HTTP_202_ACCEPTED)
+def start_dataset_generation(
+    payload: EvaluationDatasetGenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    enforce_rate_limit(request)
+    if not settings.dataset_llm_api_base_url or not settings.dataset_llm_api_key:
+        raise HTTPException(status_code=503, detail='Dataset LLM is not configured. Start the local LLM Compose extension.')
+    jobs = []
+    for path in dict.fromkeys(payload.markdown_paths):
+        job = db.get(Job, Path(path).stem, options=[defer(Job.upload_content)])
+        if (
+            job is None or job.status != JobStatus.FINISHED or not job.result_markdown
+            or _synthetic_markdown_path(job) != path or not _owner_visible(db, job.owner_id, user)
+        ):
+            raise HTTPException(status_code=404, detail='Markdown file not found')
+        jobs.append((job, path))
+    model_name = (payload.model_name or settings.dataset_llm_model).strip()
+    try:
+        models = list_dataset_models(
+            api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if model_name not in models:
+        raise HTTPException(status_code=422, detail='Selected model is not installed on the dataset LLM server.')
+    existing_datasets = list_evaluation_datasets()
+    overwrite_targets = {}
+    if payload.overwrite_datasets:
+        if payload.skip_existing or not set(payload.overwrite_datasets).issubset(payload.markdown_paths):
+            raise HTTPException(status_code=422, detail='Overwrite targets must belong to selected documents; disable skip-existing.')
+        datasets_by_path = {dataset['path']: dataset for dataset in existing_datasets}
+        for markdown_path, dataset_path in payload.overwrite_datasets.items():
+            target = datasets_by_path.get(dataset_path)
+            if target is None or target['source_documents'] != [markdown_path]:
+                raise HTTPException(status_code=422, detail='Overwrite dataset does not belong exclusively to the selected document.')
+            overwrite_targets[markdown_path] = target['filename']
+    existing_sources = {
+        source for dataset in existing_datasets for source in dataset['source_documents']
+    } if payload.skip_existing else set()
+    run_id = str(uuid.uuid4())
+    store = generation_store()
+    key = generation_key(run_id)
+    metadata = {
+        'owner_id': user.id,
+        'question_count': payload.question_count,
+        'sampling_seed': payload.sampling_seed if payload.sampling_seed is not None else uuid.uuid4().int % 2**31,
+        'question_style': payload.question_style,
+        'focus': payload.focus,
+        'model_name': model_name,
+    }
+    records = {'metadata': json.dumps(metadata)}
+    for job, path in jobs:
+        records[job.id] = json.dumps({
+            'job_id': job.id, 'markdown_path': path, 'filename': job.original_filename,
+            'status': 'skipped' if path in existing_sources else 'queued',
+            'target_dataset_filename': overwrite_targets.get(path),
+        })
+    store.hset(key, mapping=records)
+    store.expire(key, GENERATION_TTL)
+    for job, path in jobs:
+        if path in existing_sources:
+            continue
+        try:
+            generate_document_dataset.apply_async(args=[run_id, job.id], queue='datasets')
+        except Exception as exc:
+            item = json.loads(records[job.id])
+            item.update(status='failed', error=f'Could not enqueue generation: {exc}')
+            store.hset(key, job.id, json.dumps(item))
+    return {'run_id': run_id}
+
+
+def _visible_generation(run_id: str, user: User) -> tuple[Redis, str, dict]:
+    store = generation_store()
+    key = generation_key(run_id)
+    records = store.hgetall(key)
+    metadata = json.loads(records.get('metadata', '{}'))
+    if metadata.get('owner_id') != user.id:
+        raise HTTPException(status_code=404, detail='Generation run not found or expired')
+    return store, key, records
+
+
+@router.get('/evaluation-datasets/generation/{run_id}')
+def dataset_generation_status(run_id: str, user: User = Depends(get_current_user)) -> dict:
+    _, _, records = _visible_generation(run_id, user)
+    items = [json.loads(value) for field, value in records.items() if field not in {'metadata', 'cancelled'}]
+    return {
+        'run_id': run_id,
+        'items': items,
+        'finished': all(item['status'] in {'completed', 'failed', 'skipped', 'cancelled'} for item in items),
+        'cancelled': records.get('cancelled') == '1',
+        'model_name': json.loads(records['metadata'])['model_name'],
+        'sampling_seed': json.loads(records['metadata']).get('sampling_seed'),
+    }
+
+
+@router.post('/evaluation-datasets/generation/{run_id}/cancel')
+def cancel_dataset_generation(run_id: str, user: User = Depends(get_current_user)) -> dict:
+    store, key, records = _visible_generation(run_id, user)
+    store.hset(key, 'cancelled', '1')
+    for field, value in records.items():
+        if field in {'metadata', 'cancelled'}:
+            continue
+        item = json.loads(value)
+        if item['status'] == 'queued':
+            item['status'] = 'cancelled'
+            store.hset(key, field, json.dumps(item))
+    return {'status': 'cancelling'}
 
 
 @router.get('/evaluation-source-documents', response_model=EvaluationSourceDocumentBrowserResponse)
