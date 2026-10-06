@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Download, Inbox, LoaderCircle, Mail, Pencil, RefreshCcw, RotateCcw, SearchX, Settings2, Trash2, TrendingDown, UploadCloud, Webhook } from 'lucide-react';
 
@@ -303,6 +303,8 @@ export function DocumentBrowser({
     const trimmed = initialType?.trim() as JobTypeFilter | undefined;
     return trimmed && JOB_TYPE_FILTER_VALUES.includes(trimmed) ? trimmed : null;
   });
+  const deletingJobIdsRef = useRef(new Set<string>());
+  const [deletingJobIds, setDeletingJobIds] = useState<Set<string>>(() => new Set());
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
   const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
   const [restartingFolder, setRestartingFolder] = useState<string | null>(null);
@@ -411,27 +413,44 @@ export function DocumentBrowser({
   useVisiblePolling(() => void loadItems(), pollMs);
 
   const removeJob = async (id: string, password?: string) => {
-    const url = new URL(`${API}/api/v1/jobs/${id}`);
-    if (password) {
-      url.searchParams.set('password', password);
-    }
-    const response = await apiFetch(url.toString(), { method: 'DELETE', skipAuthRedirect: true });
-    if (response.status === 401) {
-      // A 401 here can also mean the session expired — don't show a
-      // document-password prompt that can never succeed in that case.
-      if (await redirectIfSessionExpired()) {
+    if (deletingJobIdsRef.current.has(id)) return;
+    deletingJobIdsRef.current.add(id);
+    setDeletingJobIds((current) => new Set(current).add(id));
+    try {
+      const url = new URL(`${API}/api/v1/jobs/${id}`);
+      if (password) {
+        url.searchParams.set('password', password);
+      }
+      const response = await apiFetch(url.toString(), { method: 'DELETE', skipAuthRedirect: true });
+      if (response.status === 401) {
+        // A 401 here can also mean the session expired — don't show a
+        // document-password prompt that can never succeed in that case.
+        if (await redirectIfSessionExpired()) {
+          return;
+        }
+        setProtectedJobId(id);
+        setProtectedJobPassword('');
         return;
       }
-      setProtectedJobId(id);
-      setProtectedJobPassword('');
-      return;
+      if (response.status === 404) {
+        setProtectedJobId(null);
+        await loadItems();
+        return;
+      }
+      if (!response.ok) {
+        alert('Failed to delete job');
+        return;
+      }
+      setProtectedJobId(null);
+      await loadItems();
+    } finally {
+      deletingJobIdsRef.current.delete(id);
+      setDeletingJobIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
-    if (!response.ok) {
-      alert('Failed to delete job');
-      return;
-    }
-    setProtectedJobId(null);
-    await loadItems();
   };
 
   const removeFolder = async (folderPath: string) => {
@@ -1158,7 +1177,7 @@ export function DocumentBrowser({
                             size="sm"
                             variant="ghost"
                             className="h-8 w-8 px-0"
-                            disabled={job.status === 'RUNNING'}
+                            disabled={job.status === 'RUNNING' || deletingJobIds.has(job.id)}
                             onClick={() => void removeJob(job.id)}
                             aria-label="Delete"
                             title="Delete"

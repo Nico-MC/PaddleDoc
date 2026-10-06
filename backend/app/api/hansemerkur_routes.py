@@ -21,7 +21,13 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import Headers
 
 from app.api.deps import get_current_user
-from app.api.routes import DuplicateUploadError, _storage_folder, create_job_from_upload
+from app.api.routes import (
+    DuplicateUploadError,
+    _parse_tags,
+    _sanitize_storage_path,
+    _storage_folder,
+    create_job_from_upload,
+)
 from app.database.session import get_db as get_database
 from app.models.models import User
 from app.services.paddle_service import effective_pipeline_profile_id, resolve_profile_selection
@@ -45,6 +51,7 @@ _RUNTIME_LOG = _DATA_DIR / 'crawler-ui.log'
 _ORIGINALS = _DATA_DIR / 'originale'
 _ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx', '.docm', '.dot', '.dotx', '.dotm'}
 _PROCESSABLE_EXTENSIONS = {'.pdf', '.docx'}
+_PROCESSING_PROFILE_ID = 'no_profile'
 _MAX_CRAWL_PAGES = 100_000
 _LOCK = threading.Lock()
 _PROCESS: subprocess.Popen | None = None
@@ -60,7 +67,6 @@ class CrawlStartRequest(BaseModel):
 
 class ProcessDocumentsRequest(BaseModel):
     file_ids: list[str] = Field(min_length=1, max_length=50)
-    profile_id: str = Field(default='ppocrv6_tiny', min_length=1, max_length=100)
 
 
 def _read_json(path: Path) -> dict:
@@ -353,8 +359,10 @@ def process_documents(
     user: User = Depends(get_current_user),
 ) -> dict:
     enforce_rate_limit(request)
-    profile_settings = resolve_profile_selection(db, payload.profile_id)
-    dispatch_profile = effective_pipeline_profile_id(payload.profile_id)
+    profile_settings = resolve_profile_selection(db, _PROCESSING_PROFILE_ID)
+    dispatch_profile = effective_pipeline_profile_id(_PROCESSING_PROFILE_ID)
+    folder = _sanitize_storage_path('HanseMerkur')
+
     items = {item['id']: item for item in _document_items()}
     created = []
     duplicates = []
@@ -374,8 +382,16 @@ def process_documents(
             continue
         job_id = str(uuid.uuid4())
         category = item['category']
-        storage_folder = _storage_folder(job_id, 'HanseMerkur', category)
+        target_subfolder = _sanitize_storage_path(category)
+        storage_folder = _storage_folder(job_id, folder, target_subfolder)
         mime_type = mimetypes.guess_type(source_path.name)[0] or 'application/octet-stream'
+        extra_settings = {
+            **profile_settings,
+            'source_kind': 'hansemerkur_crawler',
+            'source_path': file_id,
+            'source_urls': item['urls'],
+            'source_category': category,
+        }
         try:
             with source_path.open('rb') as source_file:
                 upload = UploadFile(
@@ -385,23 +401,17 @@ def process_documents(
                 )
                 job = create_job_from_upload(
                     db,
-                    upload,
+                    file=upload,
                     user=user,
                     storage_folder=storage_folder,
                     mode='single',
                     email='',
-                    department='HanseMerkur RAG preparation',
-                    profile_id=payload.profile_id,
-                    folder='HanseMerkur',
-                    subfolder=category,
-                    tags=['HanseMerkur', category],
-                    extra_settings={
-                        **profile_settings,
-                        'source_kind': 'hansemerkur_crawler',
-                        'source_path': file_id,
-                        'source_urls': item['urls'],
-                        'source_category': category,
-                    },
+                    department=None,
+                    profile_id=_PROCESSING_PROFILE_ID,
+                    folder=folder or None,
+                    subfolder=target_subfolder or None,
+                    tags=_parse_tags(f'HanseMerkur,{category}'),
+                    extra_settings=extra_settings,
                 )
             db.commit()
         except DuplicateUploadError as exc:
@@ -420,4 +430,10 @@ def process_documents(
             continue
         created.append({'file_id': file_id, 'job_id': job.id, 'filename': item['filename'], 'category': category})
 
-    return {'created': created, 'duplicates': duplicates, 'failures': failures}
+    return {
+        'created': created,
+        'duplicates': duplicates,
+        'failures': failures,
+        'collection_id': None,
+        'mode': 'single',
+    }

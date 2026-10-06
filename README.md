@@ -157,6 +157,11 @@ same machine.
 docker compose -f docker-compose.dev.yml up --build
 ```
 
+Source directories remain bind-mounted for live development. `alembic.ini`,
+`next.config.ts`, and `tsconfig.json` use the copies built into the images to
+avoid Docker Desktop/WSL single-file mount failures after reboot. After changing
+these files, rebuild the affected service with the command above.
+
 Endpoints:
 
 - Frontend: `http://localhost:3000`

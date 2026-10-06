@@ -33,8 +33,6 @@ services:
     volumes:
       - ./frontend/src:/app/src:ro
       - ./frontend/public:/app/public:ro
-      - ./frontend/next.config.ts:/app/next.config.ts:ro
-      - ./frontend/tsconfig.json:/app/tsconfig.json:ro
     depends_on:
       - backend
 
@@ -48,7 +46,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    restart: unless-stopped
+    restart: always
     ports:
       - '8000:8000'
     environment:
@@ -96,7 +94,6 @@ services:
     volumes:
       - ./backend/app:/app/app:ro
       - ./backend/alembic:/app/alembic:ro
-      - ./backend/alembic.ini:/app/alembic.ini:ro
       - ./backend/storage:/app/backend/storage
       - ./scripts/hansemerkur_crawler:/app/hansemerkur_crawler:ro
       # The RAG workbench uses Encourage directly and keeps editable JSONL

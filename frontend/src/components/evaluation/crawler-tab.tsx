@@ -74,6 +74,8 @@ type ProcessResponse = {
   created: { file_id: string; job_id: string; filename: string; category: string }[];
   duplicates: { file_id: string; job_id: string }[];
   failures: { file_id: string; error: string }[];
+  collection_id: string | null;
+  mode: 'single' | 'collection';
 };
 
 const STATUS_URL = '/api/v1/hansemerkur/crawler/status';
@@ -297,10 +299,17 @@ export function CrawlerTab() {
       const result = await apiJson<ProcessResponse>('/api/v1/hansemerkur/documents/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_ids: [...selected] }),
+        body: JSON.stringify({
+          file_ids: [...selected],
+        }),
       });
       setActionMessage(
-        `Queued ${result.created.length} Markdown jobs; ${result.duplicates.length} duplicates skipped; ${result.failures.length} failed.`,
+        `Queued ${result.created.length} Markdown jobs${result.collection_id ? ` in collection ${result.collection_id}` : ''}; ${result.duplicates.length} duplicates skipped; ${result.failures.length} failed.`,
+      );
+      setActionError(
+        result.failures.length > 0
+          ? result.failures.map(({ file_id, error }) => `${file_id}: ${error}`).join('; ')
+          : null,
       );
       setCreatedJobs(result.created);
       if (result.failures.length === 0) clearSelection();
@@ -412,7 +421,7 @@ export function CrawlerTab() {
 
       <SectionCard
         title="Downloaded PDF/Word corpus"
-        description="Filter or sample files, then queue only the selected documents through the existing Markdown job pipeline."
+        description="Filter or sample files, then queue selected documents through native Markdown extraction (no OCR profile)."
         actions={<Badge tone="slate">{selected.size} selected</Badge>}
       >
         <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(14rem,1fr)_14rem_10rem_auto_auto_auto]">
