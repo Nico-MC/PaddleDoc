@@ -34,6 +34,7 @@ from app.schemas.jobs import (
     ContainerState,
     CollectionCreateRequest,
     CollectionResponse,
+    EvaluationDatasetArchiveRequest,
     EncourageDebugPayloadResponse,
     EncourageDocumentResponse,
     EncourageEvaluateRequest,
@@ -85,9 +86,11 @@ from app.services.encourage_bridge import (
     run_pipeline_once,
 )
 from app.services.encourage_evaluation import (
+    archive_evaluation_dataset,
     get_evaluation_dataset_details,
     list_evaluation_datasets,
     list_evaluation_source_documents,
+    restore_evaluation_dataset,
     run_encourage_evaluation,
     save_evaluation_dataset,
 )
@@ -510,6 +513,9 @@ def _markdown_entry_from_job(job: Job) -> MarkdownFileEntry:
         original_extension=Path(job.original_filename).suffix.lower().lstrip('.'),
         workspace_folder=_job_folder_path(job),
         profile_id=profile_id if isinstance(profile_id, str) and profile_id else None,
+        source_file_sha256=job.content_sha256,
+        source_markdown_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(),
+        document_version=job.document_version,
         size_bytes=len(content.encode('utf-8')),
         updated_at=job.updated_at,
     )
@@ -2007,6 +2013,30 @@ def list_evaluation_dataset_files(
     )
 
 
+@router.get('/evaluation-datasets/archive', response_model=EvaluationDatasetBrowserResponse)
+def list_archived_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse:
+    return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets(archived=True))
+
+
+@router.post('/evaluation-datasets/archive/restore', response_model=EvaluationDatasetDetailResponse)
+def restore_archived_evaluation_dataset(
+    payload: EvaluationDatasetArchiveRequest,
+) -> EvaluationDatasetDetailResponse:
+    try:
+        return EvaluationDatasetDetailResponse(**restore_evaluation_dataset(payload.path))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to restore archived dataset.',
+        ) from exc
+
+
 @router.post('/evaluation-datasets', response_model=EvaluationDatasetDetailResponse)
 def upsert_evaluation_dataset(payload: EvaluationDatasetWriteRequest) -> EvaluationDatasetDetailResponse:
     try:
@@ -2017,6 +2047,23 @@ def upsert_evaluation_dataset(payload: EvaluationDatasetWriteRequest) -> Evaluat
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f'Failed to save evaluation dataset: {exc}',
+        ) from exc
+
+
+@router.delete('/evaluation-datasets/{dataset_path:path}', response_model=EvaluationDatasetDetailResponse)
+def archive_evaluation_dataset_file(dataset_path: str) -> EvaluationDatasetDetailResponse:
+    try:
+        return EvaluationDatasetDetailResponse(**archive_evaluation_dataset(dataset_path))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to archive evaluation dataset.',
         ) from exc
 
 
@@ -2085,7 +2132,7 @@ def start_dataset_generation(
 ) -> dict:
     enforce_rate_limit(request)
     if not settings.dataset_llm_api_base_url or not settings.dataset_llm_api_key:
-        raise HTTPException(status_code=503, detail='Dataset LLM is not configured. Start the local LLM Compose extension.')
+        raise HTTPException(status_code=503, detail='Dataset generation is not configured. Check the selected LLM Compose extension and its credentials.')
     jobs = []
     for path in dict.fromkeys(payload.markdown_paths):
         job = db.get(Job, Path(path).stem, options=[defer(Job.upload_content)])
@@ -2103,8 +2150,33 @@ def start_dataset_generation(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if model_name not in models:
-        raise HTTPException(status_code=422, detail='Selected model is not installed on the dataset LLM server.')
+        raise HTTPException(status_code=422, detail='Selected model is not available from the configured dataset-generation endpoint.')
     existing_datasets = list_evaluation_datasets()
+    jobs_by_path = {path: job for job, path in jobs}
+
+    def dataset_matches_source_file(dataset: dict, markdown_path: str) -> bool:
+        source_documents = dataset.get('source_documents', [])
+        if len(source_documents) != 1:
+            return False
+        job = jobs_by_path[markdown_path]
+        dataset_source_path = source_documents[0]
+        dataset_source_job = jobs_by_path.get(dataset_source_path)
+        if dataset_source_job is None:
+            dataset_source_job = db.get(Job, Path(dataset_source_path).stem, options=[defer(Job.upload_content)])
+        dataset_file_hash = dataset.get('source_file_sha256') or getattr(dataset_source_job, 'content_sha256', None)
+        if dataset_file_hash and job.content_sha256:
+            return dataset_file_hash == job.content_sha256
+        return dataset_source_path == markdown_path
+
+    def dataset_matches_current_markdown(dataset: dict, markdown_path: str) -> bool:
+        if not dataset_matches_source_file(dataset, markdown_path):
+            return False
+        markdown_hash = dataset.get('source_markdown_sha256')
+        if not markdown_hash:
+            return False
+        current_hash = hashlib.sha256(jobs_by_path[markdown_path].result_markdown.encode('utf-8')).hexdigest()
+        return markdown_hash == current_hash
+
     overwrite_targets = {}
     if payload.overwrite_datasets:
         if payload.skip_existing or not set(payload.overwrite_datasets).issubset(payload.markdown_paths):
@@ -2112,11 +2184,12 @@ def start_dataset_generation(
         datasets_by_path = {dataset['path']: dataset for dataset in existing_datasets}
         for markdown_path, dataset_path in payload.overwrite_datasets.items():
             target = datasets_by_path.get(dataset_path)
-            if target is None or target['source_documents'] != [markdown_path]:
+            if target is None or not dataset_matches_source_file(target, markdown_path):
                 raise HTTPException(status_code=422, detail='Overwrite dataset does not belong exclusively to the selected document.')
             overwrite_targets[markdown_path] = target['filename']
     existing_sources = {
-        source for dataset in existing_datasets for source in dataset['source_documents']
+        path for _, path in jobs
+        if any(dataset_matches_current_markdown(dataset, path) for dataset in existing_datasets)
     } if payload.skip_existing else set()
     run_id = str(uuid.uuid4())
     store = generation_store()

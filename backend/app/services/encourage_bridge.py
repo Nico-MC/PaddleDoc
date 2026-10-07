@@ -499,7 +499,7 @@ def _normalize_openai_base_url(base_url: str) -> str:
         raise ValueError(
             'OPENAI_API_BASE_URL is not configured. Set it in PaddleDoc settings or docker env.'
         )
-    if cleaned.endswith('/v1'):
+    if cleaned.endswith(('/api', '/v1')):
         return cleaned
     return f'{cleaned}/v1'
 

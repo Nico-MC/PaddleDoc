@@ -188,6 +188,28 @@ def test_connection(
         )
 
 
+def list_models(
+    base_url: str,
+    api_key: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
+    allowed_private_hosts: frozenset[str] | None = None,
+) -> list[str]:
+    """GET /api/models and return the model IDs exposed by OpenWebUI."""
+    data = _request_json(
+        _api_url(base_url, '/api/models'), method='GET', api_key=api_key,
+        timeout=timeout, max_bytes=max_bytes, allowed_private_hosts=allowed_private_hosts,
+    )
+    raw_models = data.get('data')
+    if not isinstance(raw_models, list):
+        raise OpenWebUIError('OpenWebUI models response has unexpected shape')
+    return sorted({
+        model['id'] for model in raw_models
+        if isinstance(model, dict) and isinstance(model.get('id'), str) and model['id'].strip()
+    })
+
+
 def list_knowledge(
     base_url: str,
     api_key: str,

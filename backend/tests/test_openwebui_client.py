@@ -12,7 +12,14 @@ from unittest.mock import patch
 
 import pytest
 
-from app.services.openwebui import OpenWebUIError, _escape_header_value, list_knowledge, upload_file, wait_for_processing
+from app.services.openwebui import (
+    OpenWebUIError,
+    _escape_header_value,
+    list_knowledge,
+    list_models,
+    upload_file,
+    wait_for_processing,
+)
 from app.services.openwebui import test_connection as owui_test_connection
 from app.services.safe_fetch import SafeFetchError, SafeFetchResponse
 
@@ -51,6 +58,19 @@ def test_list_knowledge_paginates_until_total_reached():
     assert mock_fetch.call_count == 2
     assert mock_fetch.call_args_list[0][0][0].endswith('/api/v1/knowledge/?page=1')
     assert mock_fetch.call_args_list[1][0][0].endswith('/api/v1/knowledge/?page=2')
+
+
+def test_list_models_fetches_openwebui_models_endpoint():
+    response = _response(200, {'data': [{'id': 'model-b'}, {'id': 'model-a'}, {'name': 'no-id'}]})
+    with patch('app.services.openwebui.safe_fetch', return_value=response) as mock_fetch:
+        models = list_models(
+            'https://owui.example.com', 'sk-1',
+            allowed_private_hosts=frozenset({'owui.example.com'}),
+        )
+    assert models == ['model-a', 'model-b']
+    assert mock_fetch.call_args.args[0] == 'https://owui.example.com/api/models'
+    assert mock_fetch.call_args.kwargs['headers']['Authorization'] == 'Bearer sk-1'
+    assert mock_fetch.call_args.kwargs['allowed_private_hosts'] == frozenset({'owui.example.com'})
 
 
 def test_list_knowledge_stops_on_empty_page_even_if_total_not_reached():

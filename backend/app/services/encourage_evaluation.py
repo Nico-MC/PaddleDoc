@@ -42,19 +42,23 @@ def _source_documents_root() -> Path:
 
 
 def _dataset_public_path(path: Path) -> str:
-    return f'docs/evaluation/{path.name}'
+    relative = path.resolve().relative_to(_evaluation_root().resolve())
+    return f'docs/evaluation/{relative.as_posix()}'
 
 
 def _resolve_dataset_path(dataset_path: str) -> Path:
     normalized = dataset_path.strip().replace('\\', '/').lstrip('/')
     prefix = 'docs/evaluation/'
-    filename = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
-    if not filename or Path(filename).name != filename or not filename.lower().endswith('.jsonl'):
+    relative = normalized[len(prefix) :] if normalized.startswith(prefix) else normalized
+    parts = Path(relative).parts
+    archived = len(parts) == 2 and parts[0] == 'archive'
+    if not parts or (len(parts) != 1 and not archived) or not parts[-1].lower().endswith('.jsonl'):
         raise ValueError(f'Invalid evaluation dataset path: {dataset_path}')
 
     root = _evaluation_root().resolve()
-    candidate = (root / filename).resolve()
-    if candidate.parent != root:
+    directory = root / 'archive' if archived else root
+    candidate = (directory / parts[-1]).resolve()
+    if candidate.parent != directory.resolve():
         raise ValueError(f'Invalid evaluation dataset path: {dataset_path}')
     return candidate
 
@@ -69,14 +73,39 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def list_evaluation_datasets(*, markdown_path: str | None = None) -> list[dict[str, Any]]:
+def _single_row_value(rows: list[dict[str, Any]], field: str) -> str | None:
+    values = {
+        value.strip()
+        for row in rows
+        if isinstance((value := row.get(field)), str) and value.strip()
+    }
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _single_row_timestamp(rows: list[dict[str, Any]], field: str) -> datetime | None:
+    value = _single_row_value(rows, field)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def list_evaluation_datasets(
+    *, markdown_path: str | None = None, archived: bool = False,
+) -> list[dict[str, Any]]:
     root = _evaluation_root().resolve()
-    if not root.exists():
-        root.mkdir(parents=True, exist_ok=True)
+    directory = root / 'archive' if archived else root
+    if not directory.exists():
+        if archived:
+            return []
+        directory.mkdir(parents=True, exist_ok=True)
         return []
 
     items: list[dict[str, Any]] = []
-    files = list(root.glob('*.jsonl'))
+    files = list(directory.glob('*.jsonl'))
 
     for path in sorted(files):
         try:
@@ -102,6 +131,7 @@ def list_evaluation_datasets(*, markdown_path: str | None = None) -> list[dict[s
                     if str(row.get('source_file', '')).strip()
                 }
             )
+            updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
             items.append(
                 {
                     'path': _dataset_public_path(path),
@@ -110,13 +140,47 @@ def list_evaluation_datasets(*, markdown_path: str | None = None) -> list[dict[s
                     'matching_row_count': len(matching_rows),
                     'source_documents': source_documents,
                     'source_files': source_files,
+                    'source_file_sha256': _single_row_value(rows, 'source_file_sha256'),
+                    'source_markdown_sha256': _single_row_value(rows, 'source_markdown_sha256'),
+                    'created_at': _single_row_timestamp(rows, 'dataset_created_at'),
                     'size_bytes': path.stat().st_size,
-                    'updated_at': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                    'updated_at': updated_at,
                 }
             )
         except Exception:
             continue
+    items.sort(key=lambda item: item['created_at'] or item['updated_at'], reverse=True)
     return items
+
+
+def archive_evaluation_dataset(dataset_path: str) -> dict[str, Any]:
+    source = _resolve_dataset_path(dataset_path)
+    root = _evaluation_root().resolve()
+    archive_root = root / 'archive'
+    if source.parent == archive_root.resolve():
+        raise ValueError('Evaluation dataset is already archived.')
+    if source.parent != root or not source.is_file():
+        raise FileNotFoundError(f'Dataset file not found: {dataset_path}')
+
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / source.name
+    if destination.exists():
+        raise FileExistsError(f'An archived dataset named {source.name} already exists.')
+    source.replace(destination)
+    return get_evaluation_dataset_details(_dataset_public_path(destination))
+
+
+def restore_evaluation_dataset(dataset_path: str) -> dict[str, Any]:
+    source = _resolve_dataset_path(dataset_path)
+    root = _evaluation_root().resolve()
+    if source.parent != (root / 'archive').resolve() or not source.is_file():
+        raise FileNotFoundError(f'Archived dataset not found: {dataset_path}')
+
+    destination = root / source.name
+    if destination.exists():
+        raise FileExistsError(f'An active dataset named {source.name} already exists.')
+    source.replace(destination)
+    return get_evaluation_dataset_details(_dataset_public_path(destination))
 
 
 def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
@@ -146,6 +210,9 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
         'row_count': len(rows),
         'source_documents': source_documents,
         'source_files': source_files,
+        'source_file_sha256': _single_row_value(rows, 'source_file_sha256'),
+        'source_markdown_sha256': _single_row_value(rows, 'source_markdown_sha256'),
+        'created_at': _single_row_timestamp(rows, 'dataset_created_at'),
         'size_bytes': dataset_file.stat().st_size,
         'updated_at': datetime.fromtimestamp(dataset_file.stat().st_mtime, tz=timezone.utc),
         'rows': rows,
@@ -184,6 +251,14 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
     if not rows:
         raise ValueError('An evaluation dataset must contain at least one row.')
 
+    existing_created_at = None
+    if dataset_file.is_file():
+        existing_created_at = _single_row_timestamp(_load_jsonl(dataset_file), 'dataset_created_at')
+    created_at = existing_created_at or (
+        None if dataset_file.exists() else datetime.now(timezone.utc)
+    )
+    updated_at = datetime.now(timezone.utc)
+
     normalized_rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     required_fields = ('id', 'question', 'gold_answer', 'evidence_quote', 'source_document')
@@ -203,6 +278,9 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
         for field in ('evidence_anchor', 'evidence_quote', 'notes', 'source_file'):
             if field in normalized:
                 normalized[field] = str(normalized[field]).strip()
+        if created_at is not None:
+            normalized['dataset_created_at'] = created_at.isoformat()
+        normalized['dataset_updated_at'] = updated_at.isoformat()
         normalized_rows.append(normalized)
 
     source_documents = {row['source_document'] for row in normalized_rows}

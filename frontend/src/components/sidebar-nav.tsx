@@ -21,6 +21,7 @@ import {
   ChevronRight,
   BrainCircuit,
   FileSearch,
+  Database,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { PaddleDocLogo } from '@/components/paddledoc-logo';
@@ -33,6 +34,7 @@ const processingChildren = [
 
 const evaluationChildren = [
   { href: '/encourage', label: 'RAG', icon: BrainCircuit, description: 'RAG ingestion and evaluation' },
+  { href: '/evaluation/datasets', label: 'Datasets', icon: Database, description: 'Prepare and manage evaluation datasets' },
   { href: '/evaluation/crawler', label: 'Crawler', icon: FileSearch, description: 'Discover and prepare source documents' },
 ];
 
@@ -65,7 +67,7 @@ const navGroups = [
         href: '/evaluation',
         label: 'Evaluation',
         icon: BrainCircuit,
-        description: 'RAG datasets and source preparation',
+        description: 'Dataset preparation and RAG evaluation',
         children: evaluationChildren,
       },
     ],

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { EncourageDatasetWorkbench } from '@/components/encourage-dataset-workbench';
 import { apiFetch } from '@/lib/api';
 
 type MarkdownFileEntry = {
@@ -155,8 +154,8 @@ type RagMethodOption = {
   disabled?: boolean;
 };
 
-type RagTab = 'indexing' | 'retrieval' | 'generation' | 'benchmarking';
-type BenchmarkTab = 'datasets' | 'evaluation' | 'metrics';
+type WorkspaceTab = 'indexing' | 'retrieval' | 'generation' | 'pipeline-test';
+type EvaluationTab = 'evaluation' | 'metrics';
 
 const RAG_METHOD_OPTIONS: RagMethodOption[] = [
   {
@@ -227,13 +226,11 @@ const RAG_METHOD_OPTIONS: RagMethodOption[] = [
 const DEFAULT_STEP_TWO_QUERY = 'Variiert die Hoehe der Pauschalerstattung nach Tarifklasse?';
 
 export default function EncouragePage() {
-  const [activeRagTab, setActiveRagTab] = useState<RagTab>('indexing');
-  const [activeBenchmarkTab, setActiveBenchmarkTab] = useState<BenchmarkTab>('datasets');
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>('indexing');
+  const [activeEvaluationTab, setActiveEvaluationTab] = useState<EvaluationTab>('evaluation');
   const [items, setItems] = useState<MarkdownFileEntry[]>([]);
-  const [datasets, setDatasets] = useState<EvaluationDatasetEntry[]>([]);
   const [evaluationDatasets, setEvaluationDatasets] = useState<EvaluationDatasetEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>('');
-  const [selectedDatasetPath, setSelectedDatasetPath] = useState<string>('');
   const [selectedEvaluationDatasetPath, setSelectedEvaluationDatasetPath] = useState<string>('');
   const [ingested, setIngested] = useState<EncourageIngestResponse | null>(null);
   const [ingestedSource, setIngestedSource] = useState<MarkdownFileEntry | null>(null);
@@ -259,30 +256,6 @@ export default function EncouragePage() {
   const [isLoadingDatasetDetails, setIsLoadingDatasetDetails] = useState(false);
   const [selectedDatasetDetails, setSelectedDatasetDetails] = useState<EvaluationDatasetDetail | null>(null);
   const selectedItem = items.find((item) => item.path === selectedPath) ?? null;
-
-  const loadDatasets = useCallback(async (preferredPath?: string) => {
-    try {
-      const response = await apiFetch('/api/v1/evaluation-datasets', { cache: 'no-store' });
-      if (!response.ok) {
-        setError('Failed to load evaluation datasets.');
-        return;
-      }
-      const payload = await response.json();
-      const nextDatasets = (payload.items ?? []) as EvaluationDatasetEntry[];
-      setDatasets(nextDatasets);
-      setSelectedDatasetPath((current) => {
-        if (preferredPath && nextDatasets.some((dataset) => dataset.path === preferredPath)) {
-          return preferredPath;
-        }
-        if (nextDatasets.some((dataset) => dataset.path === current)) {
-          return current;
-        }
-        return nextDatasets[0]?.path ?? '';
-      });
-    } catch {
-      setError('Failed to reach the backend while loading evaluation datasets.');
-    }
-  }, []);
 
   const loadEvaluationDatasets = useCallback(async (
     markdownPath: string,
@@ -402,10 +375,6 @@ export default function EncouragePage() {
   }, []);
 
   useEffect(() => {
-    void loadDatasets();
-  }, [loadDatasets]);
-
-  useEffect(() => {
     if (!ingested?.source_markdown.path) {
       setEvaluationDatasets([]);
       setSelectedEvaluationDatasetPath('');
@@ -445,13 +414,6 @@ export default function EncouragePage() {
 
     void loadDatasetDetails();
   }, [selectedEvaluationDatasetPath, showDatasetDetails]);
-
-  const handleDatasetSaved = async (preferredPath: string) => {
-    await loadDatasets(preferredPath);
-    if (ingested?.source_markdown.path) {
-      await loadEvaluationDatasets(ingested.source_markdown.path, preferredPath);
-    }
-  };
 
   const ingestSelectedFile = async () => {
     if (!selectedPath) {
@@ -590,7 +552,7 @@ export default function EncouragePage() {
       }
       const payload = (await response.json()) as EncourageEvaluationResponse;
       setEvaluation(payload);
-      setActiveBenchmarkTab('metrics');
+      setActiveEvaluationTab('metrics');
     } catch {
       setError('Failed to reach the backend while running evaluation.');
     } finally {
@@ -606,9 +568,9 @@ export default function EncouragePage() {
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 px-4 py-8 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto w-full max-w-7xl">
         <div className="mb-8 text-center">
-          <h1 className="font-serif text-4xl font-bold">Encourage RAG Pipeline</h1>
+          <h1 className="font-serif text-4xl font-bold">Encourage Workbench</h1>
           <p className="mt-3 text-lg text-slate-600">
-            Indexierung, Retrieval, Generierung und Benchmarking gezielt bearbeiten.
+            RAG-Pipeline und Evaluationsdaten getrennt verwalten.
           </p>
         </div>
 
@@ -618,45 +580,44 @@ export default function EncouragePage() {
           </div>
         )}
 
-        <nav aria-label="RAG Bereiche" className="mb-6 grid gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm sm:grid-cols-4">
+        <nav aria-label="Arbeitsbereiche" className="mb-6 grid gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm sm:grid-cols-4">
           {([
             ['indexing', 'Indexing', 'Dokumente und Chunks'],
             ['retrieval', 'Retrieval', 'Treffer gezielt prüfen'],
             ['generation', 'Generation', 'Antworten generieren'],
-            ['benchmarking', 'Benchmarking', 'Datasets und Metriken'],
+            ['pipeline-test', 'Benchmarking', 'Retrieval-Pipeline mit Datasets prüfen'],
           ] as const).map(([id, label, description]) => (
             <button
               key={id}
               type="button"
-              onClick={() => setActiveRagTab(id)}
-              aria-current={activeRagTab === id ? 'page' : undefined}
+              onClick={() => setActiveWorkspaceTab(id)}
+              aria-current={activeWorkspaceTab === id ? 'page' : undefined}
               className={`rounded-xl px-4 py-3 text-left transition ${
-                activeRagTab === id
+                activeWorkspaceTab === id
                   ? 'bg-slate-950 text-white shadow-sm'
                   : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950'
               }`}
             >
               <span className="block text-sm font-semibold">{label}</span>
-              <span className={`mt-0.5 block text-xs ${activeRagTab === id ? 'text-slate-300' : 'text-slate-400'}`}>
+              <span className={`mt-0.5 block text-xs ${activeWorkspaceTab === id ? 'text-slate-300' : 'text-slate-400'}`}>
                 {description}
               </span>
             </button>
           ))}
         </nav>
 
-        {activeRagTab === 'benchmarking' && (
-          <nav aria-label="Benchmarking Bereiche" className="mb-6 flex flex-wrap gap-2 rounded-xl border border-purple-100 bg-purple-50 p-2">
+        {activeWorkspaceTab === 'pipeline-test' && (
+          <nav aria-label="Pipeline-Test Bereiche" className="mb-6 flex flex-wrap gap-2 rounded-xl border border-purple-100 bg-purple-50 p-2">
             {([
-              ['datasets', 'Data Sets'],
-              ['evaluation', 'Evaluation'],
-              ['metrics', 'Metrics'],
+              ['evaluation', 'Auswertung'],
+              ['metrics', 'Metriken'],
             ] as const).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
-                onClick={() => setActiveBenchmarkTab(id)}
+                onClick={() => setActiveEvaluationTab(id)}
                 className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-                  activeBenchmarkTab === id
+                  activeEvaluationTab === id
                     ? 'bg-white text-purple-800 shadow-sm'
                     : 'text-purple-600 hover:bg-white/60 hover:text-purple-900'
                 }`}
@@ -669,7 +630,7 @@ export default function EncouragePage() {
 
         <div className="space-y-6">
           {/* STEP 1: INGEST */}
-          {activeRagTab === 'indexing' && (
+          {activeWorkspaceTab === 'indexing' && (
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 font-semibold text-emerald-700">
@@ -904,7 +865,7 @@ export default function EncouragePage() {
           )}
 
           {/* STEP 2: RETRIEVE */}
-          {(activeRagTab === 'retrieval' || activeRagTab === 'generation') && (
+          {(activeWorkspaceTab === 'retrieval' || activeWorkspaceTab === 'generation') && (
           <div
             className={`rounded-2xl border p-6 ${
               ingested
@@ -921,11 +882,11 @@ export default function EncouragePage() {
                 2
               </div>
               <h2 className={`text-xl font-semibold ${ingested ? 'text-slate-950' : 'text-slate-500'}`}>
-                {activeRagTab === 'retrieval' ? 'Retrieval' : 'Generation'}
+                {activeWorkspaceTab === 'retrieval' ? 'Retrieval' : 'Generation'}
               </h2>
             </div>
             <p className={`mb-4 text-sm ${ingested ? 'text-slate-600' : 'text-slate-500'}`}>
-              {activeRagTab === 'retrieval'
+              {activeWorkspaceTab === 'retrieval'
                 ? 'Stelle eine Frage und untersuche die gefundenen Chunks und Scores getrennt von der Generierung.'
                 : 'Generiere eine Antwort aus dem Top-k-Kontext der aktuell indexierten Pipeline.'}
             </p>
@@ -940,7 +901,7 @@ export default function EncouragePage() {
                   className="w-full rounded-lg border border-slate-200 p-3 text-sm"
                 />
                 <div>
-                  {activeRagTab === 'retrieval' && (
+                  {activeWorkspaceTab === 'retrieval' && (
                   <Button
                     onClick={retrieveFromPipeline}
                     disabled={isRetrieving || !query.trim()}
@@ -949,7 +910,7 @@ export default function EncouragePage() {
                     {isRetrieving ? 'Retrieving...' : 'Retrieve'}
                   </Button>
                   )}
-                  {activeRagTab === 'generation' && (
+                  {activeWorkspaceTab === 'generation' && (
                   <Button
                     onClick={generateFromPipeline}
                     disabled={isGenerating || !query.trim()}
@@ -960,7 +921,7 @@ export default function EncouragePage() {
                   )}
                 </div>
 
-                {activeRagTab === 'generation' && generation && (
+                {activeWorkspaceTab === 'generation' && generation && (
                   <div className="mt-4 rounded-2xl border border-cyan-200 bg-cyan-50 p-4 shadow-sm">
                     <p className="text-xs font-semibold uppercase tracking-wide text-cyan-700">
                       Generated Answer
@@ -988,7 +949,7 @@ export default function EncouragePage() {
                   </div>
                 )}
 
-                {activeRagTab === 'retrieval' && retrieval && (
+                {activeWorkspaceTab === 'retrieval' && retrieval && (
                   <div className="mt-4 space-y-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -1069,11 +1030,11 @@ export default function EncouragePage() {
           </div>
           )}
 
-          {/* STEP 3: EVALUATE */}
-          {activeRagTab === 'benchmarking' && (
+          {/* EVALUATION */}
+          {activeWorkspaceTab === 'pipeline-test' && (
           <div
             className={`rounded-2xl border p-6 ${
-              activeBenchmarkTab === 'datasets' || ingested
+              ingested
                 ? 'border-slate-200 bg-white shadow-sm'
                 : 'border-slate-200 bg-slate-50 opacity-50'
             }`}
@@ -1081,41 +1042,25 @@ export default function EncouragePage() {
             <div className="mb-4 flex items-center gap-3">
               <div
                 className={`flex h-10 w-10 items-center justify-center rounded-full font-semibold ${
-                  activeBenchmarkTab === 'datasets' || ingested
+                  ingested
                     ? 'bg-purple-100 text-purple-700'
                     : 'bg-slate-200 text-slate-500'
                 }`}
-              >
-                B
+                >
+                E
               </div>
-              <h2 className={`text-xl font-semibold ${activeBenchmarkTab === 'datasets' || ingested ? 'text-slate-950' : 'text-slate-500'}`}>
-                {activeBenchmarkTab === 'datasets'
-                  ? 'Data Sets'
-                  : activeBenchmarkTab === 'evaluation'
-                    ? 'Evaluation'
-                    : 'Metrics'}
+              <h2 className={`text-xl font-semibold ${ingested ? 'text-slate-950' : 'text-slate-500'}`}>
+                {activeEvaluationTab === 'evaluation' ? 'Auswertung' : 'Metriken'}
               </h2>
             </div>
-            <p className={`mb-4 text-sm ${activeBenchmarkTab === 'datasets' || ingested ? 'text-slate-600' : 'text-slate-500'}`}>
-              {activeBenchmarkTab === 'datasets'
-                ? 'Erstelle, prüfe und bearbeite Retrieval-Evaluationsdaten für eure Word-Dokumente.'
-                : activeBenchmarkTab === 'evaluation'
-                  ? 'Lass ein ausgewähltes Dataset gegen die aktuelle Encourage-Retrieval-Pipeline laufen.'
-                  : 'Untersuche die Ergebnisse und Einzelabfragen des letzten Benchmark-Laufs.'}
+            <p className={`mb-4 text-sm ${ingested ? 'text-slate-600' : 'text-slate-500'}`}>
+              {activeEvaluationTab === 'evaluation'
+                ? 'Lass ein ausgewähltes Dataset gegen die aktuelle Encourage-Retrieval-Pipeline laufen.'
+                : 'Untersuche die Ergebnisse und Einzelabfragen des letzten Pipeline-Tests.'}
             </p>
-
-            {activeBenchmarkTab === 'datasets' ? (
-              <EncourageDatasetWorkbench
-                datasets={datasets}
-                markdownFiles={items}
-                preferredMarkdownPath={selectedPath}
-                selectedDatasetPath={selectedDatasetPath}
-                onSelectDataset={setSelectedDatasetPath}
-                onDatasetSaved={handleDatasetSaved}
-              />
-            ) : ingested ? (
+            {ingested ? (
               <div className="space-y-3">
-                {activeBenchmarkTab === 'evaluation' && (
+                {activeEvaluationTab === 'evaluation' && (
                 <>
                 <div>
                   <div className="flex items-center justify-between gap-3">
@@ -1139,7 +1084,7 @@ export default function EncouragePage() {
                     <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                       <p className="font-medium">Für dieses Markdown gibt es noch kein Dataset.</p>
                       <p className="mt-1 text-xs">
-                        Lege es unter „Data Sets“ an und ordne die Fragen dieser Markdown-Datei zu.
+                        Lege es unter „Datasets“ an und ordne die Fragen dieser Markdown-Datei zu.
                       </p>
                     </div>
                   ) : (
@@ -1282,7 +1227,7 @@ export default function EncouragePage() {
                 </>
                 )}
 
-                {activeBenchmarkTab === 'metrics' && !evaluation && (
+                {activeEvaluationTab === 'metrics' && !evaluation && (
                   <div className="rounded-xl border border-dashed border-purple-200 bg-purple-50/50 p-8 text-center">
                     <p className="font-medium text-purple-900">Noch kein Benchmark-Ergebnis vorhanden.</p>
                     <p className="mt-1 text-sm text-purple-700">
@@ -1291,7 +1236,7 @@ export default function EncouragePage() {
                   </div>
                 )}
 
-                {activeBenchmarkTab === 'metrics' && evaluation && (
+                {activeEvaluationTab === 'metrics' && evaluation && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50 p-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-medium text-purple-900">✓ Evaluation Complete</p>

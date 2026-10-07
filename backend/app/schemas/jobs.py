@@ -180,6 +180,9 @@ class MarkdownFileEntry(BaseModel):
     original_extension: str
     workspace_folder: str
     profile_id: str | None = None
+    source_file_sha256: str | None = None
+    source_markdown_sha256: str
+    document_version: int = 1
     size_bytes: int
     updated_at: datetime
 
@@ -195,6 +198,9 @@ class EvaluationDatasetEntry(BaseModel):
     matching_row_count: int | None = None
     source_documents: list[str] = Field(default_factory=list)
     source_files: list[str] = Field(default_factory=list)
+    source_file_sha256: str | None = None
+    source_markdown_sha256: str | None = None
+    created_at: datetime | None = None
     size_bytes: int
     updated_at: datetime
 
@@ -209,6 +215,9 @@ class EvaluationDatasetDetailResponse(BaseModel):
     row_count: int
     source_documents: list[str] = Field(default_factory=list)
     source_files: list[str] = Field(default_factory=list)
+    source_file_sha256: str | None = None
+    source_markdown_sha256: str | None = None
+    created_at: datetime | None = None
     size_bytes: int
     updated_at: datetime
     rows: list[dict[str, Any]] = Field(default_factory=list)
@@ -217,6 +226,10 @@ class EvaluationDatasetDetailResponse(BaseModel):
 class EvaluationDatasetWriteRequest(BaseModel):
     filename: str = Field(min_length=1)
     rows: list[dict[str, Any]] = Field(min_length=1)
+
+
+class EvaluationDatasetArchiveRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
 
 
 class EvaluationDatasetAiAssistRequest(BaseModel):

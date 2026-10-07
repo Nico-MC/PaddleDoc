@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import hashlib
 import json
 
 import pytest
@@ -133,9 +134,11 @@ def test_generate_dataset_rows_rejects_invented_evidence(monkeypatch):
         '{}',
     ])
     monkeypatch.setattr(dataset_assistant, 'create_llm_runner', lambda **_: runner)
+    markdown = '# Leistung\n\n42 Euro pro Jahr.\n\n# Frist\n\n30 Tage.'
     rows = dataset_assistant.generate_dataset_rows(
-        markdown='# Leistung\n\n42 Euro pro Jahr.\n\n# Frist\n\n30 Tage.',
+        markdown=markdown,
         source_document='job.md', source_file='original.pdf',
+        source_file_sha256='pdf-sha256',
         api_base_url='http://ollama:11434/v1', api_key='ollama',
         model_name='qwen2.5:14b', question_count=2,
     )
@@ -143,6 +146,8 @@ def test_generate_dataset_rows_rejects_invented_evidence(monkeypatch):
     assert rows[0]['evidence_quote'] == '42 Euro pro Jahr.'
     assert rows[0]['review_status'] == 'synthetic'
     assert rows[0]['source_file'] == 'original.pdf'
+    assert rows[0]['source_file_sha256'] == 'pdf-sha256'
+    assert rows[0]['source_markdown_sha256'] == hashlib.sha256(markdown.encode('utf-8')).hexdigest()
     assert len(completions.calls) == 3
 
 
@@ -304,6 +309,30 @@ def test_generation_distributes_ten_questions_across_seventy_pages(monkeypatch):
     assert all(row['sampling_seed'] == 42 for row in rows)
 
 
+def test_generation_reports_passage_sampling_progress(monkeypatch):
+    monkeypatch.setattr(dataset_assistant, 'create_llm_runner', lambda **_: SimpleNamespace())
+    monkeypatch.setattr(dataset_assistant, '_completion_json', lambda runner, **kwargs: {
+        'questions': [{
+            'question': 'Welche Leistung wird genannt?',
+            'gold_answer': 'Die Leistung ist versichert.',
+            'evidence_quote': 'Die Leistung ist versichert.',
+        }],
+    })
+    progress = []
+    rows = dataset_assistant.generate_dataset_rows(
+        markdown='## Page 1\n\nDie Leistung ist versichert.',
+        source_document='job.md', source_file='original.pdf',
+        api_base_url='local', api_key='local', model_name='test', question_count=1,
+        sampling_seed=42, progress_callback=progress.append,
+    )
+
+    assert len(rows) == 1
+    assert progress[-1]['region'] == 1
+    assert progress[-1]['region_count'] == 1
+    assert progress[-1]['passages_checked'] == 1
+    assert progress[-1]['questions_generated'] == 1
+
+
 def test_generation_tries_fresh_passage_after_empty_result(monkeypatch):
     monkeypatch.setattr(dataset_assistant, 'create_llm_runner', lambda **_: SimpleNamespace())
     calls = []
@@ -319,3 +348,29 @@ def test_generation_tries_fresh_passage_after_empty_result(monkeypatch):
     assert len(rows) == 1
     assert len(calls) == 2 and calls[0] != calls[1]
     assert 'source_page' not in rows[0]
+
+
+def test_generation_retries_unproductive_region_before_backfill(monkeypatch):
+    passages = [f'Abschnitt {index} enthält eine eigene belegbare Leistung.' for index in range(1, 7)]
+    monkeypatch.setattr(dataset_assistant, 'create_llm_runner', lambda **_: SimpleNamespace())
+    calls = []
+
+    def complete(runner, **kwargs):
+        passage = kwargs['user_prompt'].split('Passage:\n')[1]
+        calls.append(passage)
+        if len(calls) < 5:
+            return {'questions': []}
+        return {'questions': [{
+            'question': 'Welche Leistung wird genannt?',
+            'gold_answer': passage,
+            'evidence_quote': passage,
+        }]}
+
+    monkeypatch.setattr(dataset_assistant, '_completion_json', complete)
+    rows = dataset_assistant.generate_dataset_rows(
+        markdown='\n\n'.join(passages), source_document='job.md', source_file='original.pdf',
+        api_base_url='local', api_key='local', model_name='test', question_count=1, sampling_seed=42,
+    )
+    assert len(rows) == 1
+    assert len(calls) == 5
+    assert len(set(calls)) == 5

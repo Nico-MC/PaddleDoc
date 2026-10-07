@@ -1,0 +1,57 @@
+services:
+  backend:
+    environment:
+      DATASET_LLM_API_BASE_URL: ${HANSE_AI_HUB_URL:-}
+      DATASET_LLM_API_KEY: ${HANSE_AI_HUB_KEY:-}
+      DATASET_LLM_MODEL: ${HANSE_AI_HUB_MODEL:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    depends_on:
+      dataset-storage-init:
+        condition: service_completed_successfully
+
+  dataset-storage-init:
+    image: paddledoc_dev-backend
+    user: '0:0'
+    restart: 'no'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    command: ['/bin/sh', '-ec', 'mkdir -p /app/docs/evaluation && chown 1000:1000 /app/docs/evaluation']
+    volumes:
+      - ../.docs:/app/docs
+
+  dataset-worker:
+    image: paddledoc_dev-backend
+    restart: unless-stopped
+    command: ['celery', '-A', 'app.workers.dataset_tasks:celery_app', 'worker', '-Q', 'datasets', '--concurrency=1', '--prefetch-multiplier=1', '--max-tasks-per-child=5', '--loglevel=INFO', '--hostname=datasets@%h']
+    mem_limit: ${DATASET_WORKER_MEMORY_LIMIT:-2g}
+    cpus: 1.0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      DATASET_LLM_API_BASE_URL: ${HANSE_AI_HUB_URL:-}
+      DATASET_LLM_API_KEY: ${HANSE_AI_HUB_KEY:-}
+      DATASET_LLM_MODEL: ${HANSE_AI_HUB_MODEL:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ../encourage:/app/encourage:ro
+      - ../.docs:/app/docs
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started

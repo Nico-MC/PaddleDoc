@@ -1,4 +1,5 @@
 import json
+import hashlib
 from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +13,8 @@ from app.models.models import JobStatus
 from app.schemas.jobs import EvaluationDatasetGenerateRequest
 from app.workers import dataset_tasks
 from app.services import encourage_evaluation
+from app.services.dataset_assistant import _normalize_dataset_api_base_url
+from app.services.encourage_bridge import _normalize_openai_base_url
 
 
 class _Store:
@@ -58,8 +61,21 @@ class _Database:
 def _job(job_id='job-1'):
     return SimpleNamespace(
         id=job_id, owner_id='user-1', status=JobStatus.FINISHED,
-        original_filename='original.pdf', result_markdown='Eine belegbare Passage.',
+        original_filename='original.pdf', content_sha256='pdf-content-hash',
+        result_markdown='Eine belegbare Passage.',
     )
+
+
+@pytest.mark.parametrize(('base_url', 'expected'), [
+    ('https://aihub.example', 'https://aihub.example/api'),
+    ('https://aihub.example/', 'https://aihub.example/api'),
+    ('https://aihub.example/api', 'https://aihub.example/api'),
+    ('http://ollama:11434/v1', 'http://ollama:11434/v1'),
+])
+def test_normalize_dataset_api_base_url(base_url, expected):
+    normalized_url = _normalize_dataset_api_base_url(base_url)
+    assert normalized_url == expected
+    assert _normalize_openai_base_url(normalized_url) == expected
 
 
 def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_datasets=None, skip_existing=True, sampling_seed=None):
@@ -86,11 +102,164 @@ def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_d
 
 def test_generation_queues_only_new_documents(monkeypatch):
     store = _Store()
-    run_id, calls = _start(monkeypatch, store, [_job(), _job('job-2')], [{'source_documents': ['job-1.md']}])
+    current_markdown_hash = hashlib.sha256(_job().result_markdown.encode('utf-8')).hexdigest()
+    existing = [{
+        'source_documents': ['job-1.md'],
+        'source_file_sha256': 'pdf-content-hash',
+        'source_markdown_sha256': current_markdown_hash,
+    }]
+    run_id, calls = _start(monkeypatch, store, [_job(), _job('job-2')], existing)
     assert calls == [{'args': [run_id, 'job-2'], 'queue': 'datasets'}]
     result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
     assert [item['status'] for item in result['items']] == ['skipped', 'queued']
     assert result['finished'] is False
+
+
+def test_generation_skip_matches_dataset_from_another_markdown_for_same_pdf(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/old.jsonl',
+        'filename': 'old.jsonl',
+        'source_documents': ['old-job.md'],
+        'source_files': ['original.pdf'],
+        'source_file_sha256': 'pdf-content-hash',
+        'source_markdown_sha256': 'outdated-markdown-hash',
+    }]
+    run_id, calls = _start(monkeypatch, store, [_job()], existing=existing)
+
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+
+    assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
+    assert result['items'][0]['status'] == 'queued'
+
+
+def test_generation_does_not_match_legacy_dataset_by_filename_alone(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/legacy.jsonl',
+        'filename': 'legacy.jsonl',
+        'source_documents': ['deleted-job.md'],
+        'source_files': ['original.pdf'],
+    }]
+
+    run_id, calls = _start(monkeypatch, store, [_job()], existing=existing)
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+
+    assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
+    assert result['items'][0]['status'] == 'queued'
+
+
+def test_generation_rejects_legacy_overwrite_matched_only_by_filename(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/legacy.jsonl',
+        'filename': 'legacy.jsonl',
+        'source_documents': ['deleted-job.md'],
+        'source_files': ['original.pdf'],
+    }]
+
+    with pytest.raises(HTTPException) as error:
+        _start(
+            monkeypatch, store, [_job()], existing=existing, skip_existing=False,
+            overwrite_datasets={'job-1.md': 'docs/evaluation/legacy.jsonl'},
+        )
+
+    assert error.value.status_code == 422
+    assert not store.hashes
+
+
+def test_generation_skip_skips_when_markdown_hash_matches(monkeypatch):
+    store = _Store()
+    current_markdown = _job().result_markdown
+    existing = [{
+        'path': 'docs/evaluation/current.jsonl',
+        'filename': 'current.jsonl',
+        'source_documents': ['job-1.md'],
+        'source_files': ['original.pdf'],
+        'source_file_sha256': 'pdf-content-hash',
+        'source_markdown_sha256': hashlib.sha256(current_markdown.encode('utf-8')).hexdigest(),
+    }]
+
+    run_id, calls = _start(monkeypatch, store, [_job()], existing=existing)
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+
+    assert calls == []
+    assert result['items'][0]['status'] == 'skipped'
+
+
+def test_generation_does_not_skip_when_markdown_hash_is_outdated(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/old.jsonl',
+        'filename': 'old.jsonl',
+        'source_documents': ['job-1.md'],
+        'source_files': ['original.pdf'],
+        'source_file_sha256': 'pdf-content-hash',
+        'source_markdown_sha256': 'outdated-markdown-hash',
+    }]
+
+    run_id, calls = _start(monkeypatch, store, [_job()], existing=existing)
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+
+    assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
+    assert result['items'][0]['status'] == 'queued'
+
+
+def test_generation_does_not_skip_legacy_dataset_without_markdown_hash(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/legacy.jsonl',
+        'filename': 'legacy.jsonl',
+        'source_documents': ['job-1.md'],
+        'source_files': ['original.pdf'],
+    }]
+
+    run_id, calls = _start(monkeypatch, store, [_job()], existing=existing)
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+
+    assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
+    assert result['items'][0]['status'] == 'queued'
+
+
+def test_generation_can_overwrite_dataset_from_another_markdown_for_same_pdf(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/old.jsonl',
+        'filename': 'old.jsonl',
+        'source_documents': ['old-job.md'],
+        'source_files': ['original.pdf'],
+        'source_file_sha256': 'pdf-content-hash',
+        'source_markdown_sha256': 'outdated-markdown-hash',
+    }]
+    run_id, calls = _start(
+        monkeypatch, store, [_job()], existing=existing, skip_existing=False,
+        overwrite_datasets={'job-1.md': 'docs/evaluation/old.jsonl'},
+    )
+
+    item = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))['items'][0]
+    assert len(calls) == 1
+    assert item['target_dataset_filename'] == 'old.jsonl'
+
+
+def test_generation_rejects_overwrite_when_known_pdf_hash_differs(monkeypatch):
+    store = _Store()
+    existing = [{
+        'path': 'docs/evaluation/other.pdf.jsonl',
+        'filename': 'other.pdf.jsonl',
+        'source_documents': ['old-job.md'],
+        'source_files': ['original.pdf'],
+        'source_file_sha256': 'different-pdf-content-hash',
+        'source_markdown_sha256': 'old-markdown-hash',
+    }]
+
+    with pytest.raises(HTTPException) as error:
+        _start(
+            monkeypatch, store, [_job()], existing=existing, skip_existing=False,
+            overwrite_datasets={'job-1.md': 'docs/evaluation/other.pdf.jsonl'},
+        )
+
+    assert error.value.status_code == 422
+    assert not store.hashes
 
 
 def test_generation_status_is_owner_scoped(monkeypatch):
@@ -135,7 +304,15 @@ def test_generation_worker_saves_once_and_records_progress(monkeypatch):
     monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
     monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
     captured = []
-    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', lambda **kwargs: captured.append(kwargs) or [{'id': 'q001'}])
+    def generate(**kwargs):
+        captured.append(kwargs)
+        kwargs['progress_callback']({
+            'phase': 'coverage', 'region': 1, 'region_count': 1,
+            'passage_attempt': 1, 'passages_checked': 1, 'passages_available': 2,
+            'questions_generated': 1, 'question_target': 10,
+        })
+        return [{'id': 'q001'}]
+    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', generate)
     saved = []
     monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved.append(filename) or {'path': f'docs/evaluation/{filename}'})
     dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
@@ -145,11 +322,19 @@ def test_generation_worker_saves_once_and_records_progress(monkeypatch):
     assert result['items'][0]['status'] == 'completed'
     assert result['items'][0]['row_count'] == 1
     assert 'Nur 1 von 10' in result['items'][0]['warning']
+    assert 'Dokumentabschnitten' not in result['items'][0]['warning']
+    assert '1 von 10' in result['items'][0]['coverage_note']
     assert captured[0]['source_document'] == 'job-1.md'
     assert captured[0]['source_file'] == 'original.pdf'
     assert captured[0]['model_name'] == 'qwen2.5:3b'
     assert isinstance(captured[0]['sampling_seed'], int)
     assert len(saved) == 1
+    result_item = result['items'][0]
+    assert result_item['dataset_action'] == 'created'
+    assert result_item['dataset_filename'] == saved[0]
+    assert isinstance(result_item['started_at'], float)
+    assert result_item['duration_seconds'] >= 0
+    assert result_item['progress']['passages_checked'] == 1
 
 
 def test_generation_worker_records_failures(monkeypatch):
@@ -161,6 +346,7 @@ def test_generation_worker_records_failures(monkeypatch):
     item = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'job-1'))
     assert item['status'] == 'failed'
     assert 'no longer available' in item['error']
+    assert item['duration_seconds'] >= 0
     assert not store.locks
 
 
@@ -193,11 +379,16 @@ def test_generation_overwrites_only_selected_dataset(monkeypatch):
     )
     monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
     monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
-    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', lambda **kwargs: [{'id': 'q001'}])
+    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', lambda **kwargs: [{
+        'id': 'q001', 'sampling_region': 1, 'sampling_region_count': 10,
+    }])
     saved = []
     monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved.append(filename) or {'path': f'docs/evaluation/{filename}'})
     dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
     assert saved == ['old.jsonl']
+    item = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))['items'][0]
+    assert item['dataset_action'] == 'overwritten'
+    assert item['dataset_filename'] == 'old.jsonl'
     assert len(calls) == 1
 
 

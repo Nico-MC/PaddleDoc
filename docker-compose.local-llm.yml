@@ -7,25 +7,6 @@ services:
     depends_on:
       ollama-init:
         condition: service_completed_successfully
-      dataset-storage-init:
-        condition: service_completed_successfully
-
-  dataset-storage-init:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    user: '0:0'
-    restart: 'no'
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-    command: ['/bin/sh', '-ec', 'mkdir -p /app/docs/evaluation && chown 1000:1000 /app/docs/evaluation']
-    volumes:
-      - ../.docs:/app/docs
 
   ollama:
     image: ollama/ollama:${OLLAMA_TAG:-0.11.11}
@@ -58,33 +39,11 @@ services:
         condition: service_healthy
 
   dataset-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    command: ['celery', '-A', 'app.workers.dataset_tasks:celery_app', 'worker', '-Q', 'datasets', '--concurrency=1', '--prefetch-multiplier=1', '--max-tasks-per-child=5', '--loglevel=INFO', '--hostname=datasets@%h']
-    mem_limit: ${DATASET_WORKER_MEMORY_LIMIT:-2g}
-    cpus: 1.0
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     environment:
-      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/paddledoc
-      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       DATASET_LLM_API_BASE_URL: http://ollama:11434/v1
       DATASET_LLM_API_KEY: ollama
       DATASET_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:14b}
-    volumes:
-      - ./backend/app:/app/app:ro
-      - ../encourage:/app/encourage:ro
-      - ../.docs:/app/docs
     depends_on:
-      backend:
-        condition: service_healthy
-      redis:
-        condition: service_started
       ollama-init:
         condition: service_completed_successfully
 

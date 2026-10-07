@@ -34,6 +34,78 @@ def test_save_list_and_load_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert loaded['rows'][0]['question'] == 'Wie hoch ist die Erstattung?'
 
 
+def test_dataset_list_exposes_source_and_markdown_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+    row = _row(source_file_sha256='pdf-hash', source_markdown_sha256='markdown-hash')
+
+    saved = encourage_evaluation.save_evaluation_dataset('hashed.jsonl', [row])
+    listed = encourage_evaluation.list_evaluation_datasets()[0]
+
+    assert listed['source_file_sha256'] == 'pdf-hash'
+    assert listed['source_markdown_sha256'] == 'markdown-hash'
+    assert saved['source_file_sha256'] == 'pdf-hash'
+    assert saved['source_markdown_sha256'] == 'markdown-hash'
+
+
+def test_dataset_creation_timestamp_is_preserved_and_lists_newest_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+    row = _row()
+
+    first = encourage_evaluation.save_evaluation_dataset('first.jsonl', [row])
+    second = encourage_evaluation.save_evaluation_dataset('second.jsonl', [_row(id='q-002')])
+    overwritten = encourage_evaluation.save_evaluation_dataset(
+        'first.jsonl', [{**row, 'question': 'Aktualisierte Frage?'}],
+    )
+
+    assert first['created_at'] is not None
+    assert overwritten['created_at'] == first['created_at']
+    listed = encourage_evaluation.list_evaluation_datasets()
+    assert listed[0]['filename'] == 'second.jsonl'
+    assert listed[0]['created_at'] >= listed[1]['created_at']
+
+
+def test_archived_dataset_is_hidden_and_can_be_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation_root = tmp_path / 'evaluation'
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: evaluation_root)
+    saved = encourage_evaluation.save_evaluation_dataset('example.jsonl', [_row()])
+
+    archived = encourage_evaluation.archive_evaluation_dataset(saved['path'])
+
+    assert archived['path'] == 'docs/evaluation/archive/example.jsonl'
+    assert encourage_evaluation.list_evaluation_datasets() == []
+    archived_items = encourage_evaluation.list_evaluation_datasets(archived=True)
+    assert [item['filename'] for item in archived_items] == ['example.jsonl']
+    assert encourage_evaluation.get_evaluation_dataset_details(archived['path'])['rows'] == saved['rows']
+
+    restored = encourage_evaluation.restore_evaluation_dataset(archived['path'])
+
+    assert restored['path'] == saved['path']
+    assert [item['filename'] for item in encourage_evaluation.list_evaluation_datasets()] == ['example.jsonl']
+    assert encourage_evaluation.list_evaluation_datasets(archived=True) == []
+
+
+def test_restore_conflict_preserves_archived_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluation_root = tmp_path / 'evaluation'
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: evaluation_root)
+    saved = encourage_evaluation.save_evaluation_dataset('example.jsonl', [_row()])
+    archived = encourage_evaluation.archive_evaluation_dataset(saved['path'])
+    encourage_evaluation.save_evaluation_dataset('example.jsonl', [_row(id='q-002')])
+
+    with pytest.raises(FileExistsError, match='active dataset named example.jsonl'):
+        encourage_evaluation.restore_evaluation_dataset(archived['path'])
+
+    assert len(encourage_evaluation.list_evaluation_datasets(archived=True)) == 1
+    assert encourage_evaluation.list_evaluation_datasets()[0]['row_count'] == 1
+
+
 def test_list_datasets_filters_for_selected_markdown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

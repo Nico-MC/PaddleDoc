@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { DatasetGenerator } from '@/components/dataset-generator';
-import { Sparkles } from 'lucide-react';
+import { Archive, Download, Pencil, RotateCcw, Sparkles, X } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 
 type DatasetEntry = {
@@ -12,6 +12,9 @@ type DatasetEntry = {
   row_count: number;
   source_documents: string[];
   source_files: string[];
+  source_file_sha256?: string | null;
+  source_markdown_sha256?: string | null;
+  created_at?: string | null;
 };
 
 type DatasetDetail = DatasetEntry & {
@@ -24,6 +27,9 @@ type MarkdownEntry = {
   original_filename: string;
   original_extension: string;
   workspace_folder: string;
+  source_file_sha256?: string | null;
+  source_markdown_sha256?: string | null;
+  document_version?: number;
 };
 
 type WordSource = {
@@ -42,6 +48,8 @@ type DatasetRow = {
   evidence_anchor: string;
   source_document: string;
   source_file: string;
+  source_file_sha256?: string;
+  source_markdown_sha256?: string;
   notes: string;
   review_status?: string;
   generation_model?: string;
@@ -90,6 +98,16 @@ const emptyRow = (
 const textValue = (row: Record<string, unknown>, key: keyof DatasetRow) => {
   const value = row[key];
   return value === null || value === undefined ? '' : String(value);
+};
+
+const formatDatasetCreatedAt = (value?: string | null) => {
+  if (!value) return 'Erstellungszeitpunkt nicht erfasst';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Erstellungszeitpunkt nicht erfasst';
+  return `Erstellt ${new Intl.DateTimeFormat('de-DE', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)}`;
 };
 
 const sourceFilename = (path: string) => path.split('/').at(-1) || path;
@@ -212,6 +230,10 @@ export function EncourageDatasetWorkbench({
   onDatasetSaved,
 }: Props) {
   const [wordSources, setWordSources] = useState<WordSource[]>([]);
+  const [archivedDatasets, setArchivedDatasets] = useState<DatasetEntry[]>([]);
+  const [showArchivedDatasets, setShowArchivedDatasets] = useState(false);
+  const [isLoadingArchivedDatasets, setIsLoadingArchivedDatasets] = useState(false);
+  const [isDatasetActionRunning, setIsDatasetActionRunning] = useState(false);
   const [showGenerator, setShowGenerator] = useState(false);
   const [details, setDetails] = useState<DatasetDetail | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
@@ -233,6 +255,20 @@ export function EncourageDatasetWorkbench({
   const [aiAssistFeedback, setAiAssistFeedback] = useState<Record<number, AiAssistFeedback>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  const loadArchivedDatasets = useCallback(async () => {
+    setIsLoadingArchivedDatasets(true);
+    try {
+      const response = await apiFetch('/api/v1/evaluation-datasets/archive', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Archivierte Datasets konnten nicht geladen werden.');
+      const payload = await response.json();
+      setArchivedDatasets((payload.items ?? []) as DatasetEntry[]);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Archiv konnte nicht geladen werden.');
+    } finally {
+      setIsLoadingArchivedDatasets(false);
+    }
+  }, []);
 
   const datasetWordSources = (dataset: DatasetEntry) => {
     const explicitSources = dataset.source_files.map(sourceFilename);
@@ -348,10 +384,10 @@ export function EncourageDatasetWorkbench({
     setIsEditing(true);
   };
 
-  const startEditingDataset = () => {
-    if (!details) return;
+  const startEditingDataset = (datasetDetails: DatasetDetail | null = details) => {
+    if (!datasetDetails) return;
     const sourceDocuments = [...new Set(
-      details.rows.map((row) => textValue(row, 'source_document')).filter(Boolean),
+      datasetDetails.rows.map((row) => textValue(row, 'source_document')).filter(Boolean),
     )];
     if (sourceDocuments.length > 1) {
       setLocalError(
@@ -360,19 +396,19 @@ export function EncourageDatasetWorkbench({
       return;
     }
     const sourceFiles = [...new Set(
-      details.rows.map((row) => textValue(row, 'source_file')).filter(Boolean),
+      datasetDetails.rows.map((row) => textValue(row, 'source_file')).filter(Boolean),
     )];
     const markdownEntry = matchingMarkdownEntry(markdownFiles, sourceDocuments[0] ?? '');
     const detectedQuestionStyle = QUESTION_STYLE_OPTIONS.find(
-      (option) => details.filename.includes(`_${option.id}_`),
+      (option) => datasetDetails.filename.includes(`_${option.id}_`),
     )?.id ?? 'mixed-questions';
-    setFilename(details.filename);
+    setFilename(datasetDetails.filename);
     setFilenameWasEdited(true);
     setQuestionStyle(detectedQuestionStyle);
     setDatasetMarkdownPath(markdownEntry?.path ?? sourceDocuments[0] ?? '');
     setDatasetSourceFile(sourceFiles[0] ?? matchingWordSource(markdownEntry?.path ?? ''));
     setRows(
-      details.rows.map((row, index) => ({
+      datasetDetails.rows.map((row, index) => ({
         ...row,
         id: textValue(row, 'id') || `q${String(index + 1).padStart(3, '0')}`,
         question: textValue(row, 'question'),
@@ -562,6 +598,7 @@ export function EncourageDatasetWorkbench({
       );
       return;
     }
+    const markdownEntry = matchingMarkdownEntry(markdownFiles, datasetMarkdownPath);
 
     setIsSaving(true);
     setLocalError(null);
@@ -579,6 +616,8 @@ export function EncourageDatasetWorkbench({
               inferEvidenceAnchor(markdownContent, row.evidence_quote) || row.evidence_anchor,
             source_document: datasetMarkdownPath,
             source_file: datasetSourceFile,
+            source_file_sha256: markdownEntry?.source_file_sha256 ?? undefined,
+            source_markdown_sha256: markdownEntry?.source_markdown_sha256 ?? undefined,
           })),
         }),
       });
@@ -604,15 +643,101 @@ export function EncourageDatasetWorkbench({
     }
   };
 
-  const downloadDataset = () => {
-    if (!details) return;
-    const jsonl = `${details.rows.map((row) => JSON.stringify(row)).join('\n')}\n`;
-    const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = details.filename;
-    link.click();
-    URL.revokeObjectURL(url);
+  const downloadDataset = async (dataset: DatasetEntry) => {
+    setIsDatasetActionRunning(true);
+    setLocalError(null);
+    try {
+      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
+      const loaded = (await response.json()) as DatasetDetail;
+      const jsonl = `${loaded.rows.map((row) => JSON.stringify(row)).join('\n')}\n`;
+      const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = loaded.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht heruntergeladen werden.');
+    } finally {
+      setIsDatasetActionRunning(false);
+    }
+  };
+
+  const editDataset = async (dataset: DatasetEntry) => {
+    setLocalError(null);
+    try {
+      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
+      const loaded = (await response.json()) as DatasetDetail;
+      setDetails(loaded);
+      onSelectDataset(dataset.path);
+      startEditingDataset(loaded);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht bearbeitet werden.');
+    }
+  };
+
+  const archiveDataset = async (dataset: DatasetEntry) => {
+    if (!window.confirm(`„${dataset.filename}“ wird archiviert und kann später wiederhergestellt werden. Fortfahren?`)) return;
+    setIsDatasetActionRunning(true);
+    setLocalError(null);
+    try {
+      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Dataset konnte nicht archiviert werden.');
+      }
+      setMessage(`${dataset.filename} wurde archiviert und kann im Archiv wiederhergestellt werden.`);
+      await loadArchivedDatasets();
+      const nextSelection = selectedDatasetPath === dataset.path ? '' : selectedDatasetPath;
+      onSelectDataset(nextSelection);
+      await onDatasetSaved(nextSelection);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht archiviert werden.');
+    } finally {
+      setIsDatasetActionRunning(false);
+    }
+  };
+
+  const restoreDataset = async (dataset: DatasetEntry) => {
+    setIsDatasetActionRunning(true);
+    setLocalError(null);
+    try {
+      const response = await apiFetch('/api/v1/evaluation-datasets/archive/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: dataset.path }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Dataset konnte nicht wiederhergestellt werden.');
+      }
+      const restored = (await response.json()) as DatasetDetail;
+      setShowArchivedDatasets(false);
+      await loadArchivedDatasets();
+      onSelectDataset(restored.path);
+      await onDatasetSaved(restored.path);
+      setMessage(`${restored.filename} wurde aus dem Archiv wiederhergestellt.`);
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht wiederhergestellt werden.');
+    } finally {
+      setIsDatasetActionRunning(false);
+    }
+  };
+
+  const visibleDatasets = showArchivedDatasets ? archivedDatasets : datasets;
+
+  const toggleArchivedDatasets = () => {
+    const showArchive = !showArchivedDatasets;
+    setShowArchivedDatasets(showArchive);
+    setLocalError(null);
+    if (showArchive) void loadArchivedDatasets();
+    if (!showArchive && !datasets.some((dataset) => dataset.path === selectedDatasetPath)) {
+      onSelectDataset(datasets[0]?.path ?? '');
+    }
   };
 
   return (
@@ -621,24 +746,37 @@ export function EncourageDatasetWorkbench({
         <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h3 className="text-lg font-semibold text-slate-950">Dataset erstellen</h3>
           <div className="mt-4 flex flex-wrap gap-2">
-            <Button onClick={() => setShowGenerator((previous) => !previous)} disabled={isEditing} className="bg-emerald-600 hover:bg-emerald-700">
-              <Sparkles className="mr-2 h-4 w-4" />Dataset generieren
+            <Button
+              onClick={() => setShowGenerator((previous) => !previous)}
+              disabled={isEditing}
+              variant={showGenerator ? 'outline' : 'default'}
+              className={showGenerator ? undefined : 'bg-emerald-600 hover:bg-emerald-700'}
+            >
+              {showGenerator ? <X className="mr-2 h-4 w-4" /> : <Sparkles className="mr-2 h-4 w-4" />}
+              {showGenerator ? 'Generierung schließen' : 'Dataset generieren'}
             </Button>
-            <Button onClick={startNewDataset} disabled={isEditing} variant="outline">
-              {isEditing ? 'Formular geöffnet' : 'Manuell erstellen'}
-            </Button>
+            {!showGenerator && (
+              <Button onClick={startNewDataset} disabled={isEditing} variant="outline">
+                {isEditing ? 'Formular geöffnet' : 'Manuell erstellen'}
+              </Button>
+            )}
           </div>
           {showGenerator && <DatasetGenerator files={markdownFiles} datasets={datasets} preferredPath={preferredMarkdownPath} onSaved={onDatasetSaved} />}
         </section>
 
-        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {!showGenerator && <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="text-lg font-semibold text-slate-950">Bestehende Evaluationssets</h3>
+              <h3 className="text-lg font-semibold text-slate-950">{showArchivedDatasets ? 'Archivierte Datasets' : 'Bestehende Evaluationssets'}</h3>
               <p className="mt-1 text-sm text-slate-500">
-                JSONL-Fragen, Goldantworten und Evidenz für eure Dokumente verwalten.
+                {showArchivedDatasets
+                  ? 'Archivierte Datasets sind nicht in Benchmarks auswählbar und können hier wiederhergestellt werden.'
+                  : 'JSONL-Fragen, Goldantworten und Evidenz für eure Dokumente verwalten.'}
               </p>
             </div>
+            <Button type="button" variant="outline" size="sm" disabled={isEditing || isDatasetActionRunning} onClick={toggleArchivedDatasets}>
+              {showArchivedDatasets ? 'Aktive Datasets' : `Archiv${archivedDatasets.length ? ` (${archivedDatasets.length})` : ''}`}
+            </Button>
           </div>
 
           {isEditing && (
@@ -649,46 +787,58 @@ export function EncourageDatasetWorkbench({
           )}
 
           <div className="mt-4 grid gap-2">
-            {datasets.length === 0 ? (
+            {isLoadingArchivedDatasets && showArchivedDatasets ? (
+              <p className="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500">Archiv wird geladen…</p>
+            ) : visibleDatasets.length === 0 ? (
               <p className="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500">
-                Noch keine JSONL-Datasets vorhanden.
+                {showArchivedDatasets ? 'Das Archiv ist leer.' : 'Noch keine JSONL-Datasets vorhanden.'}
               </p>
             ) : (
-              datasets.map((dataset) => (
-                <button
-                  key={dataset.path}
-                  type="button"
-                  disabled={isEditing}
-                  onClick={() => onSelectDataset(dataset.path)}
-                  className={`min-w-0 break-words rounded-xl border-2 p-3 text-left transition ${
-                    isEditing
-                      ? 'cursor-not-allowed border-slate-200 bg-slate-50 opacity-55'
-                      : dataset.path === selectedDatasetPath
-                      ? 'border-purple-500 bg-purple-50'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  {(() => {
-                    const originalFiles = datasetWordSources(dataset);
-                    return (
-                      <>
-                  <p className="font-medium text-slate-900">{dataset.filename}</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    {dataset.row_count} Fragen
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">
-                    Original: {originalFiles.length > 0
-                      ? originalFiles.join(', ')
-                      : 'nicht zugeordnet'}
-                  </p>
-                      </>
-                    );
-                  })()}
-                </button>
-              ))
+              visibleDatasets.map((dataset) => {
+                const originalFiles = datasetWordSources(dataset);
+                const selected = dataset.path === selectedDatasetPath;
+                return (
+                  <div key={dataset.path} className={`flex min-w-0 items-center gap-2 rounded-xl border-2 p-2 transition ${
+                    selected ? 'border-purple-500 bg-purple-50' : 'border-slate-200 bg-white'
+                  }`}>
+                    <button
+                      type="button"
+                      disabled={isEditing || isDatasetActionRunning}
+                      onClick={() => onSelectDataset(dataset.path)}
+                      className="min-w-0 flex-1 break-words rounded-lg p-2 text-left hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-55"
+                    >
+                      <p className="font-medium text-slate-900">{dataset.filename}</p>
+                      <p className="mt-1 text-xs text-slate-500">{dataset.row_count} Fragen</p>
+                      <p className="mt-1 text-xs text-slate-500">{formatDatasetCreatedAt(dataset.created_at)}</p>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Original: {originalFiles.length > 0 ? originalFiles.join(', ') : 'nicht zugeordnet'}
+                      </p>
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {showArchivedDatasets ? (
+                        <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void restoreDataset(dataset)} aria-label={`Dataset ${dataset.filename} wiederherstellen`} title="Wiederherstellen">
+                          <RotateCcw className="h-4 w-4" />
+                        </Button>
+                      ) : (
+                        <>
+                          <Button type="button" size="sm" variant="outline" disabled={isEditing || isDatasetActionRunning} onClick={() => void editDataset(dataset)} aria-label={`Dataset ${dataset.filename} bearbeiten`} title="Bearbeiten">
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button type="button" size="sm" variant="outline" disabled={isEditing || isDatasetActionRunning} onClick={() => void archiveDataset(dataset)} aria-label={`Dataset ${dataset.filename} archivieren`} title="Archivieren">
+                            <Archive className="h-4 w-4" />
+                          </Button>
+                        </>
+                      )}
+                      <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void downloadDataset(dataset)} aria-label={`Dataset ${dataset.filename} herunterladen`} title="Herunterladen">
+                        <Download className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
-        </section>
+        </section>}
       </div>
 
       {localError && (
@@ -943,7 +1093,7 @@ export function EncourageDatasetWorkbench({
             Frage hinzufügen
           </Button>
         </section>
-      ) : (
+      ) : !showGenerator ? (
         <section className="rounded-2xl border border-purple-200 bg-white p-5 shadow-sm">
           {isLoadingDetails ? (
             <p className="text-sm text-slate-500">Dataset wird geladen…</p>
@@ -959,10 +1109,6 @@ export function EncourageDatasetWorkbench({
                       : 'nicht zugeordnet'}
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" onClick={downloadDataset}>JSONL herunterladen</Button>
-                  <Button onClick={startEditingDataset}>Bearbeiten</Button>
-                </div>
               </div>
               <div className="mt-4 max-h-[36rem] space-y-3 overflow-y-auto pr-1">
                 {details.rows.map((row, index) => (
@@ -975,7 +1121,7 @@ export function EncourageDatasetWorkbench({
                     <div className="mt-3 grid gap-1 text-xs text-slate-500">
                       <p>Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
                       {typeof row.source_page === 'number' && <p>Seite: {row.source_page}</p>}
-                      {typeof row.sampling_region === 'number' && <p>Dokumentbereich: {row.sampling_region} / {String(row.sampling_region_count ?? '')}{row.sampling_method === 'text_position' ? ' (Textposition)' : ''}</p>}
+                      {typeof row.sampling_region === 'number' && <p>Dokumentabschnitt: {row.sampling_region} / {String(row.sampling_region_count ?? '')}{row.sampling_method === 'text_position' ? ' (Textposition)' : ''}</p>}
                       {Boolean(row.evidence_anchor) && <p>Abschnitt: {String(row.evidence_anchor)}</p>}
                     </div>
                   </article>
@@ -986,7 +1132,7 @@ export function EncourageDatasetWorkbench({
             <p className="text-sm text-slate-500">Wähle ein Dataset aus oder lege ein neues an.</p>
           )}
         </section>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -62,18 +62,33 @@ Choose your deployment mode:
 |---|---|---|
 | Standalone Docker | Everyone — Windows, macOS, Linux, NAS | `./scripts/init-env.sh && docker compose up -d` |
 | Docker (Dev/Single Host) | Contributors; OCR, backend and frontend, without a local LLM | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml up --build -d --wait --wait-timeout 1800` |
-| Docker (Dev + local LLM) | Contributors who want local dataset generation | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800` |
-| Docker (Dev + local LLM GPU) | NVIDIA GPU for local dataset generation only | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + Hanse AI Hub) | Contributors using the shared Open WebUI for dataset generation | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + local LLM) | Contributors who want dataset generation with local Ollama | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800` |
+| Docker (Dev + local LLM GPU) | NVIDIA GPU for local dataset generation only | `./scripts/init-env.sh && docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800` |
 | Docker + NVIDIA GPU | Windows Docker Desktop with GPU-enabled worker profile | `wsl bash scripts/init-env.sh; docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` |
 | Kubernetes (Helm) | k3s/k8s clusters and scale-out deployments | `helm upgrade --install paddledoc ./charts/paddledoc -n paddledoc --create-namespace --set auth.secretKey.value=$(openssl rand -hex 32)` |
 
+### Remote Dataset Generation (Hanse AI Hub)
+
+The dataset generator can use the company's Open WebUI without running a local
+LLM. Set `HANSE_AI_HUB_URL` to the Open WebUI base URL and `HANSE_AI_HUB_KEY`
+to its API key in `.env`. The extension discovers models through Open WebUI's
+`/api/models` endpoint and sends generation requests to
+`/api/chat/completions`; it does not use the separate `OPENAI_API_*` settings.
+
+Start the application with the dataset-generation extension:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml up --build -d --wait --wait-timeout 1800
+```
+
 ### Local Dataset Generation (Developers)
 
-The regular development stack does not start a local LLM. To enable local
-dataset generation, add `docker-compose.local-llm.yml`; this starts Ollama,
-loads `qwen2.5:14b`, initializes the shared dataset directory for UID 1000,
-and adds a separate dataset worker. The standalone production Compose file
-does not include the local LLM.
+The regular development stack does not start a local LLM or dataset worker.
+For local generation, combine `docker-compose.dataset-generation.yml` with
+`docker-compose.local-llm.yml`; the latter starts Ollama and loads
+`qwen2.5:14b`. The standalone production Compose file does not include either
+extension.
 
 Requirements: approximately 10 GB for model weights and sufficient host memory
 in addition to the existing containers. CPU inference works but is slower.
@@ -86,13 +101,13 @@ From this directory, with the sibling `encourage` checkout present:
 
 ```bash
 ./scripts/init-env.sh
-docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800
+docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml up --build -d --wait --wait-timeout 1800
 ```
 
 For the RTX 4070 Ti Super, give only Ollama GPU access, leaving OCR unchanged:
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800
+docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml -f docker-compose.llm-gpu.yml up --build -d --wait --wait-timeout 1800
 ```
 
 No separate model-pull command or LLM installation is needed. The first start
@@ -111,14 +126,14 @@ that run; changing the server default does not change queued runs. To add an
 extra model explicitly, for example:
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml exec ollama ollama pull qwen2.5:3b
+docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml exec ollama ollama pull qwen2.5:3b
 ```
 
 Then refresh the model picker. Selecting a model does not download weights.
 Inspect startup with:
 
 ```bash
-docker compose -f docker-compose.dev.yml -f docker-compose.local-llm.yml logs ollama-init dataset-worker
+docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml -f docker-compose.local-llm.yml logs ollama-init dataset-worker
 ```
 
 In **RAG > Benchmark**, choose **Dataset generieren**, select finished Markdown
