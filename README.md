@@ -82,6 +82,25 @@ Start the application with the dataset-generation extension:
 docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml up --build -d --wait --wait-timeout 1800
 ```
 
+### OpenAI Gold Pipeline (Batch or immediate)
+
+With `OPENAI_API_BASE_URL` and `OPENAI_API_BEARER_TOKEN` set, the model menu of
+the dataset generator additionally offers the **OpenAI Gold-Pipeline** in two
+variants. *(sofort)* runs the stages as parallel chat requests (a few minutes,
+standard price). *(Batch)* uses the OpenAI Batch API: 50 % cheaper, but OpenAI
+only guarantees completion within 24 hours, and a single model's batch queue
+can stall for much longer than the same requests would take directly.
+
+1. **Generate** (`OPENAI_GOLD_GENERATOR_MODEL`, default `gpt-6.1-sol`): questions with a verbatim `evidence_quote` per passage.
+2. **Validate** (`OPENAI_GOLD_VALIDATOR_MODEL`, default `gpt-6-luna`): sees only question, answer and evidence and returns PASS / FAIL / UNCERTAIN.
+3. **Escalate** (generator model): re-checks FAIL, UNCERTAIN and self-contradicting verdicts.
+
+Both use `OPENAI_GOLD_REASONING_EFFORT` (default `medium`). Only entries with a
+clean PASS are saved (`validation_status`, `validation_stage`, `generator_model`,
+`validator_model`, `prompt_version`, `evidence_start`/`evidence_end` are stored
+per row). Evidence that is not a verbatim source excerpt, or that is only a
+heading, header or table-of-contents line, is discarded before validation.
+
 ### Local Dataset Generation (Developers)
 
 The regular development stack does not start a local LLM or dataset worker.

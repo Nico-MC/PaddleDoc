@@ -1123,6 +1123,7 @@ export function EncourageDatasetWorkbench({
                       {typeof row.source_page === 'number' && <p>Seite: {row.source_page}</p>}
                       {typeof row.sampling_region === 'number' && <p>Dokumentabschnitt: {row.sampling_region} / {String(row.sampling_region_count ?? '')}{row.sampling_method === 'text_position' ? ' (Textposition)' : ''}</p>}
                       {Boolean(row.evidence_anchor) && <p>Abschnitt: {String(row.evidence_anchor)}</p>}
+                      {Boolean(row.validation_status) && <p>Validierung: {String(row.validation_status)}{row.validation_stage === 'escalation' ? ' (nach Eskalation)' : ''} · Generator: {String(row.generator_model ?? '')} · Validator: {String(row.validated_by ?? row.validator_model ?? '')}</p>}
                     </div>
                   </article>
                 ))}

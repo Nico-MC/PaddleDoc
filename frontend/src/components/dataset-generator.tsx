@@ -48,7 +48,16 @@ type GenerationItem = {
     passages_available: number;
     questions_generated: number;
     question_target: number;
+    round?: number;
+    max_rounds?: number;
+    candidates?: number;
+    escalated?: number;
+    rejected?: number;
+    mode?: 'batch' | 'direct';
+    stage_done?: number | null;
+    stage_total?: number | null;
   };
+  validation_summary?: { candidates: number; escalated: number; rejected: number } | null;
   error?: string;
   warning?: string | null;
 };
@@ -66,7 +75,33 @@ type GenerationConfig = {
   configured: boolean;
   model_name: string;
   models: string[];
+  models_error?: string | null;
+  pipelines?: Array<{
+    id: string;
+    label: string;
+    configured: boolean;
+    mode?: 'batch' | 'direct';
+    generator_model: string;
+    validator_model: string;
+    reasoning_effort: string;
+  }>;
 };
+
+const PIPELINE_PREFIX = 'pipeline:';
+const PHASE_LABELS: Record<string, string> = {
+  generating: 'Generierung',
+  validating: 'Validierung',
+  escalating: 'Eskalation',
+  finalizing: 'Abschluss',
+};
+
+function defaultModelChoice(config: GenerationConfig): string {
+  if (config.models.includes(config.model_name)) return config.model_name;
+  if (config.models.length > 0) return config.models[0];
+  const pipeline = config.pipelines?.find((candidate) => candidate.configured && candidate.mode === 'direct')
+    ?? config.pipelines?.find((candidate) => candidate.configured);
+  return pipeline ? `${PIPELINE_PREFIX}${pipeline.id}` : '';
+}
 
 const URL = '/api/v1/evaluation-datasets/generation';
 const RUN_KEY = 'paddledoc-dataset-generation';
@@ -109,6 +144,10 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const completedRunRef = useRef<string | null>(null);
+  const selectedPipeline = modelName.startsWith(PIPELINE_PREFIX)
+    ? config?.pipelines?.find((pipeline) => `${PIPELINE_PREFIX}${pipeline.id}` === modelName && pipeline.configured)
+    : undefined;
+  const hasModelChoices = Boolean(config?.models.length || config?.pipelines?.some((pipeline) => pipeline.configured));
   const running = Boolean(runId && !run?.finished);
   const hasProcessingItems = run?.items.some((item) => item.status === 'processing') ?? false;
   const settledCount = run?.items.filter((item) => !['queued', 'processing'].includes(item.status)).length ?? 0;
@@ -209,7 +248,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
       .then((result) => {
         if (!active) return;
         setConfig(result);
-        setModelName(result.models.includes(result.model_name) ? result.model_name : result.models[0] ?? '');
+        setModelName(defaultModelChoice(result));
         setRunId(sessionStorage.getItem(RUN_KEY));
       })
       .catch((cause: unknown) => { if (active) setError(String(cause)); });
@@ -256,8 +295,9 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
       const result = await apiJson<GenerationConfig>(`${URL}/config`);
       setConfig(result);
       setModelName((current) => result.models.includes(current)
+        || (current.startsWith(PIPELINE_PREFIX) && result.pipelines?.some((pipeline) => pipeline.configured && `${PIPELINE_PREFIX}${pipeline.id}` === current))
         ? current
-        : result.models.includes(result.model_name) ? result.model_name : result.models[0] ?? '');
+        : defaultModelChoice(result));
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -297,7 +337,8 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
           overwrite_datasets: existingMode === 'overwrite'
             ? Object.fromEntries(selectedWithDatasets.map((path) => [path, overwriteTargetFor(path)]))
             : {},
-          model_name: modelName,
+          model_name: selectedPipeline ? null : modelName,
+          pipeline: selectedPipeline ? selectedPipeline.id : 'standard',
           sampling_seed: samplingSeed === '' ? null : Number(samplingSeed),
         }),
       });
@@ -333,9 +374,22 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
         </Field>
         <Field label="Modell">
           <div className="flex min-w-0 items-center gap-2">
-            <select className={`${inputClass} min-w-0 flex-1`} value={modelName} disabled={running || busy || refreshingModels || !config?.models.length} onChange={(event) => setModelName(event.target.value)}>
-              {!config?.models.length && <option value="">Keine Modelle verfügbar</option>}
-              {config?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+            <select className={`${inputClass} min-w-0 flex-1`} value={modelName} disabled={running || busy || refreshingModels || !hasModelChoices} onChange={(event) => setModelName(event.target.value)}>
+              {!hasModelChoices && <option value="">Keine Modelle verfügbar</option>}
+              {config?.pipelines?.some((pipeline) => pipeline.configured) && (
+                <optgroup label="OpenAI Gold-Pipeline">
+                  {config.pipelines.filter((pipeline) => pipeline.configured).map((pipeline) => (
+                    <option key={pipeline.id} value={`${PIPELINE_PREFIX}${pipeline.id}`}>
+                      {pipeline.label}: {pipeline.generator_model} + {pipeline.validator_model}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {Boolean(config?.models.length) && (
+                <optgroup label="Hanse Merkur AI Hub">
+                  {config?.models.map((model) => <option key={model} value={model}>{model}</option>)}
+                </optgroup>
+              )}
             </select>
             <Button type="button" size="sm" variant="outline" disabled={running || busy || refreshingModels} onClick={() => void refreshModels()} aria-label="Modelle aktualisieren" title="Modelle aktualisieren">
               <RefreshCw className={`h-4 w-4${refreshingModels ? ' animate-spin' : ''}`} />
@@ -343,6 +397,14 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
           </div>
         </Field>
       </div>
+      {selectedPipeline && (
+        <p className="mt-2 text-sm text-slate-600">
+          Generator: {selectedPipeline.generator_model} · Validator: {selectedPipeline.validator_model} · Eskalation bei FAIL/UNCERTAIN: {selectedPipeline.generator_model} · Reasoning: {selectedPipeline.reasoning_effort}. {selectedPipeline.mode === 'direct'
+            ? 'Die Stufen laufen sofort und parallel über die normale OpenAI-API (ca. doppelte Kosten wie im Batch, meist wenige Minuten).'
+            : 'Die Verarbeitung läuft als OpenAI-Batch (Generierung, Validierung, Eskalation nacheinander). OpenAI garantiert nur 24 Stunden; je nach Auslastung dauert es Minuten bis Stunden.'} Nur Einträge mit Validierungsstatus PASS werden als Gold gespeichert.
+        </p>
+      )}
+      {config?.models_error && <ErrorNotice message={config.models_error} />}
       <Field label="Verteilung über das Dokument">
         <p className="text-sm text-slate-700">Der Generator teilt das Dokument möglichst gleichmäßig in bis zu {questionCount} Abschnitte und versucht, aus jedem eine belegte Frage zu erstellen. Bei 90 markierten Seiten und 10 Fragen sind das grob 9 Seiten je Abschnitt. Ohne Seitenmarkierungen wird nach Textposition verteilt; ein Abschnitt ist also nicht zwingend eine einzelne Seite.</p>
       </Field>
@@ -475,6 +537,15 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
                 <div key={item.job_id} className="border-b border-slate-100 py-2 text-sm">
                   <p className="break-words">{item.filename}: {STATUS_LABELS[item.status]}{item.row_count ? ` (${item.row_count} Fragen)` : ''}</p>
                   {duration != null && <p className="text-xs text-slate-500">{item.status === 'processing' ? 'Läuft seit' : 'Dauer'}: {formatDuration(duration)}</p>}
+                  {item.status === 'processing' && item.progress && PHASE_LABELS[item.progress.phase] && (
+                    <p className="text-xs text-slate-500">
+                      {PHASE_LABELS[item.progress.phase]}{item.progress.mode === 'direct' ? '' : ' (Batch)'}
+                      {item.progress.stage_total ? ` · ${item.progress.stage_done ?? 0}/${item.progress.stage_total} Anfragen` : ''}
+                      {item.progress.round ? ` · Runde ${item.progress.round}/${item.progress.max_rounds ?? ''}` : ''}
+                      {` · ${item.progress.candidates ?? 0} Kandidaten · ${item.progress.escalated ?? 0} eskaliert · ${item.progress.rejected ?? 0} verworfen`}
+                    </p>
+                  )}
+                  {item.validation_summary && <p className="text-xs text-slate-500">Validierung: {item.validation_summary.candidates} Kandidaten · {item.validation_summary.escalated} eskaliert · {item.validation_summary.rejected} verworfen</p>}
                   {(item.status === 'processing' || isProgressComplete || item.progress) && (
                     <div
                       className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-emerald-100"

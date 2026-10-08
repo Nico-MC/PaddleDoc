@@ -15,6 +15,11 @@ from app.services.openwebui import list_models as list_openwebui_models
 
 
 _PASSAGE_MAX_CHARS = 2_500
+QUESTION_STYLES = {
+    'user-paraphrases': 'Natürliche Kundenfragen in Alltagssprache',
+    'contract-language': 'Präzise Fachfragen mit Begriffen aus dem Dokument',
+    'mixed-questions': 'Abwechselnd natürliche Kundenfragen und präzise Fachfragen',
+}
 _DIRECT_DOCUMENT_MAX_CHARS = 42_000
 _SEARCH_BATCH_MAX_CHARS = 30_000
 _FINAL_CONTEXT_MAX_CHARS = 38_000
@@ -354,11 +359,7 @@ def generate_dataset_rows(
         raise ValueError('Dataset generation endpoint is not configured.')
     if not 1 <= question_count <= 30:
         raise ValueError('Question count must be between 1 and 30.')
-    styles = {
-        'user-paraphrases': 'Natürliche Kundenfragen in Alltagssprache',
-        'contract-language': 'Präzise Fachfragen mit Begriffen aus dem Dokument',
-        'mixed-questions': 'Abwechselnd natürliche Kundenfragen und präzise Fachfragen',
-    }
+    styles = QUESTION_STYLES
     if question_style not in styles:
         raise ValueError('Unknown question style.')
     passages = _markdown_passages(markdown)

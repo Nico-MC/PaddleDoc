@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     dataset_llm_api_base_url: str = ''
     dataset_llm_api_key: str = ''
     dataset_llm_model: str = 'qwen2.5:14b'
+    # OpenAI gold pipeline (Batch API): generator also adjudicates FAIL/UNCERTAIN verdicts.
+    openai_gold_generator_model: str = 'gpt-6.1-sol'
+    openai_gold_validator_model: str = 'gpt-6-luna'
+    openai_gold_reasoning_effort: str = 'medium'
+    openai_gold_batch_poll_seconds: int = 60
     # Hostnames ('host' or 'host:port') of private-network VL endpoints
     # (self-hosted vLLM/Ollama/LiteLLM) that outbound benchmark and test
     # requests may reach. Same mechanism and parsing as

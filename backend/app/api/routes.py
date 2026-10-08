@@ -94,6 +94,7 @@ from app.services.encourage_evaluation import (
     run_encourage_evaluation,
     save_evaluation_dataset,
 )
+from app.services import gold_pipeline
 from app.services.dataset_assistant import list_dataset_models, prepare_dataset_answer
 from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
@@ -2107,19 +2108,41 @@ def assist_evaluation_dataset_question(
 
 @router.get('/evaluation-datasets/generation/config')
 def dataset_generation_config() -> dict:
-    configured = bool(settings.dataset_llm_api_base_url and settings.dataset_llm_api_key)
+    hub_configured = bool(settings.dataset_llm_api_base_url and settings.dataset_llm_api_key)
+    gold_config = gold_pipeline.config_from_settings(settings)
     models = []
-    if configured:
+    models_error = None
+    if hub_configured:
         try:
             models = list_dataset_models(
                 api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
             )
         except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            if gold_config is None:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            models_error = str(exc)
     return {
-        'configured': configured,
+        'configured': hub_configured or gold_config is not None,
         'model_name': settings.dataset_llm_model,
         'models': models,
+        'models_error': models_error,
+        'pipelines': [{
+            'id': gold_pipeline.GOLD_DIRECT_PIPELINE_ID,
+            'label': 'OpenAI Gold-Pipeline (sofort)',
+            'configured': gold_config is not None,
+            'mode': 'direct',
+            'generator_model': settings.openai_gold_generator_model,
+            'validator_model': settings.openai_gold_validator_model,
+            'reasoning_effort': settings.openai_gold_reasoning_effort,
+        }, {
+            'id': gold_pipeline.GOLD_PIPELINE_ID,
+            'label': 'OpenAI Gold-Pipeline (Batch)',
+            'configured': gold_config is not None,
+            'mode': 'batch',
+            'generator_model': settings.openai_gold_generator_model,
+            'validator_model': settings.openai_gold_validator_model,
+            'reasoning_effort': settings.openai_gold_reasoning_effort,
+        }],
     }
 
 
@@ -2131,7 +2154,11 @@ def start_dataset_generation(
     user: User = Depends(get_current_user),
 ) -> dict:
     enforce_rate_limit(request)
-    if not settings.dataset_llm_api_base_url or not settings.dataset_llm_api_key:
+    use_gold = payload.pipeline in gold_pipeline.GOLD_PIPELINES
+    gold_config = gold_pipeline.config_from_settings(settings, payload.pipeline) if use_gold else None
+    if use_gold and gold_config is None:
+        raise HTTPException(status_code=503, detail='OpenAI gold pipeline is not configured. Set OPENAI_API_BASE_URL and OPENAI_API_BEARER_TOKEN.')
+    if not use_gold and (not settings.dataset_llm_api_base_url or not settings.dataset_llm_api_key):
         raise HTTPException(status_code=503, detail='Dataset generation is not configured. Check the selected LLM Compose extension and its credentials.')
     jobs = []
     for path in dict.fromkeys(payload.markdown_paths):
@@ -2142,15 +2169,18 @@ def start_dataset_generation(
         ):
             raise HTTPException(status_code=404, detail='Markdown file not found')
         jobs.append((job, path))
-    model_name = (payload.model_name or settings.dataset_llm_model).strip()
-    try:
-        models = list_dataset_models(
-            api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if model_name not in models:
-        raise HTTPException(status_code=422, detail='Selected model is not available from the configured dataset-generation endpoint.')
+    if use_gold:
+        model_name = f'{gold_config.generator_model} + {gold_config.validator_model} (Gold-Pipeline, {"Batch" if gold_config.mode == "batch" else "sofort"})'
+    else:
+        model_name = (payload.model_name or settings.dataset_llm_model).strip()
+        try:
+            models = list_dataset_models(
+                api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if model_name not in models:
+            raise HTTPException(status_code=422, detail='Selected model is not available from the configured dataset-generation endpoint.')
     existing_datasets = list_evaluation_datasets()
     jobs_by_path = {path: job for job, path in jobs}
 
@@ -2202,6 +2232,8 @@ def start_dataset_generation(
         'focus': payload.focus,
         'model_name': model_name,
     }
+    if use_gold:
+        metadata['pipeline'] = payload.pipeline
     records = {'metadata': json.dumps(metadata)}
     for job, path in jobs:
         records[job.id] = json.dumps({

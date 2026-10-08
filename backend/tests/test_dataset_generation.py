@@ -21,6 +21,10 @@ class _Store:
     def __init__(self):
         self.hashes = {}
         self.locks = set()
+        self.values = {}
+
+    def get(self, key):
+        return self.values.get(key)
 
     def hset(self, key, field=None, value=None, mapping=None):
         self.hashes.setdefault(key, {}).update(mapping or {field: value})
@@ -35,6 +39,9 @@ class _Store:
         return True
 
     def set(self, key, value, nx=False, ex=None):
+        if not nx:
+            self.values[key] = value
+            return True
         if key in self.locks:
             return False
         self.locks.add(key)
@@ -42,6 +49,7 @@ class _Store:
 
     def delete(self, key):
         self.locks.discard(key)
+        self.values.pop(key, None)
 
 
 class _Database:
@@ -78,7 +86,7 @@ def test_normalize_dataset_api_base_url(base_url, expected):
     assert _normalize_openai_base_url(normalized_url) == expected
 
 
-def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_datasets=None, skip_existing=True, sampling_seed=None):
+def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_datasets=None, skip_existing=True, sampling_seed=None, pipeline='standard'):
     monkeypatch.setattr(routes, 'enforce_rate_limit', lambda _: None)
     monkeypatch.setattr(routes, 'generation_store', lambda: store)
     monkeypatch.setattr(routes, '_owner_visible', lambda *args: True)
@@ -93,7 +101,7 @@ def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_d
         EvaluationDatasetGenerateRequest(
             markdown_paths=[f'{job.id}.md' for job in jobs], model_name=model_name,
             skip_existing=skip_existing, overwrite_datasets=overwrite_datasets or {},
-            sampling_seed=sampling_seed,
+            sampling_seed=sampling_seed, pipeline=pipeline,
         ),
         SimpleNamespace(), _Database(jobs), SimpleNamespace(id='user-1'),
     )
@@ -108,7 +116,9 @@ def test_generation_queues_only_new_documents(monkeypatch):
         'source_file_sha256': 'pdf-content-hash',
         'source_markdown_sha256': current_markdown_hash,
     }]
-    run_id, calls = _start(monkeypatch, store, [_job(), _job('job-2')], existing)
+    second_job = _job('job-2')
+    second_job.content_sha256 = 'another-pdf-content-hash'
+    run_id, calls = _start(monkeypatch, store, [_job(), second_job], existing)
     assert calls == [{'args': [run_id, 'job-2'], 'queue': 'datasets'}]
     result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
     assert [item['status'] for item in result['items']] == ['skipped', 'queued']
@@ -311,7 +321,7 @@ def test_generation_worker_saves_once_and_records_progress(monkeypatch):
             'passage_attempt': 1, 'passages_checked': 1, 'passages_available': 2,
             'questions_generated': 1, 'question_target': 10,
         })
-        return [{'id': 'q001'}]
+        return [{'id': 'q001', 'sampling_region': 1, 'sampling_region_count': 10}]
     monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', generate)
     saved = []
     monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved.append(filename) or {'path': f'docs/evaluation/{filename}'})
@@ -421,6 +431,93 @@ def test_generation_failure_keeps_overwrite_target(monkeypatch):
     assert json.loads(store.hget(dataset_tasks.generation_key(run_id), 'job-1'))['status'] == 'failed'
 
 
+def _configure_gold(monkeypatch):
+    monkeypatch.setattr(routes.settings, 'openai_api_base_url', 'https://api.openai.com')
+    monkeypatch.setattr(routes.settings, 'openai_api_bearer_token', 'sk-test')
+
+
+def test_generation_config_lists_gold_pipeline(monkeypatch):
+    _configure_gold(monkeypatch)
+    monkeypatch.setattr(routes.settings, 'dataset_llm_api_base_url', '')
+    monkeypatch.setattr(routes.settings, 'dataset_llm_api_key', '')
+    result = routes.dataset_generation_config()
+    assert result['configured'] is True
+    assert result['models'] == []
+    assert {pipeline['id'] for pipeline in result['pipelines']} == {'openai-gold', 'openai-gold-direct'}
+    assert all(pipeline['configured'] for pipeline in result['pipelines'])
+
+
+def test_generation_gold_pipeline_skips_hub_model_check(monkeypatch):
+    _configure_gold(monkeypatch)
+    store = _Store()
+    run_id, calls = _start(monkeypatch, store, [_job()], pipeline='openai-gold')
+    monkeypatch.setattr(routes, 'list_dataset_models', lambda **kwargs: pytest.fail('Gold pipeline must not query the hub'))
+    metadata = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'metadata'))
+    assert metadata['pipeline'] == 'openai-gold'
+    assert 'Gold-Pipeline' in metadata['model_name']
+    assert len(calls) == 1
+
+
+def test_generation_direct_gold_pipeline_is_selectable(monkeypatch):
+    _configure_gold(monkeypatch)
+    store = _Store()
+    run_id, calls = _start(monkeypatch, store, [_job()], pipeline='openai-gold-direct')
+    metadata = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'metadata'))
+    assert metadata['pipeline'] == 'openai-gold-direct'
+    assert 'sofort' in metadata['model_name']
+    assert len(calls) == 1
+    pipelines = {entry['id']: entry for entry in routes.dataset_generation_config()['pipelines']}
+    assert pipelines['openai-gold-direct']['mode'] == 'direct'
+    assert pipelines['openai-gold']['mode'] == 'batch'
+
+
+def test_generation_gold_pipeline_requires_openai_credentials(monkeypatch):
+    monkeypatch.setattr(routes.settings, 'openai_api_bearer_token', '')
+    with pytest.raises(HTTPException) as error:
+        _start(monkeypatch, _Store(), [_job()], pipeline='openai-gold')
+    assert error.value.status_code == 503
+
+
+def test_gold_worker_reschedules_while_batch_runs_then_saves(monkeypatch):
+    _configure_gold(monkeypatch)
+    store = _Store()
+    run_id, _ = _start(monkeypatch, store, [_job()], pipeline='openai-gold')
+    monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
+    monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
+    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', lambda **kwargs: pytest.fail('Gold run must not use the hub'))
+    scheduled = []
+    monkeypatch.setattr(dataset_tasks.generate_document_dataset, 'apply_async', lambda **kwargs: scheduled.append(kwargs))
+    calls = []
+
+    def advance(state, job, config, on_step=None):
+        calls.append(state['stage'])
+        return {**state, 'stage': 'done' if len(calls) > 1 else 'validate', 'accepted': [], 'counters': {
+            'generated': 2, 'validated': 2, 'escalated': 1, 'rejected': 1,
+        }}
+
+    monkeypatch.setattr(dataset_tasks.gold_pipeline, 'advance', advance)
+    monkeypatch.setattr(dataset_tasks.gold_pipeline, 'progress', lambda state, job: {
+        'phase': 'validating', 'region': 0, 'region_count': 1, 'passage_attempt': 1, 'passages_checked': 1,
+        'passages_available': 1, 'questions_generated': 0, 'question_target': 10,
+    })
+    monkeypatch.setattr(dataset_tasks.gold_pipeline, 'final_rows', lambda state, job, config: [{'id': 'q001'}])
+    saved = []
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved.append(filename) or {'path': f'docs/evaluation/{filename}'})
+
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    item = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'job-1'))
+    assert item['status'] == 'processing'
+    assert item['progress']['phase'] == 'validating'
+    assert len(scheduled) == 1 and scheduled[0]['args'] == [run_id, 'job-1']
+    assert not saved
+
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    item = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'job-1'))
+    assert item['status'] == 'completed'
+    assert item['validation_summary'] == {'candidates': 2, 'escalated': 1, 'rejected': 1}
+    assert len(saved) == 1
+    assert not store.values
+
 def test_dataset_overwrite_replaces_rows_without_creating_extra_file(monkeypatch):
     with TemporaryDirectory() as directory:
         root = Path(directory)
@@ -435,7 +532,10 @@ def test_dataset_overwrite_replaces_rows_without_creating_extra_file(monkeypatch
         updated = {**row, 'question': 'Neue Frage?', 'gold_answer': 'Neue Antwort.'}
         result = encourage_evaluation.save_evaluation_dataset('target.jsonl', [updated])
         assert result['path'] == 'docs/evaluation/target.jsonl'
-        assert result['rows'] == [updated]
+        assert [
+            {key: value for key, value in saved_row.items() if not key.startswith('dataset_')}
+            for saved_row in result['rows']
+        ] == [updated]
         assert sorted(path.name for path in root.iterdir()) == ['other.jsonl', 'target.jsonl']
         assert (root / 'other.jsonl').read_text() == other_content
 

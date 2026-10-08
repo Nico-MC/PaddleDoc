@@ -241,6 +241,7 @@ class EvaluationDatasetAiAssistRequest(BaseModel):
 class EvaluationDatasetGenerateRequest(BaseModel):
     markdown_paths: list[str] = Field(min_length=1, max_length=1000)
     model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    pipeline: Literal['standard', 'openai-gold', 'openai-gold-direct'] = 'standard'
     question_count: int = Field(default=10, ge=1, le=30)
     sampling_seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
     question_style: Literal['user-paraphrases', 'contract-language', 'mixed-questions'] = 'user-paraphrases'
