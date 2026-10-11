@@ -49,6 +49,7 @@ type EncourageIngestResponse = {
     document_count: number;
     chunk_preview: string[];
     picture_text_blocks_removed: number;
+    page_furniture_lines_removed: number;
   };
   document: EncourageDocument;
   pipeline: {
@@ -800,9 +801,7 @@ export default function EncouragePage() {
                   Method: <strong>{ingested.pipeline.rag_method}</strong>
                 </p>
                 <p className="mt-2 text-xs text-emerald-800">
-                  {ingested.source_markdown.picture_text_blocks_removed > 0
-                    ? `RAG-Aufbereitung: ${ingested.source_markdown.picture_text_blocks_removed} Grafiktextblock${ingested.source_markdown.picture_text_blocks_removed === 1 ? "" : "e"} wurde${ingested.source_markdown.picture_text_blocks_removed === 1 ? "" : "n"} vor dem Chunking ausgeschlossen.`
-                    : "RAG-Aufbereitung: Keine vollständigen Grafiktextblöcke im Markdown gefunden."}
+                  RAG-Aufbereitung vor dem Chunking: {ingested.source_markdown.picture_text_blocks_removed} Grafiktext-Blöcke · {ingested.source_markdown.page_furniture_lines_removed ?? 0} wiederkehrende Randzeilen entfernt.
                 </p>
 
 

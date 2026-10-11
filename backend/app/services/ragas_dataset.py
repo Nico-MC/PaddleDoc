@@ -18,7 +18,7 @@ from app.services.dataset_assistant import (
     _sampling_regions,
 )
 from app.services.generation_source_filter import filter_generation_passages
-from app.services.rag_text_preprocessing import count_picture_text_blocks, prepare_rag_text
+from app.services.rag_text_preprocessing import prepare_rag_text, prepare_rag_text_with_report
 from app.services.llm_request_audit import audited_llm_http_client
 
 logger = logging.getLogger(__name__)
@@ -123,13 +123,13 @@ def generate_ragas_dataset_rows(
     from ragas.testset.synthesizers.single_hop.specific import SingleHopSpecificQuerySynthesizer
     from langchain_core.documents import Document
 
-    cleaned_markdown = prepare_rag_text(markdown)
+    cleaned_markdown, cleaning_report = prepare_rag_text_with_report(markdown)
     if audit_callback:
         audit_callback({
             'type': 'prepared_document', 'text': cleaned_markdown,
-            'picture_text_blocks_removed': count_picture_text_blocks(markdown),
+            **cleaning_report,
             'sha256': hashlib.sha256(cleaned_markdown.encode('utf-8')).hexdigest(),
-            'stage': 'after_picture_text_cleanup_before_section_filter',
+            'stage': 'after_picture_text_and_page_furniture_cleanup_before_section_filter',
         })
     passages = _markdown_passages(cleaned_markdown)
     raw_hash = hashlib.sha256(markdown.encode('utf-8')).hexdigest()

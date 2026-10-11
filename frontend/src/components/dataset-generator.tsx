@@ -228,18 +228,168 @@ type LlmHttpEvent = {
   duration_ms?: number;
 };
 
-function LlmRequestTimeline({ events }: { events: LlmHttpEvent[] | undefined }) {
+async function copyLogJson(value: unknown): Promise<void> {
+  const serialized = JSON.stringify(value, null, 2);
+  if (typeof serialized !== 'string') throw new Error('Kein kopierbarer Log-Inhalt vorhanden.');
+
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(serialized);
+      return;
+    } catch {
+      // The fallback also works when clipboard permissions are unavailable.
+    }
+  }
+
+  const input = document.createElement('textarea');
+  input.value = serialized;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  try {
+    if (!document.execCommand('copy')) throw new Error('Kopieren wurde vom Browser blockiert.');
+  } finally {
+    input.remove();
+  }
+}
+
+function CopyLogButton({ label, value }: { label: string; value: unknown }) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+  async function handleCopy() {
+    try {
+      await copyLogJson(value);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="rounded-md border border-sky-300 bg-white px-2 py-1 text-xs font-medium text-sky-900 hover:bg-sky-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600"
+      onClick={() => void handleCopy()}
+      aria-label={label}
+    >
+      <span aria-live="polite">{copyState === 'copied' ? 'Kopiert ✓' : copyState === 'failed' ? 'Kopieren fehlgeschlagen' : label}</span>
+    </button>
+  );
+}
+
+type ClassificationResult = {
+  status?: string;
+  section_ids?: string[];
+  decisions?: { sections?: Array<{ id: string; kind: string }> };
+  error_type?: string;
+  error_message?: string;
+};
+
+type ClassifiedSection = {
+  id: string;
+  heading?: string;
+  page?: number | null;
+  preview?: string;
+  excluded?: boolean;
+};
+
+const CLASSIFICATION_LABELS: Record<string, string> = {
+  content: 'Inhalt', cover: 'Deckblatt', title_page: 'Titelseite',
+  contents: 'Inhaltsverzeichnis', table_index: 'Tabellenverzeichnis',
+  figure_index: 'Abbildungsverzeichnis', abbreviations: 'Abkürzungsverzeichnis',
+  glossary: 'Glossar',
+};
+
+function ClassificationOverview({ results, sections, requestCount }: {
+  results: ClassificationResult[];
+  sections: ClassifiedSection[];
+  requestCount: number;
+}) {
+  const byId = new Map(sections.map((section) => [section.id, section]));
+  const decisions = results.flatMap((result) => {
+    const byDecisionId = new Map((result.decisions?.sections ?? []).map((decision) => [decision.id, decision]));
+    const ids = result.section_ids?.length ? result.section_ids : [...byDecisionId.keys()];
+    return ids.map((id) => ({ id, kind: byDecisionId.get(id)?.kind ?? null, section: byId.get(id) }));
+  });
+  const classifiedIds = new Set(decisions.map((decision) => decision.id));
+  const answeredCount = decisions.filter((decision) => decision.kind !== null).length;
+  const ruleExcluded = sections.filter((section) => section.excluded && !classifiedIds.has(section.id));
+  const notReviewed = Math.max(0, sections.length - classifiedIds.size - ruleExcluded.length);
+  const errors = results.filter((result) => result.status === 'model_error');
+
+  return (
+    <section className="rounded-lg border-2 border-sky-400 bg-sky-50">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+        <h4 className="text-sm font-semibold text-sky-950">Abschnittsklassifizierung · {answeredCount} LLM-Entscheidungen</h4>
+        {decisions.length > 0 && <CopyLogButton label="Einordnungen kopieren" value={decisions.map(({ id, kind, section }) => ({ id, heading: section?.heading, page: section?.page, kind, excluded: section?.excluded }))} />}
+      </div>
+      <div className="space-y-3 border-t border-sky-200 px-4 py-3 text-xs text-sky-950">
+        <p>{requestCount} protokollierte LLM-Anfrage{requestCount === 1 ? '' : 'n'} für die Klassifizierung. Der vollständige Prompt und die rohe Modellantwort stehen im Tab „Bisheriges Log“.</p>
+        {sections.length > 0 && <p>{ruleExcluded.length} Abschnitte wurden zuvor anhand ihrer Überschrift ausgeschlossen; {notReviewed} weitere Abschnitte wurden nicht einzeln vom LLM klassifiziert.</p>}
+        {errors.map((result, index) => <p key={index} className="text-amber-800">Klassifizierungsfehler: {result.error_type ?? 'unbekannt'}{result.error_message ? ' · ' + result.error_message : ''}</p>)}
+        {decisions.length === 0 ? (
+          <p className="text-slate-600">Noch keine Klassifizierungsentscheidungen protokolliert.</p>
+        ) : (
+          <div className="max-h-[65dvh] overflow-auto rounded-md border border-sky-200 bg-white">
+            <table className="w-full min-w-[600px] text-left text-xs">
+              <thead className="sticky top-0 bg-sky-100 text-sky-950">
+                <tr><th className="px-3 py-2">Abschnitt</th><th className="px-3 py-2">Seite</th><th className="px-3 py-2">Vom LLM eingeordnet als</th><th className="px-3 py-2">Quellenauswahl</th></tr>
+              </thead>
+              <tbody className="divide-y divide-sky-100">
+                {decisions.map(({ id, kind, section }) => (
+                  <tr key={id}>
+                    <td className="px-3 py-2 align-top">
+                      <span className="font-medium">{section?.heading || 'Ohne Überschrift'}</span> <span className="text-slate-500">({id})</span>
+                      {section?.preview && <p className="mt-1 max-w-xl text-slate-600">{section.preview}</p>}
+                    </td>
+                    <td className="px-3 py-2 align-top">{section?.page ?? '–'}</td>
+                    <td className="px-3 py-2 align-top font-medium">{kind ? CLASSIFICATION_LABELS[kind] ?? kind : 'Keine Entscheidung'}</td>
+                    <td className="px-3 py-2 align-top">{section?.excluded ? 'Ausgeschlossen' : kind ? 'Für Auswahl zugelassen' : 'Mangels Entscheidung belassen'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {ruleExcluded.length > 0 && (
+          <details className="rounded-md border border-sky-200 bg-white">
+            <summary className="cursor-pointer px-3 py-2 font-medium">Vorab per Überschrift ausgeschlossen · {ruleExcluded.length}</summary>
+            <ul className="space-y-1 border-t border-sky-100 px-3 py-2">
+              {ruleExcluded.map((section) => <li key={section.id}>Seite {section.page ?? '–'} · {section.heading || 'Ohne Überschrift'} ({section.id})</li>)}
+            </ul>
+          </details>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LlmRequestTimeline({ events, classificationResults = [], sectionInventory = [], summarizeClassification = false }: {
+  events: LlmHttpEvent[] | undefined;
+  classificationResults?: ClassificationResult[];
+  sectionInventory?: ClassifiedSection[];
+  summarizeClassification?: boolean;
+}) {
   const responses = new Map(events?.filter((event) => event.type === 'llm_http_response').map((event) => [event.request_id, event]) ?? []);
   const requests = events?.filter((event) => event.type === 'llm_http_request') ?? [];
+  const classificationRequestCount = requests.filter((request) => request.scope?.phase === 'classification').length;
   const phaseLabel = (phase?: string) => phase === 'classification' ? 'Abschnittsauswahl' : phase === 'generation' ? 'Fragengenerierung' : phase === 'validation' ? 'Validierung' : phase ?? 'Unbekannte Phase';
   return (
     <details open className="rounded-lg border-2 border-sky-400 bg-sky-50">
       <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">Tatsächliche LLM-API-Anfragen · {requests.length}</summary>
       <div className="space-y-2 border-t border-sky-200 px-4 py-3">
-        <p className="text-xs text-sky-900">Chronologisch protokollierte Anfragen inklusive RAGAS-interner Prompts und API-Antworten. Wiederholungen durch die API-Bibliothek erscheinen als eigene Anfragen. HTTP-Header und Zugangsdaten werden nicht gespeichert.</p>
-        {!events && <p className="text-xs text-amber-800">Für diesen älteren Lauf wurden die tatsächlichen API-Anfragen nicht erfasst. Unten stehen nur die an RAGAS übergebenen Ausschnitte.</p>}
+        <p className="text-xs text-sky-900">{summarizeClassification
+          ? 'Die Abschnittsklassifizierung erscheint hier als Ergebnisübersicht. Alle anderen Modellaufrufe zeigen Anfrage und Antwort vollständig; die Rohdaten der Klassifizierung stehen im zweiten Tab.'
+          : 'Chronologisch protokollierte Anfragen inklusive RAGAS-interner Prompts und API-Antworten. Wiederholungen durch die API-Bibliothek erscheinen als eigene Anfragen. HTTP-Header und Zugangsdaten werden nicht gespeichert.'}</p>
+        {!events && <p className="text-xs text-amber-800">Für diesen älteren Lauf wurden die tatsächlichen API-Anfragen nicht erfasst. Die an RAGAS übergebenen Ausschnitte stehen im Tab „Bisheriges Log“.</p>}
         {events && requests.length === 0 && <p className="text-xs text-slate-600">Bisher wurde keine LLM-API-Anfrage protokolliert.</p>}
+        {summarizeClassification && (classificationRequestCount > 0 || classificationResults.length > 0) && (
+          <ClassificationOverview results={classificationResults} sections={sectionInventory} requestCount={classificationRequestCount} />
+        )}
         {requests.map((request, index) => {
+          if (summarizeClassification && request.scope?.phase === 'classification') return null;
           const response = responses.get(request.request_id);
           const payload = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {};
           const scope = request.scope ?? {};
@@ -251,9 +401,23 @@ function LlmRequestTimeline({ events }: { events: LlmHttpEvent[] | undefined }) 
                 {' · '}{response ? 'HTTP ' + response.status_code + ' · ' + response.duration_ms + ' ms' : 'Keine API-Antwort erfasst'}
               </summary>
               <div className="space-y-2 border-t border-sky-100 p-3">
-                <p className="text-xs font-semibold">Exakter JSON-Anfragekörper</p>
+                <div className="flex justify-end">
+                  <CopyLogButton label="Gesamten Eintrag kopieren" value={{ request, response: response ?? null }} />
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-semibold">Exakter JSON-Anfragekörper</p>
+                  <CopyLogButton label="Anfrage kopieren" value={request.body} />
+                </div>
                 <pre className="max-h-[60dvh] overflow-auto rounded bg-slate-50 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(request.body, null, 2)}</pre>
-                {response && <><p className="text-xs font-semibold">API-Antwort</p><pre className="max-h-[60dvh] overflow-auto rounded bg-slate-50 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(response.body, null, 2)}</pre></>}
+                {response && (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">API-Antwort</p>
+                      <CopyLogButton label="Antwort kopieren" value={response.body} />
+                    </div>
+                    <pre className="max-h-[60dvh] overflow-auto rounded bg-slate-50 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(response.body, null, 2)}</pre>
+                  </>
+                )}
               </div>
             </details>
           );
@@ -265,6 +429,7 @@ function LlmRequestTimeline({ events }: { events: LlmHttpEvent[] | undefined }) 
 
 function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: string; item: GenerationItem; datasetChangedSinceRun: boolean }) {
   const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'llm' | 'details'>('llm');
   const [log, setLog] = useState<GenerationLog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -320,7 +485,8 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
 
   const audit = log?.audit;
   const prepared = audit?.prepared_document as {
-    text?: string; picture_text_blocks_removed?: number; sha256?: string;
+    text?: string; picture_text_blocks_removed?: number; page_furniture_lines_removed?: number;
+    sha256?: string;
     reconstructed_at_read_time?: boolean;
   } | undefined;
   const sentContexts = Array.isArray(audit?.generation_inputs)
@@ -331,7 +497,7 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
   const reviewErrors = item.validation_summary?.details?.filter((detail) => detail.status === 'review' && detail.errors?.length) ?? [];
   return (
     <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
-      <button type="button" className="font-medium text-slate-800 underline" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <button type="button" className="font-medium text-slate-800 underline" aria-haspopup="dialog" onClick={() => { setActiveTab('llm'); setOpen(true); }}>
         Log ansehen
       </button>
       <Button type="button" size="sm" variant="outline" disabled={downloading} onClick={() => void downloadLog()}>
@@ -346,10 +512,54 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
               <h3 id={'dataset-log-title-' + item.job_id} className="text-base font-semibold">Generierungslog</h3>
               <button ref={closeButtonRef} type="button" className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" onClick={() => setOpen(false)}>Schließen</button>
             </header>
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-5">
+            <div role="tablist" aria-label="Generierungslog-Ansichten" className="flex shrink-0 gap-1 border-b border-slate-200 px-3 pt-2 sm:px-5">
+              {(['llm', 'details'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  id={'dataset-log-tab-' + tab + '-' + item.job_id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab}
+                  aria-controls={'dataset-log-panel-' + tab + '-' + item.job_id}
+                  tabIndex={activeTab === tab ? 0 : -1}
+                  className={'rounded-t-lg border border-b-0 px-4 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 '
+                    + (activeTab === tab ? 'border-sky-300 bg-sky-50 text-sky-950' : 'border-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900')}
+                  onClick={() => setActiveTab(tab)}
+                  onKeyDown={(event) => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                    event.preventDefault();
+                    const next = event.key === 'Home' ? 'llm'
+                      : event.key === 'End' ? 'details'
+                        : tab === 'llm' ? 'details' : 'llm';
+                    setActiveTab(next);
+                    document.getElementById('dataset-log-tab-' + next + '-' + item.job_id)?.focus();
+                  }}
+                >
+                  {tab === 'llm' ? 'LLM-Kommunikation' : 'Bisheriges Log'}
+                </button>
+              ))}
+            </div>
+            <div
+              id={'dataset-log-panel-' + activeTab + '-' + item.job_id}
+              key={activeTab}
+              role="tabpanel"
+              aria-labelledby={'dataset-log-tab-' + activeTab + '-' + item.job_id}
+              tabIndex={0}
+              className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-5"
+            >
               {error && <p className="text-red-700">Log konnte nicht geladen werden: {error}</p>}
               {!log && !error && <p>Log wird geladen …</p>}
-              {log && audit && (
+              {log && audit && activeTab === 'llm' && (
+                <LlmRequestTimeline
+                  events={llmEvents}
+                  classificationResults={Array.isArray(audit.classification_results)
+                    ? audit.classification_results as ClassificationResult[] : []}
+                  sectionInventory={Array.isArray(audit.section_inventory)
+                    ? audit.section_inventory as ClassifiedSection[] : []}
+                  summarizeClassification
+                />
+              )}
+              {log && audit && activeTab === 'details' && (
                 <>
                   {datasetChangedSinceRun && <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">Dieses Log gehört zu einem früheren Lauf. Die Dataset-Datei wurde danach verändert oder überschrieben; „Dataset öffnen“ zeigt den aktuellen Dateistand.</p>}
                   {item.validation_summary && (
@@ -381,14 +591,14 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
                     </div>
                   </details>
                   <details className="rounded-lg border-2 border-emerald-400 bg-emerald-50">
-                    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-emerald-950">Bereinigtes Markdown · Grafiktext entfernt, vor Abschnittsfilterung</summary>
+                    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-emerald-950">Bereinigtes Markdown · vor der Abschnittsklassifikation</summary>
                     <div className="border-t border-emerald-200 px-4 py-3">
                       <p className="mb-2 text-xs text-emerald-900">
-                        Dies ist die bereinigte Textfassung, nicht das Original-Markdown. Grafiktext-Blöcke wurden entfernt, Seitenmarkierungen erhalten. Das vollständige Markdown wird nicht als Ganzes an das LLM geschickt.
+                        Grafiktext-Blöcke und wiederkehrende Kopf-/Fußzeilen sind entfernt; Seitenmarkierungen bleiben erhalten. Das vollständige Markdown wird nicht als Ganzes an das LLM geschickt.
                       </p>
                       {typeof prepared?.text === 'string' ? (
                         <>
-                          <p className="mb-2 text-xs text-emerald-900">Entfernte Grafiktext-Blöcke: {prepared.picture_text_blocks_removed ?? '–'}</p>
+                          <p className="mb-2 text-xs text-emerald-900">Entfernt: {prepared.picture_text_blocks_removed ?? '–'} Grafiktext-Blöcke · {prepared.page_furniture_lines_removed ?? '–'} wiederkehrende Randzeilen</p>
                           {prepared.reconstructed_at_read_time && <p className="mb-2 text-xs text-amber-800">Für diesen älteren Lauf wurde die vollständige bereinigte Fassung nicht protokolliert. Diese Vorschau wurde beim Öffnen mit der aktuellen Bereinigungsfunktion aus der unveränderten Quelle erstellt (Quell-Hash stimmt). Die damaligen RAGAS-Eingaben stehen oben; die tatsächlichen internen LLM-Prompts wurden nicht erfasst.</p>}
                           <pre className="max-h-[72dvh] overflow-auto rounded-md border border-emerald-200 bg-white p-3 text-xs whitespace-pre-wrap break-words">{prepared.text}</pre>
                         </>

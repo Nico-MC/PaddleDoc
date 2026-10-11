@@ -101,7 +101,10 @@ from app.services import gold_pipeline
 from app.services.dataset_assistant import list_dataset_models, prepare_dataset_answer
 from app.services.hcds import DatasetLLMEndpoint, resolve_dataset_llm, resolve_dataset_llm_providers
 from app.services.openai_provider import OpenAIProviderClient
-from app.services.rag_text_preprocessing import count_picture_text_blocks, prepare_rag_text
+from app.services.rag_text_preprocessing import (
+    prepare_rag_text,
+    prepare_rag_text_with_report,
+)
 from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     effective_pipeline_profile_id,
@@ -2372,12 +2375,12 @@ def _add_prepared_document_to_legacy_audit(audit: dict, job_id: str, user_id: st
         markdown = source.result_markdown
     if hashlib.sha256(markdown.encode('utf-8')).hexdigest() != audit.get('source_markdown_sha256'):
         return
-    cleaned = prepare_rag_text(markdown)
+    cleaned, cleaning_report = prepare_rag_text_with_report(markdown)
     audit['prepared_document'] = {
         'text': cleaned,
-        'picture_text_blocks_removed': count_picture_text_blocks(markdown),
+        **cleaning_report,
         'sha256': hashlib.sha256(cleaned.encode('utf-8')).hexdigest(),
-        'stage': 'after_picture_text_cleanup_before_section_filter',
+        'stage': 'after_picture_text_and_page_furniture_cleanup_before_section_filter',
         'reconstructed_at_read_time': True,
     }
 
@@ -2454,10 +2457,9 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid markdown path')
     if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() != '.md':
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
-    picture_text_blocks_removed = count_picture_text_blocks(
-        candidate.read_text(encoding='utf-8')
-    )
-
+    _, cleaning_report = prepare_rag_text_with_report(candidate.read_text(encoding='utf-8'))
+    picture_text_blocks_removed = cleaning_report['picture_text_blocks_removed']
+    page_furniture_lines_removed = cleaning_report['page_furniture_lines_removed']
 
     try:
         document = ingest_markdown_file(
@@ -2516,6 +2518,7 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
             'path': str(candidate),
             'filename': candidate.name,
             'picture_text_blocks_removed': picture_text_blocks_removed,
+            'page_furniture_lines_removed': page_furniture_lines_removed,
             'document_count': document['document_count'],
             'chunk_preview': document.get('document_dump', {}).get('chunk_preview', []),
         },

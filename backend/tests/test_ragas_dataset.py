@@ -27,6 +27,26 @@ def test_ragas_sections_preserve_pages_but_remove_picture_text():
     assert all('Irreführende Bildaufschrift' not in passage.text for region in regions for passage in region)
 
 
+def test_ragas_sections_do_not_receive_repeated_page_furniture():
+    markdown = '\n'.join(
+        f'<!-- page:{page}/4 -->\n\n'
+        'Technische Dokumentation\n\n'
+        f'Die belegbare Fachinformation auf Seite {page} betrifft eine Leistung.\n\n'
+        f'Seite {page} von 4\n'
+        for page in range(1, 5)
+    )
+
+    method, regions = _section_regions(markdown, 4, 17)
+
+    assert method == 'pages'
+    assert len(regions) == 4
+    assert all(
+        'Technische Dokumentation' not in passage.text and ' von 4' not in passage.text
+        for region in regions for passage in region
+    )
+    assert all('belegbare Fachinformation' in region[0].text for region in regions)
+
+
 def test_ragas_samples_ten_regions_across_ninety_pages():
     markdown = ''.join(
         f'<!-- page:{page}/90 -->\n'
