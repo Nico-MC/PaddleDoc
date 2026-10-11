@@ -4,8 +4,12 @@ services:
       DATASET_LLM_API_BASE_URL: ${HANSE_AI_HUB_URL:-}
       DATASET_LLM_API_KEY: ${HANSE_AI_HUB_KEY:-}
       DATASET_LLM_MODEL: ${HANSE_AI_HUB_MODEL:-}
+      HCDS_API_BASE_URL: ${HCDS_API_BASE_URL:-https://llm.api.hcds.uni-hamburg.de/v1}
+      HCDS_API_BEARER_TOKEN: ${HCDS_API_BEARER_TOKEN:-}
+      HCDS_MODEL: ${HCDS_MODEL:-vllm/deepseek-ai/DeepSeek-V4.1-Flash}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6.1-sol}
       OPENAI_GOLD_GENERATOR_MODEL: ${OPENAI_GOLD_GENERATOR_MODEL:-gpt-6.1-sol}
       OPENAI_GOLD_VALIDATOR_MODEL: ${OPENAI_GOLD_VALIDATOR_MODEL:-gpt-6-luna}
       OPENAI_GOLD_REASONING_EFFORT: ${OPENAI_GOLD_REASONING_EFFORT:-medium}
@@ -48,8 +52,12 @@ services:
       DATASET_LLM_API_BASE_URL: ${HANSE_AI_HUB_URL:-}
       DATASET_LLM_API_KEY: ${HANSE_AI_HUB_KEY:-}
       DATASET_LLM_MODEL: ${HANSE_AI_HUB_MODEL:-}
+      HCDS_API_BASE_URL: ${HCDS_API_BASE_URL:-https://llm.api.hcds.uni-hamburg.de/v1}
+      HCDS_API_BEARER_TOKEN: ${HCDS_API_BEARER_TOKEN:-}
+      HCDS_MODEL: ${HCDS_MODEL:-vllm/deepseek-ai/DeepSeek-V4.1-Flash}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
       OPENAI_API_BEARER_TOKEN: ${OPENAI_API_BEARER_TOKEN:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6.1-sol}
       OPENAI_GOLD_GENERATOR_MODEL: ${OPENAI_GOLD_GENERATOR_MODEL:-gpt-6.1-sol}
       OPENAI_GOLD_VALIDATOR_MODEL: ${OPENAI_GOLD_VALIDATOR_MODEL:-gpt-6-luna}
       OPENAI_GOLD_REASONING_EFFORT: ${OPENAI_GOLD_REASONING_EFFORT:-medium}
@@ -57,6 +65,7 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
     volumes:
+      - encourage_models:/home/paddledoc/.cache
       - ./backend/app:/app/app:ro
       - ../encourage:/app/encourage:ro
       - ../.docs:/app/docs

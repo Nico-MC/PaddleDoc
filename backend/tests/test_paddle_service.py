@@ -108,6 +108,80 @@ def test_convert_to_markdown_falls_back_to_pypdf_when_paddle_missing(monkeypatch
     assert details['quality_gate']['grade'] in {'A', 'B', 'C'}
 
 
+def test_no_profile_pdf_uses_pymupdf4llm(monkeypatch, tmp_path):
+    source = tmp_path / 'sample.pdf'
+    source.write_bytes(b'%PDF-1.4 test')
+    calls = []
+
+    fake_module = types.ModuleType('pymupdf4llm')
+    fake_module.version = 'test-version'
+
+    def to_markdown(path, **kwargs):
+        calls.append((path, kwargs))
+        return [
+            {'metadata': {'page_number': 1}, 'text': '# Contract\n\nFirst clause'},
+            {'metadata': {'page_number': 2}, 'text': '| Cover | Amount |\n|---|---|\n| A | 42 |'},
+            {'metadata': {'page_number': 3}, 'text': ''},
+        ]
+
+    fake_module.to_markdown = to_markdown
+    monkeypatch.setitem(sys.modules, 'pymupdf4llm', fake_module)
+    fake_pymupdf = types.ModuleType('pymupdf')
+
+    class FakePdf:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def get_toc(self):
+            return [[1, 'Inhaltsverzeichnis', 1], [1, 'Vertrag', 2]]
+
+    fake_pymupdf.open = lambda _path: FakePdf()
+    monkeypatch.setitem(sys.modules, 'pymupdf', fake_pymupdf)
+    monkeypatch.setattr(
+        paddle_service,
+        '_pdf_page_count',
+        lambda _source: 3,
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        '_runtime_capability',
+        lambda: pytest.fail('no_profile must not initialize Paddle/CUDA runtime detection'),
+    )
+    monkeypatch.setattr(
+        paddle_service,
+        'PdfReader',
+        lambda *_args, **_kwargs: pytest.fail('no_profile PDF must not use pypdf'),
+    )
+
+    markdown, details = paddle_service.convert_to_markdown_with_details(
+        str(source), profile_id='no_profile',
+    )
+
+    assert '<!-- page:1/3 -->\n\n# Contract' in markdown
+    assert '<!-- page:2/3 -->\n\n| Cover | Amount |' in markdown
+    assert markdown.rstrip().endswith('<!-- page:3/3 -->')
+    assert calls == [(str(source), {
+        'page_chunks': True,
+        'show_progress': False,
+        'use_ocr': False,
+        'write_images': True,
+        'image_path': str(tmp_path / 'assets' / 'sample'),
+        'image_format': 'png',
+        'image_size_limit': 0.05,
+        'dpi': 150,
+        'force_text': True,
+    })]
+    assert details['engine'] == 'pymupdf4llm-native'
+    assert details['used_fallback'] is False
+    assert details['page_count'] == 3
+    assert details['pdf_converter'] == 'pymupdf4llm'
+    assert details['pdf_converter_version'] == 'test-version'
+    assert details['pdf_toc'] == [[1, 'Inhaltsverzeichnis', 1], [1, 'Vertrag', 2]]
+
+
 def test_convert_to_markdown_falls_back_to_docx_when_paddle_missing(monkeypatch, tmp_path):
     source = tmp_path / 'sample.docx'
     document_xml = (

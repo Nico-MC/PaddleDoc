@@ -76,30 +76,43 @@ to its API key in `.env`. The extension discovers models through Open WebUI's
 `/api/models` endpoint and sends generation requests to
 `/api/chat/completions`; it does not use the separate `OPENAI_API_*` settings.
 
+Alternatively, set HCDS_API_BEARER_TOKEN to use the University of Hamburg
+HCDS OpenAI-compatible endpoint. Optional settings are HCDS_API_BASE_URL
+(default https://llm.api.hcds.uni-hamburg.de/v1) and HCDS_MODEL (default
+vllm/deepseek-ai/DeepSeek-V4.1-Flash). PaddleDoc sends the virtual key through
+the required x-bf-vk request header. Explicit HANSE_AI_HUB_* settings
+take precedence when both providers are configured.
+
+With HCDS selected, the dataset form defaults to **Ragas 0.4.3** and the
+`vllm/deepseek-ai/DeepSeek-V4.1-Flash` model (if exposed by the server).
+Ragas receives pre-split, page-aware Markdown passages rather than the whole
+PDF. For 10 questions across 90 pages, the scheduler samples roughly ten
+distributed document regions and processes them one after another. Picture-text
+blocks are removed from generation contexts; the original Markdown is retained.
+The resulting JSONL rows include page and exact evidence context, but generated
+answers still need human review. Local multilingual E5 embeddings are cached in
+the existing model volume; no additional embedding API key is required.
+The form exposes the HCDS model, Ragas question type (facts, themes, or
+alternating), excerpt length (800/1400/2400 characters), and the maximum
+number of source passages tried per region (1-5). These choices are stored
+with each generation run; longer excerpts and more attempts may increase
+token usage. The existing question count, wording style, focus, and seed
+remain available.
+
 Start the application with the dataset-generation extension:
 
 ```bash
 docker compose -f docker-compose.dev.yml -f docker-compose.dataset-generation.yml up --build -d --wait --wait-timeout 1800
 ```
 
-### OpenAI Gold Pipeline (Batch or immediate)
+### OpenAI dataset generation
 
-With `OPENAI_API_BASE_URL` and `OPENAI_API_BEARER_TOKEN` set, the model menu of
-the dataset generator additionally offers the **OpenAI Gold-Pipeline** in two
-variants. *(sofort)* runs the stages as parallel chat requests (a few minutes,
-standard price). *(Batch)* uses the OpenAI Batch API: 50 % cheaper, but OpenAI
-only guarantees completion within 24 hours, and a single model's batch queue
-can stall for much longer than the same requests would take directly.
-
-1. **Generate** (`OPENAI_GOLD_GENERATOR_MODEL`, default `gpt-6.1-sol`): questions with a verbatim `evidence_quote` per passage.
-2. **Validate** (`OPENAI_GOLD_VALIDATOR_MODEL`, default `gpt-6-luna`): sees only question, answer and evidence and returns PASS / FAIL / UNCERTAIN.
-3. **Escalate** (generator model): re-checks FAIL, UNCERTAIN and self-contradicting verdicts.
-
-Both use `OPENAI_GOLD_REASONING_EFFORT` (default `medium`). Only entries with a
-clean PASS are saved (`validation_status`, `validation_stage`, `generator_model`,
-`validator_model`, `prompt_version`, `evidence_start`/`evidence_end` are stored
-per row). Evidence that is not a verbatim source excerpt, or that is only a
-heading, header or table-of-contents line, is discarded before validation.
+With `OPENAI_API_BASE_URL` and `OPENAI_API_BEARER_TOKEN` set, OpenAI appears as
+its own provider in the model menu. PaddleDoc derives the provider label from
+the API hostname and fetches the currently accessible text-generation models
+from the provider's `/v1/models` endpoint. The frontend therefore contains no
+hard-coded OpenAI server name or model list. `OPENAI_MODEL`
+selects the initial model when it is present in the returned list.
 
 ### Local Dataset Generation (Developers)
 
@@ -176,10 +189,7 @@ editor remains available. This generation does not require an OCR profile.
 
 Generation uses stratified random sampling across the document. With 70 marked
 pages and 10 questions, it first seeks one question from each seven-page region.
-Existing `## Page N` and `<!-- page:N/total -->` markers determine real page
-numbers. Without complete page markers, regions are based on Markdown text
-positions instead; no page numbers are invented. Frontmatter, heading-only
-blocks and recognizable contents/navigation passages are excluded. Unproductive
+Frontmatter, heading-only blocks and recognizable contents/navigation passages are excluded. Unproductive
 source selections are retried with different passages in the same region, within a
 bounded attempt budget, before successful regions can supply extra questions.
 Warnings report missing questions or uncovered regions.
@@ -409,6 +419,7 @@ For IdPs like Microsoft Entra ID whose `preferred_username` is a UPN rather than
 
 | Profile | Typical Use |
 |---|---|
+| No profile | Layout-aware PDF-to-Markdown with PyMuPDF4LLM (without OCR); native DOCX/spreadsheet extraction |
 | PP-OCRv6 Tiny | Fastest throughput, lowest resource usage |
 | PP-OCRv6 Small | Balanced speed and quality |
 | PP-OCRv6 Medium | Higher OCR quality |

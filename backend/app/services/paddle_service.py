@@ -57,7 +57,7 @@ _PADDLE_PROFILES: dict[str, dict[str, str]] = {
     'no_profile': {
         'value': 'no_profile',
         'label': 'No profile (native extraction)',
-        'description': 'Skip OCR and use native text extraction for DOCX, PDF, and spreadsheets.',
+        'description': 'Skip OCR and use layout-aware PyMuPDF4LLM for PDFs and native extraction for other files.',
         'pipeline': 'native',
     },
     'ppocrv6_tiny': {
@@ -218,11 +218,101 @@ def _fallback_pdf_to_markdown(source: Path) -> str:
         text = (page.extract_text() or '').strip()
         if not text:
             continue
-        sections.append(f'## Page {index}\n\n{text}')
+        sections.append(
+            f'<!-- page:{index}/{len(reader.pages)} -->\n\n{text}'
+        )
 
     if not sections:
         raise RuntimeError('PDF fallback extraction produced no text')
     return '\n\n'.join(sections)
+
+
+def _pymupdf4llm_pdf_to_markdown(
+    source: Path,
+) -> tuple[str, int, dict[str, object]]:
+    """Convert a text-based PDF to page-aware Markdown."""
+
+    try:
+        import pymupdf4llm
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyMuPDF4LLM is not installed"
+        ) from exc
+
+    page_count = _pdf_page_count(source)
+    try:
+        import pymupdf
+
+        with pymupdf.open(str(source)) as pdf:
+            pdf_toc = pdf.get_toc()
+    except Exception as exc:
+        logger.warning('Could not read PDF bookmarks for %s: %s', source.name, type(exc).__name__)
+        pdf_toc = []
+
+    # Separate assets for each document/job.
+    asset_dir = source.parent / "assets" / source.stem
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    chunks = pymupdf4llm.to_markdown(
+        str(source),
+        page_chunks=True,
+        show_progress=False,
+        use_ocr=False,
+        write_images=True,
+        image_path=str(asset_dir),
+        image_format="png",
+        image_size_limit=0.05,
+        dpi=150,
+        force_text=True,
+    )
+
+    if not isinstance(chunks, list):
+        raise RuntimeError("Expected page chunks")
+
+    # Avoid producing incorrect source references.
+    if len(chunks) != page_count:
+        raise RuntimeError(
+            f"Page count mismatch: "
+            f"{len(chunks)} / {page_count}"
+        )
+
+    sections = []
+    has_content = False
+
+    for page_number, chunk in enumerate(chunks, start=1):
+        if not isinstance(chunk, dict):
+            raise RuntimeError(
+                f"Invalid chunk on page {page_number}"
+            )
+
+        content = chunk.get("text", "")
+        content = content.strip() if isinstance(content, str) else ""
+
+        if content:
+            has_content = True
+
+        sections.append(
+            f"<!-- page:{page_number}/{page_count} -->\n\n{content}"
+        )
+
+    if not has_content:
+        raise RuntimeError("PDF extraction produced no content")
+
+    image_files = sorted(
+        p.name for p in asset_dir.iterdir()
+        if p.is_file()
+    )
+
+    return "\n\n".join(sections), page_count, {
+        "pdf_converter": "pymupdf4llm",
+        "pdf_converter_version": str(
+            getattr(pymupdf4llm, "version", "unknown")
+        ),
+        "image_count": len(image_files),
+        "asset_subdir": f"assets/{source.stem}",
+        "image_files": image_files,
+        "pdf_toc": pdf_toc,
+    }
 
 
 def _pdf_page_count(source: Path) -> int:
@@ -2099,9 +2189,13 @@ def _fallback_convert_with_frontmatter(
 
     extra: dict[str, object] = {}
     if suffix == '.pdf':
-        engine_prefix = 'pypdf'
-        body = _fallback_pdf_to_markdown(source)
-        page_count = _pdf_page_count(source)
+        if selected_profile_id == 'no_profile' and not used_fallback:
+            engine_prefix = 'pymupdf4llm'
+            body, page_count, extra = _pymupdf4llm_pdf_to_markdown(source)
+        else:
+            engine_prefix = 'pypdf'
+            body = _fallback_pdf_to_markdown(source)
+            page_count = _pdf_page_count(source)
     elif suffix in {'.xls', '.xlsx'}:
         engine_prefix = 'spreadsheet'
         body, sheet_count, row_count = _fallback_spreadsheet_to_markdown(source)
@@ -2163,7 +2257,17 @@ def convert_to_markdown_with_details(
         raise FileNotFoundError(f'Input file not found: {source}')
 
     selected_profile_id, selected_profile = _resolve_profile(profile_id)
-    capability = _runtime_capability()
+    if selected_profile.get('pipeline') == 'native':
+        capability = {
+            'torch_available': _has_torch(),
+            'paddle_available': _has_paddle(),
+            'cuda_available': False,
+            'selected_device': 'cpu',
+            'platform': _runtime_platform_label(),
+            'no_cuda_reason': 'OCR disabled by profile selection',
+        }
+    else:
+        capability = _runtime_capability()
     suffix = source.suffix.lower()
 
     # .eml (email) files are processed directly without PaddleOCR dependency

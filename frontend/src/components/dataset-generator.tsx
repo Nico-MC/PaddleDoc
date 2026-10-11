@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { LoaderCircle, RefreshCw, Sparkles, Square, SquareCheck, StopCircle } from 'lucide-react';
+import { Download, LoaderCircle, RefreshCw, Sparkles, Square, SquareCheck, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ErrorNotice, Field, inputClass } from '@/components/admin/admin-shared';
-import { ApiError, apiJson } from '@/lib/api';
+import { ApiError, apiFetch, apiJson } from '@/lib/api';
 
 type MarkdownFile = {
   path: string;
@@ -24,6 +24,7 @@ type ExistingDataset = {
   source_files: string[];
   source_file_sha256?: string | null;
   source_markdown_sha256?: string | null;
+  updated_at?: string | null;
 };
 
 type DatasetSourceRelation = 'current' | 'different-markdown' | 'exact-path-unknown' | 'pdf-hash-only';
@@ -36,7 +37,9 @@ type GenerationItem = {
   row_count?: number;
   dataset_action?: 'created' | 'overwritten';
   dataset_filename?: string;
+  source_audit_available?: boolean;
   started_at?: number;
+  finished_at?: number;
   duration_seconds?: number;
   coverage_note?: string | null;
   progress?: {
@@ -53,14 +56,37 @@ type GenerationItem = {
     candidates?: number;
     escalated?: number;
     rejected?: number;
+    validation_done?: number;
+    validation_total?: number;
+    validation_accepted?: number;
+    validation_review?: number;
+    validation_rejected?: number;
     mode?: 'batch' | 'direct';
     stage_done?: number | null;
     stage_total?: number | null;
   };
-  validation_summary?: { candidates: number; escalated: number; rejected: number } | null;
+  validation_summary?: {
+    candidates: number; escalated?: number; accepted?: number; review?: number;
+    rejected: number; thresholds?: { reject_faithfulness: number; reject_answer_relevancy: number }; details?: Array<{
+      id: string; question: string; status: string;
+      faithfulness: number | null; answer_relevancy: number | null;
+      reason?: string | null; errors?: string[];
+    }>;
+  } | null;
   error?: string;
   warning?: string | null;
 };
+
+type GenerationLog = {
+  format: string;
+  note?: string;
+  limitations?: string[];
+  settings: Record<string, unknown>;
+  result: Record<string, unknown>;
+  audit: Record<string, unknown>;
+};
+
+type RagasQueryMode = 'facts' | 'themes' | 'mixed';
 
 type GenerationRun = {
   run_id: string;
@@ -68,43 +94,47 @@ type GenerationRun = {
   finished: boolean;
   cancelled: boolean;
   model_name: string;
+  validation_provider?: string | null;
+  validation_model_name?: string | null;
+  question_count: number;
+  pipeline?: string;
+  ragas_options?: { query_mode: RagasQueryMode; context_chars: number; passage_tries: number } | null;
   sampling_seed?: number | null;
+};
+
+type GenerationProvider = {
+  id: string;
+  label: string;
+  model_name: string;
+  models: string[];
+  models_error?: string | null;
 };
 
 type GenerationConfig = {
   configured: boolean;
-  model_name: string;
-  models: string[];
-  models_error?: string | null;
-  pipelines?: Array<{
-    id: string;
-    label: string;
-    configured: boolean;
-    mode?: 'batch' | 'direct';
-    generator_model: string;
-    validator_model: string;
-    reasoning_effort: string;
-  }>;
+  providers: GenerationProvider[];
 };
 
-const PIPELINE_PREFIX = 'pipeline:';
+const MODEL_CHOICE_SEPARATOR = ':::';
 const PHASE_LABELS: Record<string, string> = {
+  classifying: 'Quellenabschnitte prüfen',
   generating: 'Generierung',
   validating: 'Validierung',
   escalating: 'Eskalation',
   finalizing: 'Abschluss',
 };
 
-function defaultModelChoice(config: GenerationConfig): string {
-  if (config.models.includes(config.model_name)) return config.model_name;
-  if (config.models.length > 0) return config.models[0];
-  const pipeline = config.pipelines?.find((candidate) => candidate.configured && candidate.mode === 'direct')
-    ?? config.pipelines?.find((candidate) => candidate.configured);
-  return pipeline ? `${PIPELINE_PREFIX}${pipeline.id}` : '';
+function defaultModelChoice(config: GenerationConfig): { providerId: string; modelName: string } {
+  const provider = config.providers.find((candidate) => candidate.id === 'hcds' && candidate.models.length > 0)
+    ?? config.providers.find((candidate) => candidate.models.length > 0);
+  if (!provider) return { providerId: '', modelName: '' };
+  const modelName = provider.models.includes(provider.model_name) ? provider.model_name : provider.models[0];
+  return { providerId: provider.id, modelName };
 }
 
 const URL = '/api/v1/evaluation-datasets/generation';
 const RUN_KEY = 'paddledoc-dataset-generation';
+const LAST_RUN_KEY = 'paddledoc-dataset-generation-last';
 const STATUS_LABELS = {
   queued: 'Wartend', processing: 'Generiert', completed: 'Fertig',
   failed: 'Fehler', skipped: 'Vorhanden', cancelled: 'Abgebrochen',
@@ -122,11 +152,295 @@ function formatDuration(seconds: number): string {
   return `${safeSeconds.toFixed(1)} s`;
 }
 
-export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
+function itemProgressPercent(item: GenerationItem, pipeline?: string): number {
+  if (['completed', 'skipped', 'failed', 'cancelled'].includes(item.status)) return 100;
+  const progress = item.progress;
+  if (!progress) return 0;
+  if (pipeline === 'ragas') {
+    if (progress.phase === 'classifying') return 5;
+    if (progress.phase === 'validating') {
+      return 70 + Math.round(25 * (progress.validation_done ?? 0) / Math.max(1, progress.validation_total ?? 0));
+    }
+    if (progress.phase === 'finalizing') return 95;
+    return Math.max(5, Math.round(70 * progress.region / Math.max(1, progress.region_count)));
+  }
+  return progress.question_target > 0
+    ? Math.min(95, Math.round(progress.questions_generated / progress.question_target * 95))
+    : 0;
+}
+
+function ragasOutcomeMessage(item: GenerationItem, target: number): string | null {
+  if (item.status !== 'completed' || item.row_count == null || item.row_count >= target) return null;
+  const concisePrefix = item.row_count + ' von ' + target + ' Fragen gespeichert.';
+  if (item.warning?.startsWith(concisePrefix)) return item.warning;
+  const generated = item.validation_summary?.candidates ?? item.row_count;
+  const notGenerated = Math.max(0, target - generated);
+  const rejected = item.validation_summary?.rejected ?? 0;
+  const reasons = [concisePrefix];
+  if (notGenerated === 1) reasons.push('Eine Frage konnte nicht erzeugt werden.');
+  else if (notGenerated > 1) reasons.push(notGenerated + ' Fragen konnten nicht erzeugt werden.');
+  if (rejected === 1) reasons.push('Eine Frage wurde bei der Validierung verworfen.');
+  else if (rejected > 1) reasons.push(rejected + ' Fragen wurden bei der Validierung verworfen.');
+  return reasons.join(' ');
+}
+
+function rejectionReason(detail: NonNullable<NonNullable<GenerationItem['validation_summary']>['details']>[number], summary: NonNullable<GenerationItem['validation_summary']>): string {
+  if (detail.reason) return detail.reason;
+  const thresholds = summary.thresholds;
+  const faithfulnessLimit = thresholds?.reject_faithfulness ?? 0.50;
+  const relevanceLimit = thresholds?.reject_answer_relevancy ?? 0.40;
+  const reasons = [];
+  if (detail.faithfulness != null && detail.faithfulness < faithfulnessLimit) {
+    reasons.push('Faithfulness ' + detail.faithfulness.toFixed(2) + ' unter Ablehnungsgrenze ' + faithfulnessLimit.toFixed(2));
+  }
+  if (detail.answer_relevancy != null && detail.answer_relevancy < relevanceLimit) {
+    reasons.push('Antwort-Relevanz ' + detail.answer_relevancy.toFixed(2) + ' unter Ablehnungsgrenze ' + relevanceLimit.toFixed(2));
+  }
+  return reasons.join('; ') || detail.errors?.join('; ') || 'Im alten Lauf wurde kein genauer Grund gespeichert.';
+}
+
+function reviewErrorReason(errors: string[]): string {
+  return errors.map((entry) => {
+    const [metric, errorType, ...message] = entry.split(': ');
+    const label = metric === 'answer_relevancy' ? 'Antwort-Relevanz' : metric === 'faithfulness' ? 'Faithfulness' : metric;
+    const explanation = message.join(': ');
+    return label + ' konnte nicht berechnet werden (' + (errorType ?? 'unbekannter Fehler')
+      + (explanation ? ': ' + explanation : '') + ').'
+      + (explanation ? '' : ' Im damaligen Lauf wurde nur der Fehlertyp protokolliert.');
+  }).join(' ');
+}
+
+function LogSection({ title, value, initialOpen = false }: { title: string; value: unknown; initialOpen?: boolean }) {
+  return (
+    <details open={initialOpen || undefined} className="rounded-md border border-slate-200 bg-white">
+      <summary className="cursor-pointer px-3 py-2 font-medium">{title}</summary>
+      <pre className="max-h-[72dvh] overflow-auto border-t border-slate-200 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(value, null, 2)}</pre>
+    </details>
+  );
+}
+type LlmHttpEvent = {
+  type: 'llm_http_request' | 'llm_http_response';
+  request_id: string;
+  at?: string;
+  scope?: { phase?: string; region?: number; passage_id?: string; page?: number | null; question_id?: string; metric?: string };
+  body?: unknown;
+  status_code?: number;
+  duration_ms?: number;
+};
+
+function LlmRequestTimeline({ events }: { events: LlmHttpEvent[] | undefined }) {
+  const responses = new Map(events?.filter((event) => event.type === 'llm_http_response').map((event) => [event.request_id, event]) ?? []);
+  const requests = events?.filter((event) => event.type === 'llm_http_request') ?? [];
+  const phaseLabel = (phase?: string) => phase === 'classification' ? 'Abschnittsauswahl' : phase === 'generation' ? 'Fragengenerierung' : phase === 'validation' ? 'Validierung' : phase ?? 'Unbekannte Phase';
+  return (
+    <details open className="rounded-lg border-2 border-sky-400 bg-sky-50">
+      <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">Tatsächliche LLM-API-Anfragen · {requests.length}</summary>
+      <div className="space-y-2 border-t border-sky-200 px-4 py-3">
+        <p className="text-xs text-sky-900">Chronologisch protokollierte Anfragen inklusive RAGAS-interner Prompts und API-Antworten. Wiederholungen durch die API-Bibliothek erscheinen als eigene Anfragen. HTTP-Header und Zugangsdaten werden nicht gespeichert.</p>
+        {!events && <p className="text-xs text-amber-800">Für diesen älteren Lauf wurden die tatsächlichen API-Anfragen nicht erfasst. Unten stehen nur die an RAGAS übergebenen Ausschnitte.</p>}
+        {events && requests.length === 0 && <p className="text-xs text-slate-600">Bisher wurde keine LLM-API-Anfrage protokolliert.</p>}
+        {requests.map((request, index) => {
+          const response = responses.get(request.request_id);
+          const payload = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {};
+          const scope = request.scope ?? {};
+          return (
+            <details key={request.request_id} className="rounded-md border border-sky-200 bg-white">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
+                {index + 1}. {phaseLabel(scope.phase)} · {request.at ? new Date(request.at).toLocaleString('de-DE') : 'Zeit unbekannt'} · {String(payload.model ?? 'Modell unbekannt')}
+                {scope.question_id ? ' · ' + scope.question_id : ''}{scope.metric ? ' · ' + scope.metric : ''}{scope.region ? ' · Bereich ' + scope.region : ''}{scope.page ? ' · Seite ' + scope.page : ''}{scope.passage_id ? ' · ' + scope.passage_id : ''}
+                {' · '}{response ? 'HTTP ' + response.status_code + ' · ' + response.duration_ms + ' ms' : 'Keine API-Antwort erfasst'}
+              </summary>
+              <div className="space-y-2 border-t border-sky-100 p-3">
+                <p className="text-xs font-semibold">Exakter JSON-Anfragekörper</p>
+                <pre className="max-h-[60dvh] overflow-auto rounded bg-slate-50 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(request.body, null, 2)}</pre>
+                {response && <><p className="text-xs font-semibold">API-Antwort</p><pre className="max-h-[60dvh] overflow-auto rounded bg-slate-50 p-3 text-xs whitespace-pre-wrap break-words">{JSON.stringify(response.body, null, 2)}</pre></>}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: string; item: GenerationItem; datasetChangedSinceRun: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [log, setLog] = useState<GenerationLog | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    const load = async () => {
+      try {
+        const result = await apiJson<GenerationLog>(URL + '/' + runId + '/audit/' + item.job_id + '/download');
+        if (active) { setLog(result); setError(null); }
+      } catch (cause) {
+        if (active) setError(String(cause));
+      }
+    };
+    void load();
+    const timer = item.status === 'processing' ? window.setInterval(() => void load(), 3000) : null;
+    return () => { active = false; if (timer != null) window.clearInterval(timer); };
+  }, [open, runId, item.job_id, item.status]);
+
+  useEffect(() => {
+    if (!open) return;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open]);
+
+  async function downloadLog() {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const response = await apiFetch(URL + '/' + runId + '/audit/' + item.job_id + '/download');
+      if (!response.ok) throw new Error('Download fehlgeschlagen (HTTP ' + response.status + ').');
+      const objectUrl = window.URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = 'dataset-log-' + item.job_id + '.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 1000);
+    } catch (cause) {
+      setDownloadError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const audit = log?.audit;
+  const prepared = audit?.prepared_document as {
+    text?: string; picture_text_blocks_removed?: number; sha256?: string;
+    reconstructed_at_read_time?: boolean;
+  } | undefined;
+  const sentContexts = Array.isArray(audit?.generation_inputs)
+    ? audit.generation_inputs as Array<{ region?: number; page?: number | null; passage_id?: string; context?: string }>
+    : [];
+  const llmEvents = Array.isArray(audit?.llm_http_events) ? audit.llm_http_events as LlmHttpEvent[] : undefined;
+  const rejectedDetails = item.validation_summary?.details?.filter((detail) => detail.status === 'rejected') ?? [];
+  const reviewErrors = item.validation_summary?.details?.filter((detail) => detail.status === 'review' && detail.errors?.length) ?? [];
+  return (
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
+      <button type="button" className="font-medium text-slate-800 underline" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+        Log ansehen
+      </button>
+      <Button type="button" size="sm" variant="outline" disabled={downloading} onClick={() => void downloadLog()}>
+        {downloading ? <LoaderCircle className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-1 h-3.5 w-3.5" />}
+        Log herunterladen (.json)
+      </Button>
+      {downloadError && <p className="w-full text-red-700">{downloadError}</p>}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-2 sm:p-5">
+          <section role="dialog" aria-modal="true" aria-labelledby={'dataset-log-title-' + item.job_id} className="flex h-[94dvh] w-full max-w-[1600px] flex-col overflow-hidden rounded-xl bg-white text-slate-800 shadow-2xl">
+            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <h3 id={'dataset-log-title-' + item.job_id} className="text-base font-semibold">Generierungslog</h3>
+              <button ref={closeButtonRef} type="button" className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" onClick={() => setOpen(false)}>Schließen</button>
+            </header>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-5">
+              {error && <p className="text-red-700">Log konnte nicht geladen werden: {error}</p>}
+              {!log && !error && <p>Log wird geladen …</p>}
+              {log && audit && (
+                <>
+                  {datasetChangedSinceRun && <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">Dieses Log gehört zu einem früheren Lauf. Die Dataset-Datei wurde danach verändert oder überschrieben; „Dataset öffnen“ zeigt den aktuellen Dateistand.</p>}
+                  {item.validation_summary && (
+                    <section className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                      <p className="font-semibold">Ergebnis dieses Laufs: {item.validation_summary.candidates} Kandidaten erzeugt, {item.row_count ?? 0} Fragen gespeichert.</p>
+                      {rejectedDetails.map((detail) => (
+                        <p key={detail.id} className="mt-1 break-words">{detail.id} wurde generiert, aber nicht gespeichert: {rejectionReason(detail, item.validation_summary!)}.</p>
+                      ))}
+                      {reviewErrors.map((detail) => (
+                        <p key={detail.id} className="mt-1 break-words">{detail.id} wurde gespeichert, muss aber manuell geprüft werden: {reviewErrorReason(detail.errors ?? [])}</p>
+                      ))}
+                    </section>
+                  )}
+                  <p className="text-xs text-slate-600">Ablauf: Markdown bereinigen → Abschnitte klassifizieren → einzelne Ausschnitte mit RAGAS zur Fragegenerierung nutzen → Fragen validieren.</p>
+                  <LlmRequestTimeline events={llmEvents} />
+                  <details className="rounded-lg border border-sky-200 bg-sky-50">
+                    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">An RAGAS übergebene Textausschnitte · {sentContexts.length}</summary>
+                    <div className="space-y-2 border-t border-sky-200 px-4 py-3">
+                      <p className="text-xs text-sky-900">Diese Ausschnitte erhielt RAGAS nach Bereinigung und Abschnittsfilterung. Welche Prompts RAGAS daraus tatsächlich an das LLM geschickt hat, steht oben.</p>
+                      {sentContexts.length === 0 && <p className="text-xs text-slate-600">Für diesen Lauf sind keine Modelltexte protokolliert.</p>}
+                      <div className="max-h-[72dvh] space-y-2 overflow-y-auto">
+                        {sentContexts.map((input, index) => (
+                          <article key={index} className="rounded-md border border-sky-200 bg-white p-3">
+                            <p className="mb-2 font-medium">Versuch {index + 1} · Bereich {input.region ?? '–'}{input.page != null ? ' · Seite ' + input.page : ''}{input.passage_id ? ' · ' + input.passage_id : ''}</p>
+                            <pre className="text-xs whitespace-pre-wrap break-words">{input.context ?? ''}</pre>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  </details>
+                  <details className="rounded-lg border-2 border-emerald-400 bg-emerald-50">
+                    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-emerald-950">Bereinigtes Markdown · Grafiktext entfernt, vor Abschnittsfilterung</summary>
+                    <div className="border-t border-emerald-200 px-4 py-3">
+                      <p className="mb-2 text-xs text-emerald-900">
+                        Dies ist die bereinigte Textfassung, nicht das Original-Markdown. Grafiktext-Blöcke wurden entfernt, Seitenmarkierungen erhalten. Das vollständige Markdown wird nicht als Ganzes an das LLM geschickt.
+                      </p>
+                      {typeof prepared?.text === 'string' ? (
+                        <>
+                          <p className="mb-2 text-xs text-emerald-900">Entfernte Grafiktext-Blöcke: {prepared.picture_text_blocks_removed ?? '–'}</p>
+                          {prepared.reconstructed_at_read_time && <p className="mb-2 text-xs text-amber-800">Für diesen älteren Lauf wurde die vollständige bereinigte Fassung nicht protokolliert. Diese Vorschau wurde beim Öffnen mit der aktuellen Bereinigungsfunktion aus der unveränderten Quelle erstellt (Quell-Hash stimmt). Die damaligen RAGAS-Eingaben stehen oben; die tatsächlichen internen LLM-Prompts wurden nicht erfasst.</p>}
+                          <pre className="max-h-[72dvh] overflow-auto rounded-md border border-emerald-200 bg-white p-3 text-xs whitespace-pre-wrap break-words">{prepared.text}</pre>
+                        </>
+                      ) : (
+                        <p className="text-xs text-amber-800">Dieser ältere Lauf enthält noch keine vollständige bereinigte Textfassung im Log. Die tatsächlich verwendeten Ausschnitte stehen unter „Generierung: Inputs“.</p>
+                      )}
+                    </div>
+                  </details>
+                  <LogSection title="Lauf und Einstellungen" value={{ settings: log.settings, result: log.result }} />
+                  <LogSection title="Dokumentauswahl und Klassifikation" value={{
+                    source_document: audit.source_document,
+                    source_file: audit.source_file,
+                    source_markdown_sha256: audit.source_markdown_sha256,
+                    classification_inputs: audit.classification_inputs,
+                    classification_results: audit.classification_results,
+                    section_inventory: audit.section_inventory,
+                    excluded_sections: audit.excluded_sections,
+                    passages_total: audit.passages_total,
+                    passages_eligible: audit.passages_eligible,
+                  }} />
+                  <LogSection title="Generierung: Inputs, Rohproben und Entscheidungen" value={{
+                    generation_inputs: audit.generation_inputs,
+                    generation_results: audit.generation_results,
+                    region_results: audit.region_results,
+                  }} />
+                  <LogSection title="Validierung: Kandidaten, Metrik-Inputs und Ergebnisse" value={{
+                    validation_candidates: audit.validation_candidates,
+                    validation_inputs: audit.validation_inputs,
+                    validation_results: audit.validation_results,
+                    validation_summary: audit.validation_summary ?? log.result.validation_summary,
+                  }} />
+                  <LogSection title="Gespeichertes Dataset" value={{
+                    dataset_path: audit.dataset_path ?? log.result.dataset_path,
+                    dataset_rows: audit.dataset_rows,
+                  }} />
+                  <LogSection title="Vollständiges JSON-Protokoll" value={log} />
+                </>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOpenDataset }: {
   files: MarkdownFile[];
   datasets: ExistingDataset[];
   preferredPath: string;
   onSaved: (path: string) => Promise<void> | void;
+  onOpenDataset: (path: string) => Promise<void> | void;
 }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set(preferredPath ? [preferredPath] : []));
   const [questionCount, setQuestionCount] = useState(10);
@@ -136,7 +450,14 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
   const [existingMode, setExistingMode] = useState<'skip' | 'new' | 'overwrite'>('skip');
   const [overwriteTargets, setOverwriteTargets] = useState<Record<string, string>>({});
   const [config, setConfig] = useState<GenerationConfig | null>(null);
+  const [providerId, setProviderId] = useState('');
   const [modelName, setModelName] = useState('');
+  const [validationProviderId, setValidationProviderId] = useState('');
+  const [validationModelName, setValidationModelName] = useState('');
+  const [pipeline, setPipeline] = useState<'ragas' | 'standard'>('ragas');
+  const [ragasQueryMode, setRagasQueryMode] = useState<RagasQueryMode>('facts');
+  const [ragasContextChars, setRagasContextChars] = useState<800 | 1400 | 2400>(1400);
+  const [ragasPassageTries, setRagasPassageTries] = useState(3);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<GenerationRun | null>(null);
@@ -144,15 +465,17 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const completedRunRef = useRef<string | null>(null);
-  const selectedPipeline = modelName.startsWith(PIPELINE_PREFIX)
-    ? config?.pipelines?.find((pipeline) => `${PIPELINE_PREFIX}${pipeline.id}` === modelName && pipeline.configured)
-    : undefined;
-  const hasModelChoices = Boolean(config?.models.length || config?.pipelines?.some((pipeline) => pipeline.configured));
+  const modelChoice = providerId && modelName ? providerId + MODEL_CHOICE_SEPARATOR + modelName : '';
+  const validationModelChoice = validationProviderId && validationModelName
+    ? validationProviderId + MODEL_CHOICE_SEPARATOR + validationModelName : '';
+  const hasModelChoices = config?.providers.some((provider) => provider.models.length > 0) ?? false;
   const running = Boolean(runId && !run?.finished);
   const hasProcessingItems = run?.items.some((item) => item.status === 'processing') ?? false;
   const settledCount = run?.items.filter((item) => !['queued', 'processing'].includes(item.status)).length ?? 0;
   const runTotal = run?.items.length ?? 0;
-  const progressPercent = runTotal > 0 ? Math.round((settledCount / runTotal) * 100) : 0;
+  const progressPercent = runTotal > 0
+    ? Math.round(run!.items.reduce((total, item) => total + itemProgressPercent(item, run!.pipeline), 0) / runTotal)
+    : 0;
 
   useEffect(() => {
     if (!hasProcessingItems) return;
@@ -248,8 +571,13 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
       .then((result) => {
         if (!active) return;
         setConfig(result);
-        setModelName(defaultModelChoice(result));
-        setRunId(sessionStorage.getItem(RUN_KEY));
+        const choice = defaultModelChoice(result);
+        setProviderId(choice.providerId);
+        setModelName(choice.modelName);
+        setValidationProviderId(choice.providerId);
+        setValidationModelName(choice.modelName);
+        setPipeline(choice.providerId === 'hcds' ? 'ragas' : 'standard');
+        setRunId(sessionStorage.getItem(RUN_KEY) ?? sessionStorage.getItem(LAST_RUN_KEY));
       })
       .catch((cause: unknown) => { if (active) setError(String(cause)); });
     return () => { active = false; };
@@ -265,8 +593,12 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
         setRun(result);
         if (result.finished) {
           window.clearInterval(timer);
-          sessionStorage.removeItem(RUN_KEY);
-          if (completedRunRef.current !== runId) {
+          const wasActiveRun = sessionStorage.getItem(RUN_KEY) === runId;
+          if (wasActiveRun) {
+            sessionStorage.setItem(LAST_RUN_KEY, runId);
+            sessionStorage.removeItem(RUN_KEY);
+          }
+          if (wasActiveRun && completedRunRef.current !== runId) {
             completedRunRef.current = runId;
             const saved = result.items.find((item) => item.dataset_path);
             if (saved?.dataset_path) await onSaved(saved.dataset_path);
@@ -277,6 +609,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
           setError(String(cause));
           if (cause instanceof ApiError && cause.status === 404) {
             sessionStorage.removeItem(RUN_KEY);
+            if (sessionStorage.getItem(LAST_RUN_KEY) === runId) sessionStorage.removeItem(LAST_RUN_KEY);
             setRunId(null);
             window.clearInterval(timer);
           }
@@ -294,10 +627,19 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
     try {
       const result = await apiJson<GenerationConfig>(`${URL}/config`);
       setConfig(result);
-      setModelName((current) => result.models.includes(current)
-        || (current.startsWith(PIPELINE_PREFIX) && result.pipelines?.some((pipeline) => pipeline.configured && `${PIPELINE_PREFIX}${pipeline.id}` === current))
-        ? current
-        : defaultModelChoice(result));
+      const currentProvider = result.providers.find((provider) => provider.id === providerId);
+      if (!currentProvider?.models.includes(modelName)) {
+        const choice = defaultModelChoice(result);
+        setProviderId(choice.providerId);
+        setModelName(choice.modelName);
+        setPipeline(choice.providerId === 'hcds' ? 'ragas' : 'standard');
+      }
+      const currentValidationProvider = result.providers.find((provider) => provider.id === validationProviderId);
+      if (!currentValidationProvider?.models.includes(validationModelName)) {
+        const choice = defaultModelChoice(result);
+        setValidationProviderId(choice.providerId);
+        setValidationModelName(choice.modelName);
+      }
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -333,12 +675,22 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           markdown_paths: [...selected], question_count: questionCount,
-          question_style: style, focus, skip_existing: existingMode === 'skip',
+          question_style: pipeline === 'ragas' ? 'user-paraphrases' : style,
+          focus: pipeline === 'ragas' ? '' : focus,
+          skip_existing: existingMode === 'skip',
           overwrite_datasets: existingMode === 'overwrite'
             ? Object.fromEntries(selectedWithDatasets.map((path) => [path, overwriteTargetFor(path)]))
             : {},
-          model_name: selectedPipeline ? null : modelName,
-          pipeline: selectedPipeline ? selectedPipeline.id : 'standard',
+          provider: providerId,
+          model_name: modelName,
+          ...(pipeline === 'ragas' ? {
+            validation_provider: validationProviderId,
+            validation_model_name: validationModelName,
+          } : {}),
+          pipeline,
+          ragas_query_mode: ragasQueryMode,
+          ragas_context_chars: ragasContextChars,
+          ragas_passage_tries: ragasPassageTries,
           sampling_seed: samplingSeed === '' ? null : Number(samplingSeed),
         }),
       });
@@ -372,73 +724,123 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
         <Field label="Fragen pro Dokument">
           <input className={inputClass} type="number" min={1} max={30} value={questionCount} disabled={running || busy} onChange={(event) => setQuestionCount(Math.max(1, Math.min(30, Number(event.target.value) || 1)))} />
         </Field>
-        <Field label="Modell">
+        <Field label="Generierungsmethode">
+          <select className={inputClass} value={pipeline} disabled={running || busy || providerId !== 'hcds'} onChange={(event) => setPipeline(event.target.value as 'ragas' | 'standard')}>
+            <option value="ragas">RAGAS</option>
+            <option value="standard">Custom Generator</option>
+          </select>
+        </Field>
+        <Field label="Generierungsmodell">
           <div className="flex min-w-0 items-center gap-2">
-            <select className={`${inputClass} min-w-0 flex-1`} value={modelName} disabled={running || busy || refreshingModels || !hasModelChoices} onChange={(event) => setModelName(event.target.value)}>
+            <select
+              className={inputClass + ' min-w-0 flex-1'}
+              value={modelChoice}
+              disabled={running || busy || refreshingModels || !hasModelChoices}
+              onChange={(event) => {
+                const separator = event.target.value.indexOf(MODEL_CHOICE_SEPARATOR);
+                const nextProvider = event.target.value.slice(0, separator);
+                setProviderId(nextProvider);
+                setPipeline(nextProvider === 'hcds' ? 'ragas' : 'standard');
+                setModelName(event.target.value.slice(separator + MODEL_CHOICE_SEPARATOR.length));
+              }}
+            >
               {!hasModelChoices && <option value="">Keine Modelle verfügbar</option>}
-              {config?.pipelines?.some((pipeline) => pipeline.configured) && (
-                <optgroup label="OpenAI Gold-Pipeline">
-                  {config.pipelines.filter((pipeline) => pipeline.configured).map((pipeline) => (
-                    <option key={pipeline.id} value={`${PIPELINE_PREFIX}${pipeline.id}`}>
-                      {pipeline.label}: {pipeline.generator_model} + {pipeline.validator_model}
-                    </option>
+              {config?.providers.filter((provider) => provider.models.length > 0).map((provider) => (
+                <optgroup key={provider.id} label={provider.label}>
+                  {provider.models.map((model) => (
+                    <option key={model} value={provider.id + MODEL_CHOICE_SEPARATOR + model}>{model}</option>
                   ))}
                 </optgroup>
-              )}
-              {Boolean(config?.models.length) && (
-                <optgroup label="Hanse Merkur AI Hub">
-                  {config?.models.map((model) => <option key={model} value={model}>{model}</option>)}
-                </optgroup>
-              )}
+              ))}
             </select>
             <Button type="button" size="sm" variant="outline" disabled={running || busy || refreshingModels} onClick={() => void refreshModels()} aria-label="Modelle aktualisieren" title="Modelle aktualisieren">
               <RefreshCw className={`h-4 w-4${refreshingModels ? ' animate-spin' : ''}`} />
             </Button>
           </div>
         </Field>
-      </div>
-      {selectedPipeline && (
-        <p className="mt-2 text-sm text-slate-600">
-          Generator: {selectedPipeline.generator_model} · Validator: {selectedPipeline.validator_model} · Eskalation bei FAIL/UNCERTAIN: {selectedPipeline.generator_model} · Reasoning: {selectedPipeline.reasoning_effort}. {selectedPipeline.mode === 'direct'
-            ? 'Die Stufen laufen sofort und parallel über die normale OpenAI-API (ca. doppelte Kosten wie im Batch, meist wenige Minuten).'
-            : 'Die Verarbeitung läuft als OpenAI-Batch (Generierung, Validierung, Eskalation nacheinander). OpenAI garantiert nur 24 Stunden; je nach Auslastung dauert es Minuten bis Stunden.'} Nur Einträge mit Validierungsstatus PASS werden als Gold gespeichert.
-        </p>
-      )}
-      {config?.models_error && <ErrorNotice message={config.models_error} />}
-      <Field label="Verteilung über das Dokument">
-        <p className="text-sm text-slate-700">Der Generator teilt das Dokument möglichst gleichmäßig in bis zu {questionCount} Abschnitte und versucht, aus jedem eine belegte Frage zu erstellen. Bei 90 markierten Seiten und 10 Fragen sind das grob 9 Seiten je Abschnitt. Ohne Seitenmarkierungen wird nach Textposition verteilt; ein Abschnitt ist also nicht zwingend eine einzelne Seite.</p>
-      </Field>
-      <details className="my-3 border-y border-slate-200 py-2">
-        <summary className="cursor-pointer text-sm font-medium">Optionale Einstellungen</summary>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          <Field label="Fragenstil">
-            <select className={inputClass} value={style} disabled={running || busy} onChange={(event) => setStyle(event.target.value)}>
-              <option value="user-paraphrases">Natürliche Kundenfragen</option>
-              <option value="contract-language">Vertragsnahe Fragen</option>
-              <option value="mixed-questions">Gemischte Fragen</option>
+        {pipeline === 'ragas' && (
+          <Field label="Validierungsmodell (separat)">
+            <select
+              className={inputClass}
+              value={validationModelChoice}
+              disabled={running || busy || refreshingModels || !hasModelChoices}
+              onChange={(event) => {
+                const separator = event.target.value.indexOf(MODEL_CHOICE_SEPARATOR);
+                setValidationProviderId(event.target.value.slice(0, separator));
+                setValidationModelName(event.target.value.slice(separator + MODEL_CHOICE_SEPARATOR.length));
+              }}
+            >
+              {!hasModelChoices && <option value="">Keine Modelle verfügbar</option>}
+              {config?.providers.filter((provider) => provider.models.length > 0).map((provider) => (
+                <optgroup key={provider.id} label={provider.label}>
+                  {provider.models.map((model) => (
+                    <option key={model} value={provider.id + MODEL_CHOICE_SEPARATOR + model}>{model}</option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
           </Field>
-          <Field label="Themenfokus (optional)">
-            <input className={inputClass} value={focus} maxLength={1000} disabled={running || busy} onChange={(event) => setFocus(event.target.value)} placeholder="Zum Beispiel: Leistungen und Ausschlüsse" />
-          </Field>
+        )}
+      </div>
+      {config?.providers.filter((provider) => provider.models_error).map((provider) => (
+        <ErrorNotice key={provider.id} message={provider.models_error ?? null} />
+      ))}
+      <details className="my-3 border-y border-slate-200 py-2">
+        <summary className="cursor-pointer text-sm font-medium">Weitere Einstellungen</summary>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          {pipeline === 'ragas' && (
+            <>
+              <Field label="Fragetyp">
+                <select className={inputClass} value={ragasQueryMode} disabled={running || busy} onChange={(event) => setRagasQueryMode(event.target.value as RagasQueryMode)}>
+                  <option value="facts">Konkrete Faktenfragen</option>
+                  <option value="themes">Themenfragen aus einer Quellenstelle</option>
+                  <option value="mixed">Gemischt, abschnittsweise abwechselnd</option>
+                </select>
+              </Field>
+              <Field label="Text pro Quellenstelle">
+                <select className={inputClass} value={ragasContextChars} disabled={running || busy} onChange={(event) => setRagasContextChars(Number(event.target.value) as 800 | 1400 | 2400)}>
+                  <option value={800}>Kurz · bis 800 Zeichen</option>
+                  <option value={1400}>Standard · bis 1.400 Zeichen</option>
+                  <option value={2400}>Ausführlich · bis 2.400 Zeichen</option>
+                </select>
+              </Field>
+              <Field label="Quellenstellen je Dokumentbereich">
+                <select className={inputClass} value={ragasPassageTries} disabled={running || busy} onChange={(event) => setRagasPassageTries(Number(event.target.value))}>
+                  <option value={1}>1 Versuch · sparsam</option>
+                  <option value={3}>Bis zu 3 Versuche · Standard</option>
+                  <option value={5}>Bis zu 5 Versuche · gründlich</option>
+                </select>
+              </Field>
+            </>
+          )}
+          {pipeline === 'standard' && (
+            <>
+              <Field label="Fragenstil">
+                <select className={inputClass} value={style} disabled={running || busy} onChange={(event) => setStyle(event.target.value)}>
+                  <option value="user-paraphrases">Natürliche Kundenfragen</option>
+                  <option value="contract-language">Vertragsnahe Fragen</option>
+                  <option value="mixed-questions">Gemischte Fragen</option>
+                </select>
+              </Field>
+              <Field label="Themenfokus (optional)">
+                <input className={inputClass} value={focus} maxLength={1000} disabled={running || busy} onChange={(event) => setFocus(event.target.value)} placeholder="Zum Beispiel: Leistungen und Ausschlüsse" />
+              </Field>
+            </>
+          )}
           <Field label="Zufalls-Seed (optional)">
             <input className={inputClass} type="number" min={0} max={2**31 - 1} step={1} value={samplingSeed} disabled={running || busy} onChange={(event) => setSamplingSeed(event.target.value)} placeholder="Zufällig" />
           </Field>
         </div>
+        {pipeline === 'ragas' && <p className="mt-2 text-xs text-slate-500">Längere Texte und mehr Versuche können mehr Modellaufrufe verursachen.</p>}
       </details>
       <div className="my-3">
-        <Field label="Verhalten bei vorhandenen Datasets">
+        <Field label="Vorhandene Datasets">
           <select className={inputClass} value={existingMode} disabled={running || busy} onChange={(event) => setExistingMode(event.target.value as 'skip' | 'new' | 'overwrite')}>
-            <option value="skip">Bei aktuellem Dataset nicht neu generieren</option>
+            <option value="skip">Bei gleicher Markdown-Fassung überspringen</option>
             <option value="new">Zusätzliches Dataset erstellen</option>
             <option value="overwrite">Ausgewähltes Dataset ersetzen</option>
           </select>
         </Field>
-        <p className="mt-1 text-sm text-slate-600">
-          {existingMode === 'skip' && 'Nur wenn ein Dataset exakt zur ausgewählten Markdown-Fassung existiert, wird die Generierung ausgelassen. Ältere oder nicht verifizierbare Datasets zählen nicht als aktueller Stand.'}
-          {existingMode === 'new' && 'Standard: Für jede ausgewählte Quelldatei wird ein zusätzliches Dataset angelegt. Vorhandene Datasets bleiben erhalten.'}
-          {existingMode === 'overwrite' && 'Bei ausgewählten Quelldateien mit vorhandenen Datasets wählst du unten das konkrete Dataset zum Ersetzen aus. Quelldateien ohne Bestand erhalten ein neues Dataset.'}
-        </p>
       </div>
       <p className="mb-1 text-sm font-medium text-slate-700">Markdown-Dateien für die Generierung</p>
       <div className="my-2 flex flex-wrap items-center gap-2">
@@ -465,25 +867,17 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
                   <span className="block text-xs text-slate-500">
                     {file.filename} · PDF-Version {file.document_version ?? 'unbekannt'} · {file.workspace_folder || 'inbox'}
                   </span>
-                  <span className="block text-xs text-emerald-700">{markdownFreshness(file)}</span>
+                  {markdownFreshness(file) !== 'neuester Markdown-Stand' && <span className="block text-xs text-amber-700">{markdownFreshness(file)}</span>}
                 </span>
               </label>
-              {isSelected && (
-                <div className="ml-6 mt-2 rounded-md bg-slate-50 px-3 py-2 text-xs">
-                  <p className="font-medium text-slate-700">Vorhandene Datasets zu dieser PDF</p>
-                  {sourceDatasets.length > 0 ? (
-                    <ul className="mt-1 space-y-0.5 text-slate-600">
-                      {sourceDatasets.map((dataset) => (
-                        <li key={dataset.path} className="break-words">
-                          {dataset.filename}
-                          <span className="ml-1 text-slate-500">({datasetRelationLabel(datasetSourceRelation(dataset, file.path))})</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mt-1 text-slate-500">Keine vorhanden</p>
-                  )}
-                </div>
+              {isSelected && existingMode !== 'overwrite' && sourceDatasets.length > 0 && (
+                <ul className="ml-6 mt-1 space-y-0.5 text-xs text-slate-500">
+                  {sourceDatasets.map((dataset) => (
+                    <li key={dataset.path} className="break-words">
+                      {dataset.filename} <span>({datasetRelationLabel(datasetSourceRelation(dataset, file.path))})</span>
+                    </li>
+                  ))}
+                </ul>
               )}
               {existingMode === 'overwrite' && isSelected && sourceDatasets.length > 0 && (
                 <label className="ml-6 mt-2 block min-w-0 overflow-hidden text-xs font-medium text-slate-600">
@@ -506,7 +900,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
         })}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">
-        <Button onClick={() => void start()} disabled={busy || running || refreshingModels || !validSamplingSeed || missingOverwriteTarget || !config?.configured || !modelName || selected.size === 0 || selected.size > 1000}>
+        <Button onClick={() => void start()} disabled={busy || running || refreshingModels || !validSamplingSeed || missingOverwriteTarget || !config?.configured || !modelName || (pipeline === 'ragas' && !validationModelName) || selected.size === 0 || selected.size > 1000}>
           {busy || running ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}Generierung starten
         </Button>
         {running && <Button variant="outline" disabled={busy || run?.cancelled} onClick={() => void cancel()}><StopCircle className="mr-2 h-4 w-4" />Abbrechen</Button>}
@@ -514,38 +908,78 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
       {selected.size > 1000 && <ErrorNotice message="Maximal 1000 Dokumente pro Auftrag." />}
       {run && (
         <div className="mt-4" aria-live="polite">
-          <p className="mb-1 break-words text-sm text-slate-500">Modell: {run.model_name}</p>
-          {run.sampling_seed != null && <p className="mb-1 text-sm text-slate-500">Zufalls-Seed: {run.sampling_seed}</p>}
+          <p className="mb-1 break-words text-sm text-slate-500">
+            {run.pipeline === 'ragas' ? 'Generierungsmodell' : 'Modell'}: {run.model_name}
+          </p>
+          {run.pipeline === 'ragas' && run.validation_model_name && (
+            <p className="mb-1 break-words text-sm text-slate-500">
+              Validierungsmodell: {run.validation_model_name}
+              {run.validation_provider ? ' (' + run.validation_provider + ')' : ''}
+            </p>
+          )}
           <div className="mb-1 flex items-center justify-between gap-3 text-sm font-medium">
             <p>{settledCount} / {runTotal} Quelldateien abgeschlossen{run.finished ? '' : run.cancelled ? ' · Abbruch angefordert' : ''}</p>
             <span>{progressPercent}%</span>
           </div>
           <progress className="h-2 w-full accent-emerald-600" max={100} value={progressPercent} aria-label={`Fortschritt: ${progressPercent}%`} />
-          <p className="mt-1 text-xs text-slate-500">Fortschritt nach Quelldateien; die Dauer wird pro Datei angezeigt.</p>
-          <div className="mt-2 max-h-64 overflow-y-auto">
+          <div className="mt-2 max-h-[70vh] overflow-y-auto">
             {run.items.map((item) => {
               const duration = item.duration_seconds
                 ?? (item.status === 'processing' && item.started_at != null && nowSeconds > 0
                   ? Math.max(0, nowSeconds - item.started_at)
                   : null);
               const isProgressComplete = item.status === 'completed' || item.status === 'skipped';
-              const questionProgress = item.progress && item.progress.question_target > 0
-                ? Math.min(95, Math.round(item.progress.questions_generated / item.progress.question_target * 95))
-                : 0;
-              const itemProgress = isProgressComplete ? 100 : questionProgress;
+              const currentDataset = datasets.find((dataset) => dataset.path === item.dataset_path);
+              const currentUpdatedAt = currentDataset?.updated_at ? Date.parse(currentDataset.updated_at) / 1000 : NaN;
+              const datasetChangedSinceRun = item.finished_at != null && Number.isFinite(currentUpdatedAt)
+                && currentUpdatedAt > item.finished_at + 5;
+              const itemProgress = itemProgressPercent(item, run.pipeline);
+              const outcomeMessage = run.pipeline === 'ragas'
+                ? ragasOutcomeMessage(item, run.question_count)
+                : item.warning;
               return (
                 <div key={item.job_id} className="border-b border-slate-100 py-2 text-sm">
-                  <p className="break-words">{item.filename}: {STATUS_LABELS[item.status]}{item.row_count ? ` (${item.row_count} Fragen)` : ''}</p>
+                  <p className="break-words">{item.filename}: {item.status === 'processing' && item.progress?.phase === 'validating' ? 'Wird validiert' : STATUS_LABELS[item.status]}{item.row_count ? ` (${item.row_count} Fragen)` : ''}</p>
+                  {item.started_at != null && <p className="text-xs text-slate-500">Lauf vom {new Date(item.started_at * 1000).toLocaleString('de-DE')}</p>}
                   {duration != null && <p className="text-xs text-slate-500">{item.status === 'processing' ? 'Läuft seit' : 'Dauer'}: {formatDuration(duration)}</p>}
                   {item.status === 'processing' && item.progress && PHASE_LABELS[item.progress.phase] && (
                     <p className="text-xs text-slate-500">
-                      {PHASE_LABELS[item.progress.phase]}{item.progress.mode === 'direct' ? '' : ' (Batch)'}
-                      {item.progress.stage_total ? ` · ${item.progress.stage_done ?? 0}/${item.progress.stage_total} Anfragen` : ''}
-                      {item.progress.round ? ` · Runde ${item.progress.round}/${item.progress.max_rounds ?? ''}` : ''}
-                      {` · ${item.progress.candidates ?? 0} Kandidaten · ${item.progress.escalated ?? 0} eskaliert · ${item.progress.rejected ?? 0} verworfen`}
+                      {run.pipeline === 'ragas' ? (
+                        item.progress.phase === 'validating'
+                          ? `RAGAS · Validierung ${item.progress.validation_done ?? 0}/${item.progress.validation_total ?? '?'} · ${item.progress.validation_accepted ?? 0} akzeptiert · ${item.progress.validation_review ?? 0} prüfen · ${item.progress.validation_rejected ?? 0} verworfen`
+                          : `RAGAS · Generierung, Abschnitt ${item.progress.region}/${item.progress.region_count || '?'} · ${item.progress.questions_generated}/${item.progress.question_target} Fragen`
+                      ) : (
+                        <>
+                          {PHASE_LABELS[item.progress.phase]}{item.progress.mode === 'direct' ? '' : ' (Batch)'}
+                          {item.progress.stage_total ? ` · ${item.progress.stage_done ?? 0}/${item.progress.stage_total} Anfragen` : ''}
+                          {item.progress.round ? ` · Runde ${item.progress.round}/${item.progress.max_rounds ?? ''}` : ''}
+                          {` · ${item.progress.candidates ?? 0} Kandidaten · ${item.progress.escalated ?? 0} eskaliert · ${item.progress.rejected ?? 0} verworfen`}
+                        </>
+                      )}
                     </p>
                   )}
-                  {item.validation_summary && <p className="text-xs text-slate-500">Validierung: {item.validation_summary.candidates} Kandidaten · {item.validation_summary.escalated} eskaliert · {item.validation_summary.rejected} verworfen</p>}
+                  {item.validation_summary && (
+                    <p className="text-xs text-slate-500">
+                      Validierung: {item.validation_summary.accepted != null
+                        ? `${item.validation_summary.accepted} unauffällig · ${item.validation_summary.review ?? 0} prüfen · ${item.validation_summary.rejected} verworfen`
+                        : `${item.validation_summary.escalated ?? 0} eskaliert · ${item.validation_summary.rejected} verworfen`}
+                    </p>
+                  )}
+                  {item.validation_summary?.details && (
+                    <details className="mt-1 text-xs text-slate-600">
+                      <summary className="cursor-pointer">RAGAS-Bewertungen je Frage</summary>
+                      <ul className="mt-1 space-y-1">
+                        {item.validation_summary.details.map((detail) => (
+                          <li key={detail.id} className="break-words">
+                            {detail.id}: {detail.status === 'accepted' ? 'akzeptiert' : detail.status === 'review' ? 'prüfen' : 'verworfen'} · {detail.question}
+                            {' · '}Faithfulness {detail.faithfulness == null ? '–' : detail.faithfulness.toFixed(2)}
+                            {' · '}Relevanz {detail.answer_relevancy == null ? '–' : detail.answer_relevancy.toFixed(2)}
+                            {detail.status === 'rejected' && <span className="text-amber-700"> · Grund: {rejectionReason(detail, item.validation_summary!)}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   {(item.status === 'processing' || isProgressComplete || item.progress) && (
                     <div
                       className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-emerald-100"
@@ -562,10 +996,22 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved }: {
                     </div>
                   )}
                   {item.error && <p className="break-words text-red-700">{item.error}</p>}
-                  {item.warning && <p className="break-words text-amber-700">{item.warning}</p>}
-                  {item.coverage_note && <p className="mt-1 rounded-md bg-slate-50 px-2 py-1 text-xs text-slate-600">{item.coverage_note}</p>}
+                  {outcomeMessage && !datasetChangedSinceRun && <p className="break-words text-amber-700">{outcomeMessage}</p>}
+                  {item.validation_summary?.details?.filter((detail) => detail.status === 'rejected').map((detail) => (
+                    <p key={detail.id} className="mt-1 break-words text-xs text-amber-800">
+                      {detail.id} wurde generiert, aber nicht ins Dataset übernommen: {rejectionReason(detail, item.validation_summary!)}. Automatische Bewertung; bei Zweifel fachlich prüfen.
+                    </p>
+                  ))}
+                  {datasetChangedSinceRun && <p className="mt-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-900">Die Dataset-Datei wurde nach diesem Lauf geändert oder überschrieben. Bilanz und Log beschreiben den damaligen Lauf; „Dataset öffnen“ zeigt den aktuellen Dateistand.</p>}
+                  {item.validation_summary?.details?.filter((detail) => detail.status === 'review' && detail.errors?.length).map((detail) => (
+                    <p key={detail.id} className="mt-1 break-words text-xs text-amber-800">
+                      {detail.id} wurde gespeichert, muss aber manuell geprüft werden: {reviewErrorReason(detail.errors ?? [])}
+                    </p>
+                  ))}
+                  {run.pipeline !== 'ragas' && item.coverage_note && <p className="mt-1 rounded-md bg-slate-50 px-2 py-1 text-xs text-slate-600">{item.coverage_note}</p>}
+                  {run.pipeline === 'ragas' && item.source_audit_available && <GenerationLogDetails runId={run.run_id} item={item} datasetChangedSinceRun={datasetChangedSinceRun} />}
                   {item.dataset_action && item.dataset_filename && <p className="text-xs text-slate-600">{item.dataset_action === 'overwritten' ? 'Bestehendes Dataset ersetzt:' : 'Neues Dataset erstellt:'} {item.dataset_filename}</p>}
-                  {item.dataset_path && <button className="text-emerald-700 underline" onClick={() => void onSaved(item.dataset_path!)}>Dataset öffnen</button>}
+                  {item.dataset_path && <button className="text-emerald-700 underline" onClick={() => void onOpenDataset(item.dataset_path!)}>{datasetChangedSinceRun ? 'Aktuelles Dataset öffnen' : 'Dataset öffnen'}</button>}
                 </div>
               );
             })}

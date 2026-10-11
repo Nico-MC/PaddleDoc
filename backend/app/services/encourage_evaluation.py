@@ -308,6 +308,33 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
     return get_evaluation_dataset_details(_dataset_public_path(dataset_file))
 
 
+class DatasetVersionConflict(Exception):
+    """Dataset changed since the review screen loaded."""
+
+
+def set_evaluation_dataset_review_decision(
+    dataset_path: str, row_id: str, decision: str, *,
+    expected_updated_at: datetime, decided_by: str,
+) -> dict[str, Any]:
+    """Persist a human inclusion decision without rewriting question content."""
+    if decision not in {'included', 'excluded'}:
+        raise ValueError('Review decision must be included or excluded.')
+    current = get_evaluation_dataset_details(dataset_path)
+    if current['updated_at'] != expected_updated_at:
+        raise DatasetVersionConflict('Das Dataset wurde inzwischen geändert. Bitte neu laden und erneut entscheiden.')
+    rows = current['rows']
+    matching = [row for row in rows if str(row.get('id')) == row_id]
+    if len(matching) != 1:
+        raise ValueError('Question not found in this dataset.')
+    row = matching[0]
+    if row.get('generation_pipeline') != 'ragas' or row.get('validation_status') != 'review':
+        raise ValueError('Only RAGAS questions requiring review can be decided.')
+    row['review_decision'] = decision
+    row['review_decided_at'] = datetime.now(timezone.utc).isoformat()
+    row['review_decided_by'] = decided_by
+    return save_evaluation_dataset(dataset_path, rows)
+
+
 def _normalize_text(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip().lower()
 
@@ -423,6 +450,15 @@ def _pick_reference_documents(chunks: list[Any], evidence_quote: str) -> tuple[l
         'match_score': 0.0,
         'quote_token_count': len(quote_tokens),
     }
+
+
+def _active_evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only explicitly included review rows enter benchmarks; keep all rows in JSONL."""
+    return [
+        row for row in rows
+        if row.get('review_decision') != 'excluded'
+        and (row.get('validation_status') != 'review' or row.get('review_decision') == 'included')
+    ]
 
 
 def _resolve_dataset_rows(rows: list[dict[str, Any]], *, markdown_path: str) -> list[dict[str, Any]]:
@@ -553,11 +589,12 @@ def run_encourage_evaluation(
 
     dataset_rows = _load_jsonl(dataset_file)
     source_markdown_path = str(pipeline_metadata.get('source_md_path', ''))
-    filtered_rows = _resolve_dataset_rows(dataset_rows, markdown_path=source_markdown_path)
+    filtered_rows = _active_evaluation_rows(
+        _resolve_dataset_rows(dataset_rows, markdown_path=source_markdown_path)
+    )
     if not filtered_rows:
         raise ValueError(
-            'No evaluation rows matched the selected markdown file. '
-            'Make sure source_document in the dataset points to the same markdown.'
+            'Keine freigegebenen Fragen für diese Markdown-Datei vorhanden. Prüffragen zuerst behalten oder andere Fragen wählen.'
         )
 
     prepare_encourage_runtime()
@@ -743,7 +780,7 @@ def run_encourage_evaluation(
         metadata=pipeline_metadata,
         dataset_path=str(dataset_file.relative_to(_repo_root().resolve())),
         dataset_filename=dataset_file.name,
-        question_count=len(dataset_rows),
+        question_count=len(filtered_rows),
         evaluated_question_count=evaluated_question_count,
         recall_k=recall_k,
         evaluation_mode=resolved_mode,
@@ -765,7 +802,7 @@ def run_encourage_evaluation(
         'markdown_path': source_markdown_path,
         'dataset_path': str(dataset_file.relative_to(_repo_root().resolve())),
         'dataset_filename': dataset_file.name,
-        'question_count': len(dataset_rows),
+        'question_count': len(filtered_rows),
         'evaluated_question_count': evaluated_question_count,
         'top_k': int(pipeline_metadata.get('top_k', 0) or 0),
         'recall_k': recall_k,

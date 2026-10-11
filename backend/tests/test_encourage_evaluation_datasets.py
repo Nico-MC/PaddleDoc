@@ -202,3 +202,81 @@ def test_dataset_rows_match_relative_markdown_suffix() -> None:
     )
 
     assert matched == rows
+
+
+def test_review_decision_is_persisted_and_controls_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+    review = _row(generation_pipeline='ragas', validation_status='review',
+                  validation_faithfulness=1.0, validation_answer_relevancy=None)
+    accepted = _row(id='q-002', generation_pipeline='ragas', validation_status='accepted')
+    saved = encourage_evaluation.save_evaluation_dataset('review.jsonl', [review, accepted])
+
+    assert [row['id'] for row in encourage_evaluation._active_evaluation_rows(saved['rows'])] == ['q-002']
+    excluded = encourage_evaluation.set_evaluation_dataset_review_decision(
+        saved['path'], 'q-001', 'excluded',
+        expected_updated_at=saved['updated_at'], decided_by='user-1',
+    )
+    assert excluded['row_count'] == 2
+    assert excluded['rows'][0]['review_decision'] == 'excluded'
+    assert excluded['rows'][0]['review_decided_by'] == 'user-1'
+    assert excluded['rows'][0]['validation_faithfulness'] == 1.0
+    assert [row['id'] for row in encourage_evaluation._active_evaluation_rows(excluded['rows'])] == ['q-002']
+
+    included = encourage_evaluation.set_evaluation_dataset_review_decision(
+        saved['path'], 'q-001', 'included',
+        expected_updated_at=excluded['updated_at'], decided_by='user-1',
+    )
+    assert [row['id'] for row in encourage_evaluation._active_evaluation_rows(included['rows'])] == ['q-001', 'q-002']
+    reloaded = encourage_evaluation.get_evaluation_dataset_details(saved['path'])
+    assert reloaded['rows'][0]['review_decision'] == 'included'
+    assert reloaded['rows'][0]['review_decided_at']
+
+
+def test_review_decision_rejects_stale_or_non_review_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+    saved = encourage_evaluation.save_evaluation_dataset('review.jsonl', [
+        _row(generation_pipeline='ragas', validation_status='review'),
+        _row(id='q-002', generation_pipeline='ragas', validation_status='accepted'),
+    ])
+
+    with pytest.raises(encourage_evaluation.DatasetVersionConflict):
+        encourage_evaluation.set_evaluation_dataset_review_decision(
+            saved['path'], 'q-001', 'included',
+            expected_updated_at=saved['updated_at'] - timedelta(seconds=1), decided_by='user-1',
+        )
+    with pytest.raises(ValueError, match='Only RAGAS questions'):
+        encourage_evaluation.set_evaluation_dataset_review_decision(
+            saved['path'], 'q-002', 'excluded',
+            expected_updated_at=saved['updated_at'], decided_by='user-1',
+        )
+
+
+def test_review_decision_api_persists_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+    from conftest import create_test_user, login_as
+
+    monkeypatch.setattr(encourage_evaluation, '_evaluation_root', lambda: tmp_path)
+    saved = encourage_evaluation.save_evaluation_dataset('api-review.jsonl', [
+        _row(generation_pipeline='ragas', validation_status='review'),
+    ])
+    name = 'review-' + uuid4().hex[:12]
+    create_test_user(username=name, email=name + '@example.test')
+    client = login_as(name)
+    payload = {
+        'dataset_path': saved['path'], 'row_id': 'q-001', 'decision': 'excluded',
+        'expected_updated_at': saved['updated_at'].isoformat(),
+    }
+
+    response = client.post('/api/v1/evaluation-datasets/review-decision', json=payload)
+
+    assert response.status_code == 200, response.text
+    assert response.json()['rows'][0]['review_decision'] == 'excluded'
+    assert client.post('/api/v1/evaluation-datasets/review-decision', json=payload).status_code == 409

@@ -86,7 +86,7 @@ def test_normalize_dataset_api_base_url(base_url, expected):
     assert _normalize_openai_base_url(normalized_url) == expected
 
 
-def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_datasets=None, skip_existing=True, sampling_seed=None, pipeline='standard'):
+def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_datasets=None, skip_existing=True, sampling_seed=None, pipeline='standard', **generation_options):
     monkeypatch.setattr(routes, 'enforce_rate_limit', lambda _: None)
     monkeypatch.setattr(routes, 'generation_store', lambda: store)
     monkeypatch.setattr(routes, '_owner_visible', lambda *args: True)
@@ -101,7 +101,7 @@ def _start(monkeypatch, store, jobs, existing=None, model_name=None, overwrite_d
         EvaluationDatasetGenerateRequest(
             markdown_paths=[f'{job.id}.md' for job in jobs], model_name=model_name,
             skip_existing=skip_existing, overwrite_datasets=overwrite_datasets or {},
-            sampling_seed=sampling_seed, pipeline=pipeline,
+            sampling_seed=sampling_seed, pipeline=pipeline, **generation_options,
         ),
         SimpleNamespace(), _Database(jobs), SimpleNamespace(id='user-1'),
     )
@@ -432,20 +432,26 @@ def test_generation_failure_keeps_overwrite_target(monkeypatch):
 
 
 def _configure_gold(monkeypatch):
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', '')
     monkeypatch.setattr(routes.settings, 'openai_api_base_url', 'https://api.openai.com')
     monkeypatch.setattr(routes.settings, 'openai_api_bearer_token', 'sk-test')
 
 
-def test_generation_config_lists_gold_pipeline(monkeypatch):
+def test_generation_config_lists_openai_as_dynamic_provider(monkeypatch):
     _configure_gold(monkeypatch)
     monkeypatch.setattr(routes.settings, 'dataset_llm_api_base_url', '')
     monkeypatch.setattr(routes.settings, 'dataset_llm_api_key', '')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: ['gpt-test'])
     result = routes.dataset_generation_config()
     assert result['configured'] is True
-    assert result['models'] == []
-    assert {pipeline['id'] for pipeline in result['pipelines']} == {'openai-gold', 'openai-gold-direct'}
-    assert all(pipeline['configured'] for pipeline in result['pipelines'])
-
+    assert result['models'] == ['gpt-test']
+    assert result['providers'] == [{
+        'id': 'openai',
+        'label': 'OpenAI – api.openai.com',
+        'model_name': routes.settings.openai_model,
+        'models': ['gpt-test'],
+        'models_error': None,
+    }]
 
 def test_generation_gold_pipeline_skips_hub_model_check(monkeypatch):
     _configure_gold(monkeypatch)
@@ -466,9 +472,8 @@ def test_generation_direct_gold_pipeline_is_selectable(monkeypatch):
     assert metadata['pipeline'] == 'openai-gold-direct'
     assert 'sofort' in metadata['model_name']
     assert len(calls) == 1
-    pipelines = {entry['id']: entry for entry in routes.dataset_generation_config()['pipelines']}
-    assert pipelines['openai-gold-direct']['mode'] == 'direct'
-    assert pipelines['openai-gold']['mode'] == 'batch'
+    assert routes.gold_pipeline.config_from_settings(routes.settings, 'openai-gold-direct').mode == 'direct'
+    assert routes.gold_pipeline.config_from_settings(routes.settings, 'openai-gold').mode == 'batch'
 
 
 def test_generation_gold_pipeline_requires_openai_credentials(monkeypatch):
@@ -547,3 +552,275 @@ def test_generation_preserves_explicit_zero_seed(monkeypatch):
     assert result['sampling_seed'] == 0
     with pytest.raises(ValidationError):
         EvaluationDatasetGenerateRequest(markdown_paths=['job-1.md'], sampling_seed=-1)
+
+def test_ragas_generation_uses_hcds_and_worker_path(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', 'test-virtual-key')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: [endpoint.model_name])
+    run_id, calls = _start(
+        monkeypatch, store, [_job()], pipeline='ragas',
+        ragas_query_mode='mixed', ragas_context_chars=800, ragas_passage_tries=5,
+    )
+    metadata = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'metadata'))
+    assert metadata['pipeline'] == 'ragas'
+    assert metadata['provider'] == 'hcds'
+    assert metadata['ragas_options'] == {
+        'query_mode': 'mixed', 'context_chars': 800, 'passage_tries': 5,
+    }
+    assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
+
+    monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
+    monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
+    monkeypatch.setattr(dataset_tasks, 'generate_dataset_rows', lambda **_: pytest.fail('Legacy generator should not run'))
+    captured = []
+    def generate(**kwargs):
+        captured.append(kwargs)
+        kwargs['audit_callback']({
+            'type': 'prepared_document', 'text': 'Eine belegbare Passage.',
+            'picture_text_blocks_removed': 0, 'sha256': 'cleaned-hash',
+            'stage': 'after_picture_text_cleanup_before_section_filter',
+        })
+        kwargs['audit_callback']({'type': 'classification_input', 'prompt': 'Abschnittsliste'})
+        kwargs['audit_callback']({
+            'type': 'source_selection', 'passages_total': 2, 'passages_eligible': 1,
+            'excluded_sections': [{'heading': 'Inhaltsverzeichnis', 'page': 1, 'excerpt': 'Kapitel ...'}],
+        })
+        kwargs['audit_callback']({
+            'type': 'generation_input', 'passage_id': 'p002', 'page': 2,
+            'anchor': 'Kapitel', 'region': 1, 'query_mode': 'facts',
+            'question_quota': 10, 'context': 'Eine belegbare Passage.',
+            'context_instruction': 'Nur dieser Abschnitt.',
+        })
+        kwargs['audit_callback']({
+            'type': 'generation_result', 'region': 1, 'passage_id': 'p002',
+            'status': 'generated', 'samples': 1, 'accepted': 1,
+        })
+        kwargs['audit_callback']({
+            'type': 'region_result', 'region': 1, 'target': 10, 'generated': 1,
+            'attempts': 1, 'passages_available': 1, 'short_passages_in_region': 0,
+            'reason': 'no_usable_question',
+        })
+        return [{
+            'id': 'q001', 'question': 'Frage?', 'gold_answer': 'Antwort',
+            'evidence_quote': 'Eine belegbare Passage.', 'source_document': 'job-1.md',
+            'sampling_region': 1, 'sampling_region_count': 1,
+        }]
+    monkeypatch.setattr(dataset_tasks, 'generate_ragas_dataset_rows', generate)
+    validated = []
+    def validate(**kwargs):
+        validated.append(kwargs)
+        kwargs['audit_callback']({
+            'type': 'validation_input', 'id': 'q001', 'metric': 'faithfulness',
+            'arguments': {'user_input': 'Frage?', 'response': 'Antwort',
+                          'retrieved_contexts': ['Eine belegbare Passage.']},
+        })
+        row = {**kwargs['rows'][0], 'validation_status': 'accepted', 'validation_faithfulness': 1.0}
+        kwargs['progress_callback']({
+            'phase': 'validating', 'validation_done': 1, 'validation_total': 1,
+            'validation_accepted': 1, 'validation_review': 0, 'validation_rejected': 0,
+            'questions_generated': 1, 'question_target': 1,
+        })
+        return [row], {'candidates': 1, 'accepted': 1, 'review': 0, 'rejected': 0, 'details': []}
+    monkeypatch.setattr(dataset_tasks, 'validate_ragas_dataset_rows', validate)
+    saved_rows = []
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved_rows.extend(rows) or {'path': f'docs/evaluation/{filename}'})
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+    assert result['pipeline'] == 'ragas'
+    assert result['ragas_options'] == metadata['ragas_options']
+    assert result['items'][0]['status'] == 'completed'
+    assert result['items'][0]['validation_summary']['accepted'] == 1
+    assert result['items'][0]['warning'] == '1 von 10 Fragen gespeichert. Bereich 1: keine neue belegbare Frage erhalten.'
+    assert result['question_count'] == 10
+    assert result['items'][0]['progress']['phase'] == 'validating'
+    assert saved_rows[0]['validation_status'] == 'accepted'
+    assert validated[0]['request_headers']['x-bf-vk'] == 'test-virtual-key'
+    assert captured[0]['model_name'] == routes.settings.hcds_model
+    assert captured[0]['request_headers']['x-bf-vk'] == 'test-virtual-key'
+    assert callable(captured[0]['should_cancel'])
+    assert captured[0]['query_mode'] == 'mixed'
+    assert captured[0]['context_chars'] == 800
+    assert captured[0]['passage_tries'] == 5
+    assert result['items'][0]['source_audit_available'] is True
+    assert 'generation_inputs' not in result['items'][0]
+    audit = routes.dataset_generation_audit(run_id, 'job-1', SimpleNamespace(id='user-1'))
+    assert audit['classification_inputs'] == ['Abschnittsliste']
+    assert audit['prepared_document']['text'] == 'Eine belegbare Passage.'
+    assert audit['passages_eligible'] == 1
+    assert audit['generation_inputs'][0]['context'] == 'Eine belegbare Passage.'
+    assert audit['generation_results'][0]['accepted'] == 1
+    assert audit['region_results'][0]['reason'] == 'no_usable_question'
+    assert audit['validation_inputs'][0]['arguments']['retrieved_contexts'] == ['Eine belegbare Passage.']
+    assert audit['dataset_rows'][0]['question'] == 'Frage?'
+    assert audit['dataset_rows'][0]['gold_answer'] == 'Antwort'
+    assert audit['validation_candidates'][0]['gold_answer'] == 'Antwort'
+    assert audit['validation_summary']['accepted'] == 1
+    assert audit['audit_schema_version'] == 3
+    downloaded = routes.download_dataset_generation_audit(run_id, 'job-1', SimpleNamespace(id='user-1'))
+    log = json.loads(downloaded.body)
+    assert downloaded.headers['content-disposition'].startswith('attachment;')
+    assert log['audit']['generation_inputs'][0]['context'] == 'Eine belegbare Passage.'
+    assert log['audit']['prepared_document']['stage'] == 'after_picture_text_cleanup_before_section_filter'
+    assert log['result']['row_count'] == 1
+    assert log['settings']['question_count'] == 10
+    assert log['format'] == 'paddledoc-dataset-generation-log-v3'
+    assert log['limitations'] == []
+    assert 'owner_id' not in log['settings']
+    assert 'test-virtual-key' not in downloaded.body.decode('utf-8')
+    assert 'test-virtual-key' not in json.dumps(audit)
+    legacy_audit = dict(audit)
+    legacy_audit.pop('prepared_document')
+    store.set(dataset_tasks.generation_audit_key(run_id, 'job-1'), json.dumps(legacy_audit))
+    monkeypatch.setattr(routes, 'SessionLocal', lambda: _Database([_job()]))
+    legacy_log = json.loads(routes.download_dataset_generation_audit(
+        run_id, 'job-1', SimpleNamespace(id='user-1'),
+    ).body)
+    assert legacy_log['audit']['prepared_document']['text'] == 'Eine belegbare Passage.'
+    assert legacy_log['audit']['prepared_document']['reconstructed_at_read_time'] is True
+    legacy_audit['source_markdown_sha256'] = 'mismatched-source'
+    store.set(dataset_tasks.generation_audit_key(run_id, 'job-1'), json.dumps(legacy_audit))
+    changed_source_log = json.loads(routes.download_dataset_generation_audit(
+        run_id, 'job-1', SimpleNamespace(id='user-1'),
+    ).body)
+    assert 'prepared_document' not in changed_source_log['audit']
+    with pytest.raises(HTTPException) as wrong_owner:
+        routes.dataset_generation_audit(run_id, 'job-1', SimpleNamespace(id='another-user'))
+    assert wrong_owner.value.status_code == 404
+    with pytest.raises(HTTPException) as wrong_download_owner:
+        routes.download_dataset_generation_audit(run_id, 'job-1', SimpleNamespace(id='another-user'))
+    assert wrong_download_owner.value.status_code == 404
+    with pytest.raises(HTTPException) as wrong_job:
+        routes.dataset_generation_audit(run_id, 'missing-job', SimpleNamespace(id='user-1'))
+    assert wrong_job.value.status_code == 404
+
+
+def test_ragas_validation_uses_separately_selected_provider_and_model(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', 'test-virtual-key')
+    monkeypatch.setattr(routes.settings, 'openai_api_base_url', 'https://api.openai.com/v1')
+    monkeypatch.setattr(routes.settings, 'openai_api_bearer_token', 'test-openai-key')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: (
+        [endpoint.model_name, 'gpt-validator'] if endpoint.provider == 'openai' else [endpoint.model_name]
+    ))
+    run_id, _ = _start(
+        monkeypatch, store, [_job()], pipeline='ragas',
+        validation_provider='openai', validation_model_name='gpt-validator',
+    )
+    metadata = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'metadata'))
+    assert metadata['provider'] == 'hcds'
+    assert metadata['validation_provider'] == 'openai'
+    assert metadata['validation_model_name'] == 'gpt-validator'
+
+    monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
+    monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
+    generated = []
+    monkeypatch.setattr(dataset_tasks, 'generate_ragas_dataset_rows', lambda **kwargs: (
+        generated.append(kwargs) or [{
+            'id': 'q001', 'question': 'Frage?', 'gold_answer': 'Antwort',
+            'evidence_quote': 'Eine belegbare Passage.', 'source_document': 'job-1.md',
+        }]
+    ))
+    validated = []
+    monkeypatch.setattr(dataset_tasks, 'validate_ragas_dataset_rows', lambda **kwargs: (
+        validated.append(kwargs) or (
+            [{**kwargs['rows'][0], 'validation_status': 'accepted'}],
+            {'candidates': 1, 'accepted': 1, 'review': 0, 'rejected': 0, 'details': []},
+        )
+    ))
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: {
+        'path': f'docs/evaluation/{filename}',
+    })
+
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    assert generated[0]['model_name'] == routes.settings.hcds_model
+    assert generated[0]['request_headers']['x-bf-vk'] == 'test-virtual-key'
+    assert validated[0]['model_name'] == 'gpt-validator'
+    assert validated[0]['api_key'] == 'test-openai-key'
+    assert validated[0]['request_headers'] == {}
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+    assert result['validation_provider'] == 'openai'
+    assert result['validation_model_name'] == 'gpt-validator'
+    assert result['items'][0]['status'] == 'completed'
+
+
+def test_ragas_partial_result_records_rejected_candidate_in_dataset(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', 'test-virtual-key')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: [endpoint.model_name])
+    run_id, _ = _start(monkeypatch, store, [_job()], pipeline='ragas')
+    monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
+    monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
+    candidates = [
+        {'id': row_id, 'question': question, 'gold_answer': 'Antwort',
+         'evidence_quote': 'Eine belegbare Passage.', 'source_document': 'job-1.md'}
+        for row_id, question in (('q001', 'Frage 1?'), ('q002', 'Frage 2?'))
+    ]
+    monkeypatch.setattr(dataset_tasks, 'generate_ragas_dataset_rows', lambda **_: candidates)
+    monkeypatch.setattr(dataset_tasks, 'validate_ragas_dataset_rows', lambda **_: (
+        [{**candidates[0], 'validation_status': 'accepted'}],
+        {'candidates': 2, 'accepted': 1, 'review': 0, 'rejected': 1, 'details': [
+            {'id': 'q002', 'question': 'Frage 2?', 'status': 'rejected',
+             'faithfulness': 0.11, 'answer_relevancy': 0.91,
+             'reason': 'Faithfulness 0.11 unter Ablehnungsgrenze 0.50'},
+        ]},
+    ))
+    saved_rows = []
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: (
+        saved_rows.extend(rows) or {'path': f'docs/evaluation/{filename}'}
+    ))
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    outcome = saved_rows[0]['generation_outcome']
+    assert outcome['target'] == 10
+    assert outcome['generated'] == 2
+    assert outcome['saved'] == 1
+    assert outcome['rejected_candidates'] == [
+        {'id': 'q002', 'question': 'Frage 2?', 'reason': 'Faithfulness 0.11 unter Ablehnungsgrenze 0.50',
+         'faithfulness': 0.11, 'answer_relevancy': 0.91},
+    ]
+    assert all(row['id'] != 'q002' for row in saved_rows)
+
+
+def test_ragas_validation_rejects_unavailable_model(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', 'test-virtual-key')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: [endpoint.model_name])
+    with pytest.raises(HTTPException) as error:
+        _start(
+            monkeypatch, store, [_job()], pipeline='ragas',
+            validation_provider='hcds', validation_model_name='unavailable-model',
+        )
+    assert error.value.status_code == 422
+    assert not store.hashes
+
+
+def test_ragas_validation_does_not_overwrite_when_all_candidates_are_rejected(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(routes.settings, 'hcds_api_bearer_token', 'test-virtual-key')
+    monkeypatch.setattr(routes, '_dataset_provider_models', lambda endpoint: [endpoint.model_name])
+    run_id, _ = _start(
+        monkeypatch, store, [_job()], pipeline='ragas', skip_existing=False,
+        existing=[{
+            'path': 'docs/evaluation/old.jsonl', 'filename': 'old.jsonl',
+            'source_documents': ['job-1.md'],
+        }],
+        overwrite_datasets={'job-1.md': 'docs/evaluation/old.jsonl'},
+    )
+    monkeypatch.setattr(dataset_tasks, 'generation_store', lambda: store)
+    monkeypatch.setattr(dataset_tasks, 'SessionLocal', lambda: _Database([_job()]))
+    monkeypatch.setattr(dataset_tasks, 'generate_ragas_dataset_rows', lambda **_: [{
+        'id': 'q001', 'question': 'Frage?', 'gold_answer': 'Antwort',
+        'evidence_quote': 'Eine belegbare Passage.', 'source_document': 'job-1.md',
+    }])
+    monkeypatch.setattr(dataset_tasks, 'validate_ragas_dataset_rows', lambda **_: (
+        [], {'candidates': 1, 'accepted': 0, 'review': 0, 'rejected': 1, 'details': []},
+    ))
+    monkeypatch.setattr(
+        dataset_tasks, 'save_evaluation_dataset',
+        lambda *args: pytest.fail('A fully rejected run must not overwrite a dataset'),
+    )
+
+    dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
+    item = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))['items'][0]
+    assert item['status'] == 'failed'
+    assert item['validation_summary']['rejected'] == 1
+    assert 'alle Fragen verworfen' in item['error']

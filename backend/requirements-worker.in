@@ -12,4 +12,5 @@
 # Review major version bumps in the lock diff deliberately.
 onnxruntime==1.28.0
 pypdfium2==5.13.0
+pymupdf4llm==1.28.2
 paddleocr[doc-parser]

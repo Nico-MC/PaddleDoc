@@ -46,4 +46,7 @@ numpy==2.2.6
 openai==1.98.0
 rank-bm25==0.2.2
 sentence-transformers==5.2.0
+# Dataset generation uses local embeddings without pulling CUDA libraries into the API image.
+torch==2.14.0+cpu
 tqdm==4.67.3
+ragas==0.4.3

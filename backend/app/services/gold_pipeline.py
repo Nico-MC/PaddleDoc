@@ -32,6 +32,7 @@ from app.services.dataset_assistant import (
     _sampling_regions,
 )
 from app.services.encourage_bridge import _normalize_openai_base_url
+from app.services.rag_text_preprocessing import prepare_rag_text
 
 GOLD_PIPELINE_ID = 'openai-gold'
 GOLD_DIRECT_PIPELINE_ID = 'openai-gold-direct'
@@ -142,7 +143,7 @@ def _quotas(question_count: int, region_count: int) -> list[int]:
 
 
 def _layout(job: GoldJob) -> tuple[str, list[list[_Passage]], dict[str, _Passage]]:
-    passages = _markdown_passages(job.markdown)
+    passages = _markdown_passages(prepare_rag_text(job.markdown))
     if not passages:
         raise ValueError('The document contains no usable text passages.')
     method, regions = _sampling_regions(passages, job.question_count, job.sampling_seed)

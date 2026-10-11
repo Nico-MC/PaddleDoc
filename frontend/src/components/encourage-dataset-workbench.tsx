@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { Archive, Download, RotateCcw, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DatasetGenerator } from '@/components/dataset-generator';
-import { Archive, Download, Pencil, RotateCcw, Sparkles, X } from 'lucide-react';
+import { RagasValidationInfo, RagasValidationSummary } from '@/components/ragas-validation-info';
 import { apiFetch } from '@/lib/api';
 
 type DatasetEntry = {
@@ -15,11 +16,10 @@ type DatasetEntry = {
   source_file_sha256?: string | null;
   source_markdown_sha256?: string | null;
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
-type DatasetDetail = DatasetEntry & {
-  rows: Record<string, unknown>[];
-};
+type DatasetDetail = DatasetEntry & { rows: Record<string, unknown>[] };
 
 type MarkdownEntry = {
   path: string;
@@ -32,45 +32,6 @@ type MarkdownEntry = {
   document_version?: number;
 };
 
-type WordSource = {
-  path: string;
-  filename: string;
-  extension: string;
-  size_bytes: number;
-  updated_at: string;
-};
-
-type DatasetRow = {
-  id: string;
-  question: string;
-  gold_answer: string;
-  evidence_quote: string;
-  evidence_anchor: string;
-  source_document: string;
-  source_file: string;
-  source_file_sha256?: string;
-  source_markdown_sha256?: string;
-  notes: string;
-  review_status?: string;
-  generation_model?: string;
-};
-
-type DatasetAiAssistResponse = {
-  question: string;
-  answerable: boolean;
-  gold_answer: string;
-  evidence_quote: string;
-  evidence_anchor: string;
-  model_name: string;
-  search_mode: 'full_document' | 'exhaustive_passage_search';
-  review_note: string;
-};
-
-type AiAssistFeedback = {
-  tone: 'success' | 'warning' | 'error';
-  message: string;
-};
-
 type Props = {
   datasets: DatasetEntry[];
   markdownFiles: MarkdownEntry[];
@@ -80,184 +41,34 @@ type Props = {
   onDatasetSaved: (path: string) => Promise<void> | void;
 };
 
-const emptyRow = (
-  index: number,
-  markdownPath = '',
-  sourceFile = '',
-): DatasetRow => ({
-  id: `q${String(index + 1).padStart(3, '0')}`,
-  question: '',
-  gold_answer: '',
-  evidence_quote: '',
-  evidence_anchor: '',
-  source_document: markdownPath,
-  source_file: sourceFile,
-  notes: '',
-});
+const sourceFilename = (path: string) => path.split('/').at(-1) || path;
 
-const textValue = (row: Record<string, unknown>, key: keyof DatasetRow) => {
-  const value = row[key];
-  return value === null || value === undefined ? '' : String(value);
-};
-
-const formatDatasetCreatedAt = (value?: string | null) => {
+const formatCreatedAt = (value?: string | null) => {
   if (!value) return 'Erstellungszeitpunkt nicht erfasst';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'Erstellungszeitpunkt nicht erfasst';
-  return `Erstellt ${new Intl.DateTimeFormat('de-DE', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(date)}`;
-};
-
-const sourceFilename = (path: string) => path.split('/').at(-1) || path;
-
-const nextQuestionId = (rows: DatasetRow[]) => {
-  const highestNumber = rows.reduce((highest, row) => {
-    const match = row.id.match(/(\d+)$/);
-    return Math.max(highest, Number(match?.[1] ?? 0));
-  }, 0);
-  return `q${String(highestNumber + 1).padStart(3, '0')}`;
-};
-
-type DatasetQuestionStyle = 'contract-language' | 'user-paraphrases' | 'mixed-questions';
-
-const QUESTION_STYLE_OPTIONS: Array<{
-  id: DatasetQuestionStyle;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: 'user-paraphrases',
-    label: 'Natürliche Nutzerfragen',
-    description: 'Alltagssprache und Umschreibungen für semantisches Retrieval.',
-  },
-  {
-    id: 'contract-language',
-    label: 'Vertragsnahe Fragen',
-    description: 'Fachbegriffe, Zahlen und Formulierungen nah am Dokument.',
-  },
-  {
-    id: 'mixed-questions',
-    label: 'Gemischte Fragen',
-    description: 'Kombiniert natürliche, vertragsnahe und tabellarische Fragen.',
-  },
-];
-
-const normalizeSourcePath = (path: string) => path.trim().replaceAll('\\', '/').replace(/^\.\//, '');
-
-const matchingMarkdownEntry = (markdownFiles: MarkdownEntry[], sourcePath: string) => {
-  const normalizedSource = normalizeSourcePath(sourcePath);
-  return markdownFiles.find((file) => {
-    const normalizedFile = normalizeSourcePath(file.path);
-    return normalizedSource === normalizedFile || normalizedSource.endsWith(`/${normalizedFile}`);
-  });
-};
-
-const documentSlug = (file: MarkdownEntry | undefined) => {
-  const sourceName = file?.original_filename || file?.filename || 'document';
-  return sourceName
-    .replace(/\.[^.]+$/, '')
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '') || 'document';
-};
-
-const nextDatasetFilename = (
-  file: MarkdownEntry | undefined,
-  questionStyle: DatasetQuestionStyle,
-  datasets: DatasetEntry[],
-) => {
-  const prefix = `${documentSlug(file)}_retrieval_${questionStyle}_v`;
-  const versions = datasets
-    .map((dataset) => dataset.filename.match(new RegExp(`^${prefix}(\\d+)\\.jsonl$`)))
-    .map((match) => Number(match?.[1] ?? 0));
-  return `${prefix}${Math.max(0, ...versions) + 1}.jsonl`;
-};
-
-const normalizedTextWithOffsets = (value: string) => {
-  let normalized = '';
-  const offsets: number[] = [];
-  let previousWasSpace = false;
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (/\s/.test(character)) {
-      if (!previousWasSpace && normalized.length > 0) {
-        normalized += ' ';
-        offsets.push(index);
-      }
-      previousWasSpace = true;
-      continue;
-    }
-    normalized += character.toLocaleLowerCase('de-DE');
-    offsets.push(index);
-    previousWasSpace = false;
-  }
-  return { normalized: normalized.trim(), offsets };
-};
-
-const evidenceOffset = (markdown: string, quote: string) => {
-  if (!markdown.trim() || !quote.trim()) return -1;
-  const haystack = normalizedTextWithOffsets(markdown);
-  const needle = normalizedTextWithOffsets(quote).normalized;
-  const normalizedIndex = haystack.normalized.indexOf(needle);
-  return normalizedIndex < 0 ? -1 : (haystack.offsets[normalizedIndex] ?? -1);
-};
-
-const inferEvidenceAnchor = (markdown: string, quote: string) => {
-  const offset = evidenceOffset(markdown, quote);
-  if (offset < 0) return '';
-
-  const headings: string[] = [];
-  for (const line of markdown.slice(0, offset).split('\n')) {
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*$/);
-    if (!match) continue;
-    const level = match[1].length;
-    headings[level - 1] = match[2].trim();
-    headings.length = level;
-  }
-  return headings.filter(Boolean).join(' > ');
+  return 'Erstellt ' + new Intl.DateTimeFormat('de-DE', {
+    dateStyle: 'medium', timeStyle: 'short',
+  }).format(date);
 };
 
 export function EncourageDatasetWorkbench({
-  datasets,
-  markdownFiles,
-  preferredMarkdownPath,
-  selectedDatasetPath,
-  onSelectDataset,
-  onDatasetSaved,
+  datasets, markdownFiles, preferredMarkdownPath, selectedDatasetPath,
+  onSelectDataset, onDatasetSaved,
 }: Props) {
-  const [wordSources, setWordSources] = useState<WordSource[]>([]);
   const [archivedDatasets, setArchivedDatasets] = useState<DatasetEntry[]>([]);
   const [showArchivedDatasets, setShowArchivedDatasets] = useState(false);
-  const [isLoadingArchivedDatasets, setIsLoadingArchivedDatasets] = useState(false);
+  const [isLoadingArchive, setIsLoadingArchive] = useState(false);
   const [isDatasetActionRunning, setIsDatasetActionRunning] = useState(false);
   const [showGenerator, setShowGenerator] = useState(false);
   const [details, setDetails] = useState<DatasetDetail | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [isCreatingNew, setIsCreatingNew] = useState(false);
-  const [selectionBeforeCreate, setSelectionBeforeCreate] = useState('');
-  const [filename, setFilename] = useState('retrieval_dataset.jsonl');
-  const [filenameWasEdited, setFilenameWasEdited] = useState(false);
-  const [questionStyle, setQuestionStyle] = useState<DatasetQuestionStyle>('user-paraphrases');
-  const [datasetMarkdownPath, setDatasetMarkdownPath] = useState('');
-  const [datasetSourceFile, setDatasetSourceFile] = useState('');
-  const [markdownContent, setMarkdownContent] = useState('');
-  const [isLoadingMarkdownContent, setIsLoadingMarkdownContent] = useState(false);
-  const [rows, setRows] = useState<DatasetRow[]>([
-    emptyRow(0, markdownFiles[0]?.path, wordSources[0]?.path),
-  ]);
-  const [isSaving, setIsSaving] = useState(false);
-  const [aiAssistingRowIndex, setAiAssistingRowIndex] = useState<number | null>(null);
-  const [aiAssistFeedback, setAiAssistFeedback] = useState<Record<number, AiAssistFeedback>>({});
+  const [decidingRowId, setDecidingRowId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const loadArchivedDatasets = useCallback(async () => {
-    setIsLoadingArchivedDatasets(true);
+    setIsLoadingArchive(true);
     try {
       const response = await apiFetch('/api/v1/evaluation-datasets/archive', { cache: 'no-store' });
       if (!response.ok) throw new Error('Archivierte Datasets konnten nicht geladen werden.');
@@ -266,380 +77,71 @@ export function EncourageDatasetWorkbench({
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : 'Archiv konnte nicht geladen werden.');
     } finally {
-      setIsLoadingArchivedDatasets(false);
+      setIsLoadingArchive(false);
     }
   }, []);
+
+  const loadSelectedDataset = useCallback(async () => {
+    if (!selectedDatasetPath) {
+      setDetails(null);
+      return;
+    }
+    setIsLoadingDetails(true);
+    try {
+      const response = await apiFetch('/api/v1/evaluation-datasets/' + encodeURI(selectedDatasetPath), { cache: 'no-store' });
+      if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
+      setDetails((await response.json()) as DatasetDetail);
+    } catch (cause) {
+      setDetails(null);
+      setLocalError(cause instanceof Error ? cause.message : 'Backend beim Laden des Datasets nicht erreichbar.');
+    } finally {
+      setIsLoadingDetails(false);
+    }
+  }, [selectedDatasetPath]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void loadSelectedDataset(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadSelectedDataset]);
 
   const datasetWordSources = (dataset: DatasetEntry) => {
     const explicitSources = dataset.source_files.map(sourceFilename);
     if (explicitSources.length > 0) return explicitSources;
     return dataset.source_documents
-      .map((documentPath) => markdownFiles.find(
-        (file) => documentPath === file.path || documentPath.endsWith(`/${file.path}`),
-      ))
+      .map((path) => markdownFiles.find((file) => path === file.path || path.endsWith('/' + file.path)))
       .map((file) => file?.original_filename || file?.filename || '')
       .filter(Boolean);
   };
 
-  useEffect(() => {
-    const loadWordSources = async () => {
-      try {
-        const response = await apiFetch('/api/v1/evaluation-source-documents', {
-          cache: 'no-store',
-        });
-        if (!response.ok) return;
-        const payload = await response.json();
-        setWordSources((payload.items ?? []) as WordSource[]);
-      } catch {
-        // The workbench remains usable with converted markdown files only.
-      }
-    };
-    void loadWordSources();
-  }, []);
-
-  useEffect(() => {
-    if (!selectedDatasetPath) {
-      setDetails(null);
-      return;
-    }
-
-    const loadDetails = async () => {
-      setIsLoadingDetails(true);
-      setLocalError(null);
-      try {
-        const response = await apiFetch(
-          `/api/v1/evaluation-datasets/${encodeURI(selectedDatasetPath)}`,
-          { cache: 'no-store' },
-        );
-        if (!response.ok) {
-          setLocalError('Dataset konnte nicht geladen werden.');
-          return;
-        }
-        setDetails((await response.json()) as DatasetDetail);
-      } catch {
-        setLocalError('Backend beim Laden des Datasets nicht erreichbar.');
-      } finally {
-        setIsLoadingDetails(false);
-      }
-    };
-    void loadDetails();
-  }, [selectedDatasetPath]);
-
-  useEffect(() => {
-    if (!datasetMarkdownPath || !isEditing) {
-      setMarkdownContent('');
-      return;
-    }
-
-    const loadMarkdownContent = async () => {
-      setIsLoadingMarkdownContent(true);
-      try {
-        const response = await apiFetch(
-          `/api/v1/markdown-files/${encodeURI(datasetMarkdownPath)}`,
-          { cache: 'no-store' },
-        );
-        setMarkdownContent(response.ok ? await response.text() : '');
-      } catch {
-        setMarkdownContent('');
-      } finally {
-        setIsLoadingMarkdownContent(false);
-      }
-    };
-
-    void loadMarkdownContent();
-  }, [datasetMarkdownPath, isEditing]);
-
-  const matchingWordSource = (markdownPath: string) => {
-    const markdown = matchingMarkdownEntry(markdownFiles, markdownPath);
-    if (!markdown?.original_filename) return '';
-    return wordSources.find((source) => source.filename === markdown.original_filename)?.path ?? '';
-  };
-
-  useEffect(() => {
-    if (!isCreatingNew || !datasetMarkdownPath || datasetSourceFile) return;
-    const markdown = matchingMarkdownEntry(markdownFiles, datasetMarkdownPath);
-    if (!markdown?.original_filename) return;
-    const matchedSource = wordSources.find(
-      (source) => source.filename === markdown.original_filename,
-    );
-    if (matchedSource) setDatasetSourceFile(matchedSource.path);
-  }, [datasetMarkdownPath, datasetSourceFile, isCreatingNew, markdownFiles, wordSources]);
-
-  const startNewDataset = () => {
-    const preferredMarkdown = matchingMarkdownEntry(markdownFiles, preferredMarkdownPath)
-      ?? markdownFiles[0];
-    const markdownPath = preferredMarkdown?.path ?? '';
-    setSelectionBeforeCreate(selectedDatasetPath);
-    onSelectDataset('');
-    setQuestionStyle('user-paraphrases');
-    setDatasetMarkdownPath(markdownPath);
-    setDatasetSourceFile(matchingWordSource(markdownPath));
-    setFilename(nextDatasetFilename(preferredMarkdown, 'user-paraphrases', datasets));
-    setFilenameWasEdited(false);
-    setRows([emptyRow(0)]);
-    setAiAssistFeedback({});
-    setMessage(null);
+  const decideQuestion = async (rowId: string, decision: 'included' | 'excluded') => {
+    if (!details?.updated_at) return;
+    setDecidingRowId(rowId);
     setLocalError(null);
-    setIsCreatingNew(true);
-    setIsEditing(true);
-  };
-
-  const startEditingDataset = (datasetDetails: DatasetDetail | null = details) => {
-    if (!datasetDetails) return;
-    const sourceDocuments = [...new Set(
-      datasetDetails.rows.map((row) => textValue(row, 'source_document')).filter(Boolean),
-    )];
-    if (sourceDocuments.length > 1) {
-      setLocalError(
-        'Dieses Dataset enthält mehrere Markdown-Dateien und kann im dokumentbezogenen Formular nicht bearbeitet werden.',
-      );
-      return;
-    }
-    const sourceFiles = [...new Set(
-      datasetDetails.rows.map((row) => textValue(row, 'source_file')).filter(Boolean),
-    )];
-    const markdownEntry = matchingMarkdownEntry(markdownFiles, sourceDocuments[0] ?? '');
-    const detectedQuestionStyle = QUESTION_STYLE_OPTIONS.find(
-      (option) => datasetDetails.filename.includes(`_${option.id}_`),
-    )?.id ?? 'mixed-questions';
-    setFilename(datasetDetails.filename);
-    setFilenameWasEdited(true);
-    setQuestionStyle(detectedQuestionStyle);
-    setDatasetMarkdownPath(markdownEntry?.path ?? sourceDocuments[0] ?? '');
-    setDatasetSourceFile(sourceFiles[0] ?? matchingWordSource(markdownEntry?.path ?? ''));
-    setRows(
-      datasetDetails.rows.map((row, index) => ({
-        ...row,
-        id: textValue(row, 'id') || `q${String(index + 1).padStart(3, '0')}`,
-        question: textValue(row, 'question'),
-        gold_answer: textValue(row, 'gold_answer'),
-        evidence_quote: textValue(row, 'evidence_quote'),
-        evidence_anchor: textValue(row, 'evidence_anchor'),
-        source_document: textValue(row, 'source_document'),
-        source_file: textValue(row, 'source_file'),
-        notes: textValue(row, 'notes'),
-        review_status: textValue(row, 'review_status') || undefined,
-        generation_model: textValue(row, 'generation_model') || undefined,
-      })),
-    );
-    setAiAssistFeedback({});
     setMessage(null);
-    setLocalError(null);
-    setIsCreatingNew(false);
-    setSelectionBeforeCreate('');
-    setIsEditing(true);
-  };
-
-  const cancelEditing = () => {
-    setIsEditing(false);
-    if (isCreatingNew && selectionBeforeCreate) {
-      onSelectDataset(selectionBeforeCreate);
-    }
-    setIsCreatingNew(false);
-    setSelectionBeforeCreate('');
-  };
-
-  const selectDatasetMarkdown = (markdownPath: string) => {
-    const markdown = matchingMarkdownEntry(markdownFiles, markdownPath);
-    setDatasetMarkdownPath(markdownPath);
-    setDatasetSourceFile(matchingWordSource(markdownPath));
-    setAiAssistFeedback({});
-    if (isCreatingNew && !filenameWasEdited) {
-      setFilename(nextDatasetFilename(markdown, questionStyle, datasets));
-    }
-  };
-
-  const selectQuestionStyle = (value: DatasetQuestionStyle) => {
-    setQuestionStyle(value);
-    if (isCreatingNew && !filenameWasEdited) {
-      const markdown = matchingMarkdownEntry(markdownFiles, datasetMarkdownPath);
-      setFilename(nextDatasetFilename(markdown, value, datasets));
-    }
-  };
-
-  const updateRow = (index: number, field: keyof DatasetRow, value: string) => {
-    setRows((current) =>
-      current.map((row, rowIndex) => (rowIndex === index ? { ...row, [field]: value } : row)),
-    );
-    setAiAssistFeedback((current) => {
-      if (!(index in current)) return current;
-      const next = { ...current };
-      delete next[index];
-      return next;
-    });
-  };
-
-  const updateEvidenceAnchor = (index: number) => {
-    setRows((current) => current.map((row, rowIndex) => {
-      if (rowIndex !== index) return row;
-      const inferredAnchor = inferEvidenceAnchor(markdownContent, row.evidence_quote);
-      return inferredAnchor ? { ...row, evidence_anchor: inferredAnchor } : row;
-    }));
-  };
-
-  const prepareRowWithAi = async (index: number) => {
-    const row = rows[index];
-    if (!datasetMarkdownPath) {
-      setAiAssistFeedback((current) => ({
-        ...current,
-        [index]: { tone: 'error', message: 'Wähle zuerst die Markdown-Datei des Datasets aus.' },
-      }));
-      return;
-    }
-    if (!row?.question.trim()) {
-      setAiAssistFeedback((current) => ({
-        ...current,
-        [index]: { tone: 'error', message: 'Formuliere zuerst die Frage, die beantwortet werden soll.' },
-      }));
-      return;
-    }
-
-    setAiAssistingRowIndex(index);
-    setAiAssistFeedback((current) => {
-      const next = { ...current };
-      delete next[index];
-      return next;
-    });
     try {
-      const response = await apiFetch('/api/v1/evaluation-datasets/ai-assist', {
+      const response = await apiFetch('/api/v1/evaluation-datasets/review-decision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          markdown_path: datasetMarkdownPath,
-          question: row.question,
+          dataset_path: details.path, row_id: rowId, decision,
+          expected_updated_at: details.updated_at,
         }),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        const detail = typeof payload?.detail === 'string'
-          ? payload.detail
-          : 'Der AI-Vorschlag konnte nicht erstellt werden.';
-        setAiAssistFeedback((current) => ({
-          ...current,
-          [index]: { tone: 'error', message: detail },
-        }));
-        return;
-      }
-
-      const suggestion = (await response.json()) as DatasetAiAssistResponse;
-      if (!suggestion.answerable) {
-        setAiAssistFeedback((current) => ({
-          ...current,
-          [index]: {
-            tone: 'warning',
-            message: suggestion.review_note || 'Im Dokument wurde kein eindeutiger Beleg gefunden.',
-          },
-        }));
-        return;
-      }
-
-      setRows((current) => current.map((currentRow, rowIndex) => (
-        rowIndex === index
-          ? {
-              ...currentRow,
-              gold_answer: suggestion.gold_answer,
-              evidence_quote: suggestion.evidence_quote,
-              evidence_anchor: suggestion.evidence_anchor,
-            }
-          : currentRow
-      )));
-      setAiAssistFeedback((current) => ({
-        ...current,
-        [index]: {
-          tone: 'success',
-          message: `${suggestion.review_note} Modell: ${suggestion.model_name}.`,
-        },
-      }));
-    } catch {
-      setAiAssistFeedback((current) => ({
-        ...current,
-        [index]: { tone: 'error', message: 'Backend für den AI-Vorschlag nicht erreichbar.' },
-      }));
-    } finally {
-      setAiAssistingRowIndex(null);
-    }
-  };
-
-  const addRow = () => {
-    setRows((current) => [
-      ...current,
-      {
-        ...emptyRow(current.length, datasetMarkdownPath, datasetSourceFile),
-        id: nextQuestionId(current),
-      },
-    ]);
-  };
-
-  const removeRow = (index: number) => {
-    setRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
-    setAiAssistFeedback({});
-  };
-
-  const saveDataset = async () => {
-    if (!datasetMarkdownPath) {
-      setLocalError('Wähle eine indexierte Markdown-Datei für das Dataset aus.');
-      return;
-    }
-    const incompleteRowIndex = rows.findIndex(
-      (row) => !row.question.trim() || !row.gold_answer.trim() || !row.evidence_quote.trim(),
-    );
-    if (incompleteRowIndex >= 0) {
-      setLocalError(
-        `Frage ${incompleteRowIndex + 1}: Frage, Goldantwort und Evidenz-Zitat sind erforderlich.`,
-      );
-      return;
-    }
-    const unmatchedEvidenceIndex = markdownContent
-      ? rows.findIndex((row) => evidenceOffset(markdownContent, row.evidence_quote) < 0)
-      : -1;
-    if (unmatchedEvidenceIndex >= 0) {
-      setLocalError(
-        `Frage ${unmatchedEvidenceIndex + 1}: Das Evidenz-Zitat wurde nicht in der ausgewählten Markdown-Datei gefunden.`,
-      );
-      return;
-    }
-    const markdownEntry = matchingMarkdownEntry(markdownFiles, datasetMarkdownPath);
-
-    setIsSaving(true);
-    setLocalError(null);
-    setMessage(null);
-    try {
-      const response = await apiFetch('/api/v1/evaluation-datasets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename,
-          rows: rows.map((row, index) => ({
-            ...row,
-            id: row.id.trim() || `q${String(index + 1).padStart(3, '0')}`,
-            evidence_anchor:
-              inferEvidenceAnchor(markdownContent, row.evidence_quote) || row.evidence_anchor,
-            source_document: datasetMarkdownPath,
-            source_file: datasetSourceFile,
-            source_file_sha256: markdownEntry?.source_file_sha256 ?? undefined,
-            source_markdown_sha256: markdownEntry?.source_markdown_sha256 ?? undefined,
-          })),
-        }),
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        setLocalError(
-          typeof payload?.detail === 'string' ? payload.detail : 'Dataset konnte nicht gespeichert werden.',
-        );
-        return;
+        if (response.status === 409) await loadSelectedDataset();
+        throw new Error(typeof payload.detail === 'string' ? payload.detail : 'Entscheidung konnte nicht gespeichert werden.');
       }
       const saved = (await response.json()) as DatasetDetail;
       setDetails(saved);
-      onSelectDataset(saved.path);
       await onDatasetSaved(saved.path);
-      setIsEditing(false);
-      setIsCreatingNew(false);
-      setSelectionBeforeCreate('');
-      setMessage(`${saved.filename} wurde mit ${saved.row_count} Fragen gespeichert.`);
-    } catch {
-      setLocalError('Backend beim Speichern des Datasets nicht erreichbar.');
+      setMessage(rowId + (decision === 'included'
+        ? ' bleibt für die Evaluation zugelassen.'
+        : ' wird bei der Evaluation ausgeschlossen. Die Entscheidung bleibt im JSONL dokumentiert.'));
+    } catch (cause) {
+      setLocalError(cause instanceof Error ? cause.message : 'Backend beim Speichern nicht erreichbar.');
     } finally {
-      setIsSaving(false);
+      setDecidingRowId(null);
     }
   };
 
@@ -647,10 +149,10 @@ export function EncourageDatasetWorkbench({
     setIsDatasetActionRunning(true);
     setLocalError(null);
     try {
-      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, { cache: 'no-store' });
+      const response = await apiFetch('/api/v1/evaluation-datasets/' + encodeURI(dataset.path), { cache: 'no-store' });
       if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
       const loaded = (await response.json()) as DatasetDetail;
-      const jsonl = `${loaded.rows.map((row) => JSON.stringify(row)).join('\n')}\n`;
+      const jsonl = loaded.rows.map((row) => JSON.stringify(row)).join('\n') + '\n';
       const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
       const link = document.createElement('a');
       link.href = url;
@@ -664,37 +166,18 @@ export function EncourageDatasetWorkbench({
     }
   };
 
-  const editDataset = async (dataset: DatasetEntry) => {
-    setLocalError(null);
-    try {
-      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, { cache: 'no-store' });
-      if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
-      const loaded = (await response.json()) as DatasetDetail;
-      setDetails(loaded);
-      onSelectDataset(dataset.path);
-      startEditingDataset(loaded);
-    } catch (cause) {
-      setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht bearbeitet werden.');
-    }
-  };
-
   const archiveDataset = async (dataset: DatasetEntry) => {
-    if (!window.confirm(`„${dataset.filename}“ wird archiviert und kann später wiederhergestellt werden. Fortfahren?`)) return;
+    if (!window.confirm('„' + dataset.filename + '“ archivieren? Es kann später wiederhergestellt werden.')) return;
     setIsDatasetActionRunning(true);
     setLocalError(null);
     try {
-      const response = await apiFetch(`/api/v1/evaluation-datasets/${encodeURI(dataset.path)}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Dataset konnte nicht archiviert werden.');
-      }
-      setMessage(`${dataset.filename} wurde archiviert und kann im Archiv wiederhergestellt werden.`);
-      await loadArchivedDatasets();
+      const response = await apiFetch('/api/v1/evaluation-datasets/' + encodeURI(dataset.path), { method: 'DELETE' });
+      if (!response.ok) throw new Error('Dataset konnte nicht archiviert werden.');
       const nextSelection = selectedDatasetPath === dataset.path ? '' : selectedDatasetPath;
       onSelectDataset(nextSelection);
       await onDatasetSaved(nextSelection);
+      await loadArchivedDatasets();
+      setMessage(dataset.filename + ' wurde archiviert.');
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht archiviert werden.');
     } finally {
@@ -711,16 +194,13 @@ export function EncourageDatasetWorkbench({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: dataset.path }),
       });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(typeof payload?.detail === 'string' ? payload.detail : 'Dataset konnte nicht wiederhergestellt werden.');
-      }
+      if (!response.ok) throw new Error('Dataset konnte nicht wiederhergestellt werden.');
       const restored = (await response.json()) as DatasetDetail;
       setShowArchivedDatasets(false);
       await loadArchivedDatasets();
       onSelectDataset(restored.path);
       await onDatasetSaved(restored.path);
-      setMessage(`${restored.filename} wurde aus dem Archiv wiederhergestellt.`);
+      setMessage(restored.filename + ' wurde wiederhergestellt.');
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht wiederhergestellt werden.');
     } finally {
@@ -730,410 +210,115 @@ export function EncourageDatasetWorkbench({
 
   const visibleDatasets = showArchivedDatasets ? archivedDatasets : datasets;
 
-  const toggleArchivedDatasets = () => {
-    const showArchive = !showArchivedDatasets;
-    setShowArchivedDatasets(showArchive);
-    setLocalError(null);
-    if (showArchive) void loadArchivedDatasets();
-    if (!showArchive && !datasets.some((dataset) => dataset.path === selectedDatasetPath)) {
-      onSelectDataset(datasets[0]?.path ?? '');
-    }
-  };
-
   return (
     <div className="space-y-6">
-      <div className="grid gap-4">
-        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="text-lg font-semibold text-slate-950">Dataset erstellen</h3>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button
-              onClick={() => setShowGenerator((previous) => !previous)}
-              disabled={isEditing}
-              variant={showGenerator ? 'outline' : 'default'}
-              className={showGenerator ? undefined : 'bg-emerald-600 hover:bg-emerald-700'}
-            >
-              {showGenerator ? <X className="mr-2 h-4 w-4" /> : <Sparkles className="mr-2 h-4 w-4" />}
-              {showGenerator ? 'Generierung schließen' : 'Dataset generieren'}
-            </Button>
-            {!showGenerator && (
-              <Button onClick={startNewDataset} disabled={isEditing} variant="outline">
-                {isEditing ? 'Formular geöffnet' : 'Manuell erstellen'}
-              </Button>
-            )}
-          </div>
-          {showGenerator && <DatasetGenerator files={markdownFiles} datasets={datasets} preferredPath={preferredMarkdownPath} onSaved={onDatasetSaved} />}
-        </section>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h3 className="text-lg font-semibold text-slate-950">Dataset erstellen</h3>
+        <Button
+          type="button"
+          onClick={() => setShowGenerator((previous) => !previous)}
+          variant={showGenerator ? 'outline' : 'default'}
+          className={'mt-4 ' + (showGenerator ? '' : 'bg-emerald-600 hover:bg-emerald-700')}
+        >
+          {showGenerator ? <X className="mr-2 h-4 w-4" /> : <Sparkles className="mr-2 h-4 w-4" />}
+          {showGenerator ? 'Generierung schließen' : 'Dataset generieren'}
+        </Button>
+        {showGenerator && <DatasetGenerator
+          files={markdownFiles}
+          datasets={datasets}
+          preferredPath={preferredMarkdownPath}
+          onSaved={onDatasetSaved}
+          onOpenDataset={async (path) => {
+            onSelectDataset(path);
+            setShowGenerator(false);
+            await onDatasetSaved(path);
+          }}
+        />}
+      </section>
 
-        {!showGenerator && <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {!showGenerator && <>
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold text-slate-950">{showArchivedDatasets ? 'Archivierte Datasets' : 'Bestehende Evaluationssets'}</h3>
-              <p className="mt-1 text-sm text-slate-500">
-                {showArchivedDatasets
-                  ? 'Archivierte Datasets sind nicht in Benchmarks auswählbar und können hier wiederhergestellt werden.'
-                  : 'JSONL-Fragen, Goldantworten und Evidenz für eure Dokumente verwalten.'}
-              </p>
+              <p className="mt-1 text-sm text-slate-500">Fragen, Goldantworten und Quellen ansehen und Prüffragen entscheiden.</p>
             </div>
-            <Button type="button" variant="outline" size="sm" disabled={isEditing || isDatasetActionRunning} onClick={toggleArchivedDatasets}>
-              {showArchivedDatasets ? 'Aktive Datasets' : `Archiv${archivedDatasets.length ? ` (${archivedDatasets.length})` : ''}`}
+            <Button type="button" variant="outline" size="sm" disabled={isDatasetActionRunning} onClick={() => {
+              const next = !showArchivedDatasets;
+              setShowArchivedDatasets(next);
+              if (next) void loadArchivedDatasets();
+              else if (!datasets.some((dataset) => dataset.path === selectedDatasetPath)) onSelectDataset(datasets[0]?.path ?? '');
+            }}>
+              {showArchivedDatasets ? 'Aktive Datasets' : 'Archiv' + (archivedDatasets.length ? ' (' + archivedDatasets.length + ')' : '')}
             </Button>
           </div>
-
-          {isEditing && (
-            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-              {isCreatingNew ? 'Ein neues Dataset wird erstellt.' : 'Das ausgewählte Dataset wird bearbeitet.'}{' '}
-              Speichere oder brich das Formular ab, um die Auswahl wieder zu verwenden.
-            </div>
-          )}
-
           <div className="mt-4 grid gap-2">
-            {isLoadingArchivedDatasets && showArchivedDatasets ? (
-              <p className="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500">Archiv wird geladen…</p>
-            ) : visibleDatasets.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500">
-                {showArchivedDatasets ? 'Das Archiv ist leer.' : 'Noch keine JSONL-Datasets vorhanden.'}
-              </p>
-            ) : (
-              visibleDatasets.map((dataset) => {
-                const originalFiles = datasetWordSources(dataset);
-                const selected = dataset.path === selectedDatasetPath;
-                return (
-                  <div key={dataset.path} className={`flex min-w-0 items-center gap-2 rounded-xl border-2 p-2 transition ${
-                    selected ? 'border-purple-500 bg-purple-50' : 'border-slate-200 bg-white'
-                  }`}>
-                    <button
-                      type="button"
-                      disabled={isEditing || isDatasetActionRunning}
-                      onClick={() => onSelectDataset(dataset.path)}
-                      className="min-w-0 flex-1 break-words rounded-lg p-2 text-left hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-55"
-                    >
-                      <p className="font-medium text-slate-900">{dataset.filename}</p>
-                      <p className="mt-1 text-xs text-slate-500">{dataset.row_count} Fragen</p>
-                      <p className="mt-1 text-xs text-slate-500">{formatDatasetCreatedAt(dataset.created_at)}</p>
-                      <p className="mt-1 text-xs text-slate-600">
-                        Original: {originalFiles.length > 0 ? originalFiles.join(', ') : 'nicht zugeordnet'}
-                      </p>
-                    </button>
-                    <div className="flex shrink-0 items-center gap-1">
-                      {showArchivedDatasets ? (
-                        <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void restoreDataset(dataset)} aria-label={`Dataset ${dataset.filename} wiederherstellen`} title="Wiederherstellen">
-                          <RotateCcw className="h-4 w-4" />
-                        </Button>
-                      ) : (
-                        <>
-                          <Button type="button" size="sm" variant="outline" disabled={isEditing || isDatasetActionRunning} onClick={() => void editDataset(dataset)} aria-label={`Dataset ${dataset.filename} bearbeiten`} title="Bearbeiten">
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button type="button" size="sm" variant="outline" disabled={isEditing || isDatasetActionRunning} onClick={() => void archiveDataset(dataset)} aria-label={`Dataset ${dataset.filename} archivieren`} title="Archivieren">
-                            <Archive className="h-4 w-4" />
-                          </Button>
-                        </>
-                      )}
-                      <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void downloadDataset(dataset)} aria-label={`Dataset ${dataset.filename} herunterladen`} title="Herunterladen">
-                        <Download className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </section>}
-      </div>
-
-      {localError && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {localError}
-        </div>
-      )}
-      {message && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-          {message}
-        </div>
-      )}
-
-      {isEditing ? (
-        <section className="rounded-2xl border border-emerald-200 bg-white p-5 shadow-sm">
-          <div className="mb-4">
-            <p className="text-lg font-semibold text-slate-950">
-              {isCreatingNew ? 'Neues Dataset erstellen' : 'Dataset bearbeiten'}
-            </p>
-            <p className="mt-1 text-sm text-slate-500">
-              {isCreatingNew
-                ? 'Lege Dateiname, Quelldokument und die ersten Evaluationsfragen fest.'
-                : 'Passe Fragen, Goldantworten und Evidenz des ausgewählten Datasets an.'}
-            </p>
-          </div>
-          <div className="grid gap-4 rounded-xl border border-emerald-100 bg-emerald-50/50 p-4 md:grid-cols-2">
-            <label className="text-sm font-medium text-slate-700 md:col-span-2">
-              Indexierte Markdown-Datei
-              <select
-                value={datasetMarkdownPath}
-                onChange={(event) => selectDatasetMarkdown(event.target.value)}
-                disabled={aiAssistingRowIndex !== null}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-              >
-                <option value="">Markdown auswählen</option>
-                {markdownFiles.map((file) => (
-                  <option key={file.path} value={file.path}>
-                    {file.original_filename || file.filename} → {file.filename} ({file.workspace_folder || 'inbox'})
-                  </option>
-                ))}
-              </select>
-              <span className="mt-1 block text-xs font-normal text-slate-500">
-                Diese Quelle gilt automatisch für alle Fragen im Dataset.
-              </span>
-            </label>
-
-            <label className="text-sm font-medium text-slate-700">
-              Quelldatei
-              <select
-                value={datasetSourceFile}
-                onChange={(event) => setDatasetSourceFile(event.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-              >
-                <option value="">Keine Zuordnung</option>
-                {datasetSourceFile && !wordSources.some((source) => source.path === datasetSourceFile) && (
-                  <option value={datasetSourceFile}>{sourceFilename(datasetSourceFile)}</option>
-                )}
-                {wordSources.map((source) => (
-                  <option key={source.path} value={source.path}>{source.filename}</option>
-                ))}
-              </select>
-              <span className="mt-1 block text-xs font-normal text-slate-500">
-                Wird anhand des ursprünglichen Dateinamens vorbelegt, sofern möglich.
-              </span>
-            </label>
-
-            {isCreatingNew && (
-              <label className="text-sm font-medium text-slate-700">
-                Fragenstil
-                <select
-                  value={questionStyle}
-                  onChange={(event) => selectQuestionStyle(event.target.value as DatasetQuestionStyle)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                >
-                  {QUESTION_STYLE_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>{option.label}</option>
-                  ))}
-                </select>
-                <span className="mt-1 block text-xs font-normal text-slate-500">
-                  {QUESTION_STYLE_OPTIONS.find((option) => option.id === questionStyle)?.description}
-                </span>
-              </label>
-            )}
-
-            <label className="text-sm font-medium text-slate-700 md:col-span-2">
-              Dateiname
-              <input
-                value={filename}
-                onChange={(event) => {
-                  setFilename(event.target.value);
-                  setFilenameWasEdited(true);
-                }}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                placeholder="dokument_retrieval_user-paraphrases_v1.jsonl"
-              />
-              <span className="mt-1 block text-xs font-normal text-slate-500">
-                Wird aus Dokument, Fragenstil und nächster freier Version erzeugt.
-              </span>
-            </label>
-
-            <p className={`text-xs md:col-span-2 ${markdownContent ? 'text-emerald-700' : 'text-slate-500'}`}>
-              {isLoadingMarkdownContent
-                ? 'Markdown wird für die Evidenzprüfung geladen…'
-                : markdownContent
-                  ? 'Markdown geladen: Evidenz-Zitate und Überschriftenpfade werden automatisch geprüft.'
-                  : 'Ohne geladenes Markdown ist keine automatische Evidenzprüfung möglich.'}
-            </p>
-            {markdownContent && (
-              <details className="rounded-lg border border-slate-200 bg-white p-3 md:col-span-2">
-                <summary className="cursor-pointer text-sm font-medium text-emerald-800">
-                  Markdown als Evidenzquelle öffnen
-                </summary>
-                <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-4 text-xs leading-relaxed text-slate-100">
-                  {markdownContent}
-                </pre>
-              </details>
-            )}
-          </div>
-
-          <div className="mt-4 flex justify-end gap-2">
-            <Button variant="outline" onClick={cancelEditing} disabled={aiAssistingRowIndex !== null}>
-              Abbrechen
-            </Button>
-            <Button
-              onClick={saveDataset}
-              disabled={isSaving || rows.length === 0 || aiAssistingRowIndex !== null}
-            >
-              {isSaving ? 'Speichert…' : 'Dataset speichern'}
-            </Button>
-          </div>
-
-          <div className="mt-5 space-y-4">
-            {rows.map((row, index) => (
-              <div key={index} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-semibold text-slate-900">Frage {index + 1}</p>
-                    <span className="rounded-full bg-slate-200 px-2 py-0.5 font-mono text-[11px] text-slate-600">
-                      {row.id}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeRow(index)}
-                    disabled={rows.length === 1 || aiAssistingRowIndex !== null}
-                    className="text-xs font-medium text-rose-600 disabled:text-slate-300"
-                  >
-                    Entfernen
+            {showArchivedDatasets && isLoadingArchive ? <p className="text-sm text-slate-500">Archiv wird geladen…</p>
+              : visibleDatasets.length === 0 ? <p className="text-sm text-slate-500">{showArchivedDatasets ? 'Das Archiv ist leer.' : 'Noch keine JSONL-Datasets vorhanden.'}</p>
+              : visibleDatasets.map((dataset) => (
+                <div key={dataset.path} className={'flex min-w-0 items-center gap-2 rounded-xl border-2 p-2 ' + (dataset.path === selectedDatasetPath ? 'border-purple-500 bg-purple-50' : 'border-slate-200 bg-white')}>
+                  <button type="button" disabled={isDatasetActionRunning} onClick={() => onSelectDataset(dataset.path)}
+                    className="min-w-0 flex-1 break-words rounded-lg p-2 text-left hover:bg-white/70">
+                    <p className="font-medium text-slate-900">{dataset.filename}</p>
+                    <p className="mt-1 text-xs text-slate-500">{dataset.row_count} Fragen · {formatCreatedAt(dataset.created_at)}</p>
+                    <p className="mt-1 text-xs text-slate-600">Original: {datasetWordSources(dataset).join(', ') || 'nicht zugeordnet'}</p>
                   </button>
-                </div>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <div className="md:col-span-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label htmlFor={`dataset-question-${index}`} className="text-xs font-medium text-slate-600">
-                        Frage <span className="text-rose-600">*</span>
-                      </label>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => prepareRowWithAi(index)}
-                        disabled={
-                          aiAssistingRowIndex !== null
-                          || !datasetMarkdownPath
-                          || !row.question.trim()
-                        }
-                      >
-                        {aiAssistingRowIndex === index ? 'AI durchsucht das Dokument…' : 'Mit AI vorbereiten'}
-                      </Button>
-                    </div>
-                    <textarea
-                      id={`dataset-question-${index}`}
-                      value={row.question}
-                      onChange={(event) => updateRow(index, 'question', event.target.value)}
-                      disabled={aiAssistingRowIndex === index}
-                      rows={2}
-                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                    />
-                    <span className="mt-1 block font-normal text-slate-500">
-                      {questionStyle === 'user-paraphrases'
-                        ? 'In natürlicher Nutzersprache formulieren, ohne Vertragsbegriffe unnötig zu übernehmen.'
-                        : questionStyle === 'contract-language'
-                          ? 'Fachbegriffe, Zahlen und Bezeichnungen gezielt aus dem Dokument aufgreifen.'
-                          : 'Natürliche, vertragsnahe und tabellarische Fragen bewusst mischen.'}
-                    </span>
-                    {aiAssistFeedback[index] && (
-                      <p
-                        aria-live="polite"
-                        className={`mt-2 rounded-lg border px-3 py-2 text-xs ${
-                          aiAssistFeedback[index].tone === 'success'
-                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                            : aiAssistFeedback[index].tone === 'warning'
-                              ? 'border-amber-200 bg-amber-50 text-amber-800'
-                              : 'border-rose-200 bg-rose-50 text-rose-700'
-                        }`}
-                      >
-                        {aiAssistFeedback[index].message}
-                      </p>
-                    )}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {showArchivedDatasets
+                      ? <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void restoreDataset(dataset)} aria-label={'Dataset ' + dataset.filename + ' wiederherstellen'} title="Wiederherstellen"><RotateCcw className="h-4 w-4" /></Button>
+                      : <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void archiveDataset(dataset)} aria-label={'Dataset ' + dataset.filename + ' archivieren'} title="Archivieren"><Archive className="h-4 w-4" /></Button>}
+                    <Button type="button" size="sm" variant="outline" disabled={isDatasetActionRunning} onClick={() => void downloadDataset(dataset)} aria-label={'Dataset ' + dataset.filename + ' herunterladen'} title="Herunterladen"><Download className="h-4 w-4" /></Button>
                   </div>
-                  <label className="text-xs font-medium text-slate-600 md:col-span-2">
-                    Goldantwort <span className="text-rose-600">*</span>
-                    <textarea value={row.gold_answer} onChange={(event) => updateRow(index, 'gold_answer', event.target.value)} rows={3} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" />
-                    <span className="mt-1 block font-normal text-slate-500">
-                      Kurze ideale Antwort, ausschließlich durch die angegebene Evidenz belegt.
-                    </span>
-                  </label>
-                  <label className="text-xs font-medium text-slate-600 md:col-span-2">
-                    Evidenz-Zitat <span className="text-rose-600">*</span>
-                    <textarea
-                      value={row.evidence_quote}
-                      onChange={(event) => updateRow(index, 'evidence_quote', event.target.value)}
-                      onBlur={() => updateEvidenceAnchor(index)}
-                      rows={3}
-                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                    />
-                    <span className={`mt-1 block font-normal ${
-                      row.evidence_quote && markdownContent
-                        ? evidenceOffset(markdownContent, row.evidence_quote) >= 0
-                          ? 'text-emerald-700'
-                          : 'text-amber-700'
-                        : 'text-slate-500'
-                    }`}>
-                      {row.evidence_quote && markdownContent
-                        ? evidenceOffset(markdownContent, row.evidence_quote) >= 0
-                          ? 'Exaktes Zitat im ausgewählten Markdown gefunden.'
-                          : 'Noch kein exakter Treffer im ausgewählten Markdown.'
-                        : 'Kopiere die kleinste Textstelle, die die Goldantwort vollständig belegt.'}
-                    </span>
-                  </label>
-                  <label className="text-xs font-medium text-slate-600">
-                    Evidenz-Anker
-                    <input value={row.evidence_anchor} onChange={(event) => updateRow(index, 'evidence_anchor', event.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" />
-                    <span className="mt-1 block font-normal text-slate-500">
-                      Wird aus dem Überschriftenpfad des Zitats vorbelegt.
-                    </span>
-                  </label>
-                  <label className="text-xs font-medium text-slate-600">
-                    Notizen <span className="font-normal text-slate-400">(optional)</span>
-                    <input value={row.notes} onChange={(event) => updateRow(index, 'notes', event.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" />
-                  </label>
                 </div>
-              </div>
-            ))}
+              ))}
           </div>
-          <Button
-            variant="outline"
-            onClick={addRow}
-            disabled={aiAssistingRowIndex !== null}
-            className="mt-4"
-          >
-            Frage hinzufügen
-          </Button>
         </section>
-      ) : !showGenerator ? (
+
+        {localError && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{localError}</p>}
+        {message && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</p>}
+
         <section className="rounded-2xl border border-purple-200 bg-white p-5 shadow-sm">
-          {isLoadingDetails ? (
-            <p className="text-sm text-slate-500">Dataset wird geladen…</p>
-          ) : details ? (
-            <>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-950">{details.filename}</h3>
-                  <p className="mt-1 text-sm text-slate-500">{details.row_count} Fragen</p>
-                  <p className="mt-1 text-sm text-slate-600">
-                    Original: {details.source_files.length > 0
-                      ? details.source_files.map(sourceFilename).join(', ')
-                      : 'nicht zugeordnet'}
-                  </p>
-                </div>
-              </div>
+          {isLoadingDetails ? <p className="text-sm text-slate-500">Dataset wird geladen…</p>
+            : details ? <>
+              <h3 className="text-lg font-semibold text-slate-950">{details.filename}</h3>
+              <p className="mt-1 text-sm text-slate-500">{details.row_count} Fragen gespeichert · Original: {details.source_files.map(sourceFilename).join(', ') || 'nicht zugeordnet'}</p>
+              <RagasValidationSummary rows={details.rows} />
               <div className="mt-4 max-h-[36rem] space-y-3 overflow-y-auto pr-1">
-                {details.rows.map((row, index) => (
-                  <article key={String(row.id ?? index)} className="rounded-xl border border-purple-100 bg-purple-50/40 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-purple-700">{String(row.id ?? `Frage ${index + 1}`)}</p>
+                {details.rows.map((row, index) => {
+                  const rowId = String(row.id ?? 'Frage ' + (index + 1));
+                  const needsDecision = row.generation_pipeline === 'ragas' && row.validation_status === 'review';
+                  const decision = String(row.review_decision ?? 'pending');
+                  return <article key={rowId} className={'rounded-xl border p-4 ' + (decision === 'excluded' ? 'border-slate-200 bg-slate-50' : 'border-purple-100 bg-purple-50/40')}>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-purple-700">{rowId}</p>
                     <p className="mt-1 font-medium text-slate-900">{String(row.question ?? '')}</p>
                     <p className="mt-3 text-xs font-semibold text-slate-600">Goldantwort</p>
                     <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{String(row.gold_answer ?? '')}</p>
-                    {Boolean(row.evidence_quote) && <p className="mt-3 rounded-lg bg-white p-3 text-xs text-slate-600">{String(row.evidence_quote)}</p>}
+                    {Boolean(row.evidence_quote) && <p className="mt-3 whitespace-pre-wrap rounded-lg bg-white p-3 text-xs text-slate-600">{String(row.evidence_quote)}</p>}
+                    <RagasValidationInfo row={row} />
+                    {needsDecision && !showArchivedDatasets && <div className="mt-3 rounded-lg border border-amber-200 bg-white p-3 text-xs">
+                      <p className="mb-2 text-slate-700">Für die Evaluation verwenden? Die Frage und deine Entscheidung bleiben im JSONL erhalten.</p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" size="sm" variant={decision === 'included' ? 'default' : 'outline'}
+                          disabled={decidingRowId !== null || !details.updated_at}
+                          aria-pressed={decision === 'included'}
+                          onClick={() => void decideQuestion(rowId, 'included')}>Behalten</Button>
+                        <Button type="button" size="sm" variant={decision === 'excluded' ? 'default' : 'outline'}
+                          disabled={decidingRowId !== null || !details.updated_at}
+                          aria-pressed={decision === 'excluded'}
+                          onClick={() => void decideQuestion(rowId, 'excluded')}>Ausschließen</Button>
+                      </div>
+                    </div>}
                     <div className="mt-3 grid gap-1 text-xs text-slate-500">
                       <p>Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
                       {typeof row.source_page === 'number' && <p>Seite: {row.source_page}</p>}
-                      {typeof row.sampling_region === 'number' && <p>Dokumentabschnitt: {row.sampling_region} / {String(row.sampling_region_count ?? '')}{row.sampling_method === 'text_position' ? ' (Textposition)' : ''}</p>}
                       {Boolean(row.evidence_anchor) && <p>Abschnitt: {String(row.evidence_anchor)}</p>}
-                      {Boolean(row.validation_status) && <p>Validierung: {String(row.validation_status)}{row.validation_stage === 'escalation' ? ' (nach Eskalation)' : ''} · Generator: {String(row.generator_model ?? '')} · Validator: {String(row.validated_by ?? row.validator_model ?? '')}</p>}
                     </div>
-                  </article>
-                ))}
+                  </article>;
+                })}
               </div>
-            </>
-          ) : (
-            <p className="text-sm text-slate-500">Wähle ein Dataset aus oder lege ein neues an.</p>
-          )}
+            </> : <p className="text-sm text-slate-500">Wähle ein Dataset aus.</p>}
         </section>
-      ) : null}
+      </>}
     </div>
   );
 }

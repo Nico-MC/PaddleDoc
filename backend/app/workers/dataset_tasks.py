@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import time
@@ -12,6 +13,9 @@ from app.models.models import Job, JobStatus
 from app.services import gold_pipeline
 from app.services.dataset_assistant import generate_dataset_rows
 from app.services.encourage_evaluation import save_evaluation_dataset
+from app.services.hcds import resolve_dataset_llm
+from app.services.ragas_dataset import generate_ragas_dataset_rows
+from app.services.ragas_validation import validate_ragas_dataset_rows
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -26,6 +30,10 @@ def generation_store() -> Redis:
 
 def generation_key(run_id: str) -> str:
     return f'dataset-generation:{run_id}'
+
+
+def generation_audit_key(run_id: str, job_id: str) -> str:
+    return f'{generation_key(run_id)}:audit:{job_id}'
 
 
 def _gold_state_key(run_id: str, job_id: str) -> str:
@@ -51,6 +59,7 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
     metadata = json.loads(metadata_raw)
     item = json.loads(item_raw)
     is_gold = metadata.get('pipeline') in gold_pipeline.GOLD_PIPELINES
+    is_ragas = metadata.get('pipeline') == 'ragas'
     state_key = _gold_state_key(run_id, job_id)
     if item['status'] in {'completed', 'skipped', 'cancelled', 'failed'}:
         return
@@ -91,6 +100,9 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
             markdown = job.result_markdown
             original_filename = job.original_filename
             source_file_sha256 = getattr(job, 'content_sha256', None)
+            processing_info = getattr(job, 'processing_info', None)
+            execution = processing_info.get('execution', {}) if isinstance(processing_info, dict) else {}
+            pdf_toc = execution.get('pdf_toc') if isinstance(execution, dict) else None
         if is_gold:
             gold_config = gold_pipeline.config_from_settings(settings, metadata['pipeline'])
             if gold_config is None:
@@ -129,44 +141,180 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
                 'rejected': state['counters']['rejected'],
             }
         else:
+            if is_ragas:
+                audit_key = generation_audit_key(run_id, job_id)
+                audit = {
+                    'source_document': item['markdown_path'], 'source_file': original_filename,
+                    'source_markdown_sha256': hashlib.sha256(markdown.encode('utf-8')).hexdigest(),
+                    'audit_schema_version': 3, 'started_at': time.time(),
+                    'classification_inputs': [], 'classification_results': [],
+                    'generation_inputs': [],
+                    'generation_results': [], 'region_results': [],
+                    'validation_inputs': [], 'validation_results': [],
+                    'llm_http_events': [],
+                }
+
+                def record_audit(event: dict) -> None:
+                    event = json.loads(json.dumps(event, ensure_ascii=False, default=str))
+                    kind = event.get('type')
+                    if kind == 'prepared_document':
+                        audit['prepared_document'] = {key: value for key, value in event.items() if key != 'type'}
+                    elif kind == 'classification_input':
+                        audit['classification_inputs'].append(event['prompt'])
+                    elif kind == 'classification_result':
+                        audit['classification_results'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind == 'section_inventory':
+                        audit['section_inventory'] = event['sections']
+                    elif kind == 'generation_input':
+                        audit['generation_inputs'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind == 'generation_result':
+                        audit['generation_results'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind == 'region_result':
+                        audit['region_results'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind == 'validation_input':
+                        audit['validation_inputs'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind == 'validation_result':
+                        audit['validation_results'].append({key: value for key, value in event.items() if key != 'type'})
+                    elif kind in {'llm_http_request', 'llm_http_response'}:
+                        audit['llm_http_events'].append(event)
+                    elif kind == 'source_selection':
+                        audit.update({key: value for key, value in event.items() if key != 'type'})
+                    store.set(audit_key, json.dumps(audit, ensure_ascii=False), ex=GENERATION_TTL)
+
+                store.set(audit_key, json.dumps(audit, ensure_ascii=False), ex=GENERATION_TTL)
+                update(source_audit_available=True)
+            endpoint = resolve_dataset_llm(settings, metadata.get('provider'))
+            if endpoint is None:
+                raise ValueError('Dataset generation endpoint is not configured.')
             validation_summary = None
-            rows = generate_dataset_rows(
+            generate = generate_ragas_dataset_rows if is_ragas else generate_dataset_rows
+            rows = generate(
                 markdown=markdown,
                 source_document=item['markdown_path'],
                 source_file=original_filename,
                 source_file_sha256=source_file_sha256,
-                api_base_url=settings.dataset_llm_api_base_url,
-                api_key=settings.dataset_llm_api_key,
+                api_base_url=endpoint.base_url,
+                api_key=endpoint.api_key,
                 model_name=metadata['model_name'],
                 question_count=metadata['question_count'],
                 question_style=metadata['question_style'],
                 focus=metadata['focus'],
                 sampling_seed=metadata.get('sampling_seed'),
+                **((metadata.get('ragas_options') or {}) if is_ragas else {}),
+                **({'pdf_toc': pdf_toc, 'audit_callback': record_audit} if is_ragas else {}),
+                **({'should_cancel': lambda: store.hget(key, 'cancelled') == '1'} if is_ragas else {}),
                 progress_callback=lambda progress: update(progress=progress),
+                request_headers=endpoint.request_headers,
+                **({} if is_ragas else {'openai_native': endpoint.provider == 'openai'}),
             )
+        if is_ragas and store.hget(key, 'cancelled') != '1':
+            audit['validation_candidates'] = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
+            store.set(audit_key, json.dumps(audit, ensure_ascii=False), ex=GENERATION_TTL)
+            validation_endpoint = resolve_dataset_llm(
+                settings, metadata.get('validation_provider') or metadata.get('provider'),
+            )
+            if validation_endpoint is None:
+                raise ValueError('Dataset validation endpoint is not configured.')
+            update(progress={
+                'phase': 'validating', 'validation_done': 0, 'validation_total': len(rows),
+                'validation_accepted': 0, 'validation_review': 0, 'validation_rejected': 0,
+                'questions_generated': len(rows), 'question_target': len(rows),
+            })
+            rows, validation_summary = validate_ragas_dataset_rows(
+                rows=rows, api_base_url=validation_endpoint.base_url, api_key=validation_endpoint.api_key,
+                model_name=metadata.get('validation_model_name') or metadata['model_name'],
+                request_headers=validation_endpoint.request_headers,
+                progress_callback=lambda progress: update(progress=progress),
+                audit_callback=record_audit,
+                should_cancel=lambda: store.hget(key, 'cancelled') == '1',
+            )
+            audit['validation_summary'] = validation_summary
+            store.set(audit_key, json.dumps(audit, ensure_ascii=False, default=str), ex=GENERATION_TTL)
+            if store.hget(key, 'cancelled') != '1' and not rows:
+                update(validation_summary=validation_summary)
+                raise RuntimeError('Ragas-Validierung hat alle Fragen verworfen; kein Dataset wurde gespeichert.')
         if store.hget(key, 'cancelled') == '1':
             update(status='cancelled')
             return
         is_overwrite = bool(item.get('target_dataset_filename'))
         filename = item.get('target_dataset_filename') or f'{job_id}_retrieval_{metadata["question_style"]}_{run_id}.jsonl'
+        if is_ragas:
+            generation_outcome = {
+                'run_id': run_id,
+                'target': metadata['question_count'],
+                'generated': validation_summary['candidates'],
+                'saved': len(rows),
+                'rejected_candidates': [
+                    {
+                        'id': detail.get('id'), 'question': detail.get('question'),
+                        'reason': detail.get('reason'),
+                        'faithfulness': detail.get('faithfulness'),
+                        'answer_relevancy': detail.get('answer_relevancy'),
+                    }
+                    for detail in validation_summary.get('details', [])
+                    if detail.get('status') == 'rejected'
+                ],
+                'incomplete_regions': [
+                    region for region in audit['region_results']
+                    if region['generated'] < region['target']
+                ],
+            }
+            for row in rows:
+                row['generation_outcome'] = generation_outcome
         dataset = save_evaluation_dataset(filename, rows)
+        if is_ragas:
+            audit['dataset_rows'] = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
+            audit['dataset_path'] = dataset['path']
+            store.set(audit_key, json.dumps(audit, ensure_ascii=False), ex=GENERATION_TTL)
         if is_gold:
             store.delete(state_key)
-        warning = (
-            f'Nur {len(rows)} von {metadata["question_count"]} gewünschten Fragen erzeugt. '
-            + (
-                'Die übrigen Kandidaten haben die Validierung (PASS) nicht bestanden oder keine belegte Frage ergeben.'
-                if is_gold else
-                'Trotz weiterer Textstellen ließen sich keine zusätzlichen unterschiedlichen Fragen '
-                'mit einem wortgetreuen Quellenzitat belegen.'
-            )
-        ) if len(rows) < metadata['question_count'] else None
+        warning = None
+        if len(rows) < metadata['question_count']:
+            if is_ragas:
+                generated = validation_summary['candidates']
+                rejected = validation_summary['rejected']
+                missing = max(0, metadata['question_count'] - generated)
+                warning = f'{len(rows)} von {metadata["question_count"]} Fragen gespeichert.'
+                if missing:
+                    reason_labels = {
+                        'no_usable_passage': 'keine ausreichend lange Quellenstelle',
+                        'model_error': 'Modellaufrufe fehlgeschlagen',
+                        'no_usable_question': 'keine neue belegbare Frage erhalten',
+                    }
+                    incomplete = [
+                        region for region in audit['region_results']
+                        if region['generated'] < region['target']
+                    ]
+                    if incomplete:
+                        warning += ' ' + '; '.join(
+                            f'Bereich {region["region"]}: {reason_labels.get(region["reason"], "keine Frage erzeugt")}'
+                            for region in incomplete
+                        ) + '.'
+                    else:
+                        warning += (
+                            ' Eine Frage konnte nicht erzeugt werden.' if missing == 1 else
+                            f' {missing} Fragen konnten nicht erzeugt werden.'
+                        )
+                if rejected:
+                    warning += (
+                        ' Eine Frage wurde bei der Validierung verworfen.' if rejected == 1 else
+                        f' {rejected} Fragen wurden bei der Validierung verworfen.'
+                    )
+            else:
+                warning = (
+                    f'Nur {len(rows)} von {metadata["question_count"]} gewünschten Fragen erzeugt. '
+                    + (
+                        'Die übrigen Kandidaten haben die Validierung (PASS) nicht bestanden oder keine belegte Frage ergeben.'
+                        if is_gold else
+                        'Trotz weiterer Textstellen ließen sich keine zusätzlichen unterschiedlichen Fragen '
+                        'mit einem wortgetreuen Quellenzitat belegen.'
+                    )
+                )
         region_count = max((row.get('sampling_region_count', 0) for row in rows), default=0)
         covered_regions = len({row['sampling_region'] for row in rows if 'sampling_region' in row})
         if region_count and covered_regions < region_count:
             coverage_note = (
-                f'Stichprobenabdeckung: {covered_regions} von {region_count} gleichmäßig verteilten '
-                'Dokumentabschnitten; die Abschnitte sind keine einzelnen Seiten.'
+                f'Fragen aus {covered_regions} von {region_count} Dokumentbereichen.'
             )
         else:
             coverage_note = None

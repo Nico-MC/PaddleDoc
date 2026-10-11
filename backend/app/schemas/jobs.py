@@ -228,6 +228,13 @@ class EvaluationDatasetWriteRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(min_length=1)
 
 
+class EvaluationDatasetReviewDecisionRequest(BaseModel):
+    dataset_path: str = Field(min_length=1)
+    row_id: str = Field(min_length=1)
+    decision: Literal['included', 'excluded']
+    expected_updated_at: datetime
+
+
 class EvaluationDatasetArchiveRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
@@ -241,11 +248,17 @@ class EvaluationDatasetAiAssistRequest(BaseModel):
 class EvaluationDatasetGenerateRequest(BaseModel):
     markdown_paths: list[str] = Field(min_length=1, max_length=1000)
     model_name: str | None = Field(default=None, min_length=1, max_length=255)
-    pipeline: Literal['standard', 'openai-gold', 'openai-gold-direct'] = 'standard'
+    provider: str | None = Field(default=None, min_length=1, max_length=64)
+    validation_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    validation_model_name: str | None = Field(default=None, min_length=1, max_length=255)
+    pipeline: Literal['standard', 'ragas', 'openai-gold', 'openai-gold-direct'] = 'standard'
     question_count: int = Field(default=10, ge=1, le=30)
     sampling_seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
     question_style: Literal['user-paraphrases', 'contract-language', 'mixed-questions'] = 'user-paraphrases'
     focus: str = Field(default='', max_length=1000)
+    ragas_query_mode: Literal['facts', 'themes', 'mixed'] = 'facts'
+    ragas_context_chars: Literal[800, 1400, 2400] = 1400
+    ragas_passage_tries: int = Field(default=3, ge=1, le=5)
     skip_existing: bool = True
     overwrite_datasets: dict[str, str] = Field(default_factory=dict)
 

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, defer
 
 from app.api.deps import get_current_user, require_admin
 from app.core.config import settings
-from app.database.session import get_db
+from app.database.session import SessionLocal, get_db
 from app.models.models import (
     Collection,
     Job,
@@ -53,6 +53,7 @@ from app.schemas.jobs import (
     EvaluationDatasetBrowserResponse,
     EvaluationDatasetDetailResponse,
     EvaluationDatasetWriteRequest,
+    EvaluationDatasetReviewDecisionRequest,
     EvaluationSourceDocumentBrowserResponse,
     CollectionStartRequest,
     CollectionStartResponse,
@@ -87,15 +88,20 @@ from app.services.encourage_bridge import (
 )
 from app.services.encourage_evaluation import (
     archive_evaluation_dataset,
+    DatasetVersionConflict,
     get_evaluation_dataset_details,
     list_evaluation_datasets,
     list_evaluation_source_documents,
     restore_evaluation_dataset,
     run_encourage_evaluation,
     save_evaluation_dataset,
+    set_evaluation_dataset_review_decision,
 )
 from app.services import gold_pipeline
 from app.services.dataset_assistant import list_dataset_models, prepare_dataset_answer
+from app.services.hcds import DatasetLLMEndpoint, resolve_dataset_llm, resolve_dataset_llm_providers
+from app.services.openai_provider import OpenAIProviderClient
+from app.services.rag_text_preprocessing import count_picture_text_blocks, prepare_rag_text
 from app.services.encourage_mlflow import log_generate_run, log_ingest_run, log_retrieve_run
 from app.services.paddle_service import (
     effective_pipeline_profile_id,
@@ -109,7 +115,9 @@ from app.services.security import DUMMY_PASSWORD_HASH, enforce_rate_limit, hash_
 from app.services.storage import build_result_path, save_upload
 from app.workers.celery_app import celery_app
 from app.workers.tasks import process_job
-from app.workers.dataset_tasks import GENERATION_TTL, generate_document_dataset, generation_key, generation_store
+from app.workers.dataset_tasks import (
+    GENERATION_TTL, generate_document_dataset, generation_audit_key, generation_key, generation_store,
+)
 
 router = APIRouter(prefix='/api/v1')
 
@@ -2038,6 +2046,28 @@ def restore_archived_evaluation_dataset(
         ) from exc
 
 
+@router.post('/evaluation-datasets/review-decision', response_model=EvaluationDatasetDetailResponse)
+def decide_evaluation_dataset_question(
+    payload: EvaluationDatasetReviewDecisionRequest,
+    user: User = Depends(get_current_user),
+) -> EvaluationDatasetDetailResponse:
+    try:
+        result = set_evaluation_dataset_review_decision(
+            payload.dataset_path, payload.row_id, payload.decision,
+            expected_updated_at=payload.expected_updated_at, decided_by=user.id,
+        )
+        return EvaluationDatasetDetailResponse(**result)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DatasetVersionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail='Review decision could not be saved.') from exc
+
+
 @router.post('/evaluation-datasets', response_model=EvaluationDatasetDetailResponse)
 def upsert_evaluation_dataset(payload: EvaluationDatasetWriteRequest) -> EvaluationDatasetDetailResponse:
     try:
@@ -2106,43 +2136,47 @@ def assist_evaluation_dataset_question(
     return EvaluationDatasetAiAssistResponse(**result)
 
 
+def _dataset_provider_models(endpoint: DatasetLLMEndpoint) -> list[str]:
+    if endpoint.provider == 'openai':
+        with OpenAIProviderClient(
+            endpoint.api_key, base_url=endpoint.base_url, timeout=10.0, max_retries=0,
+        ) as client:
+            return client.list_models()
+    return list_dataset_models(
+        api_base_url=endpoint.base_url,
+        api_key=endpoint.api_key,
+        request_headers=endpoint.request_headers,
+    )
+
+
 @router.get('/evaluation-datasets/generation/config')
 def dataset_generation_config() -> dict:
-    hub_configured = bool(settings.dataset_llm_api_base_url and settings.dataset_llm_api_key)
-    gold_config = gold_pipeline.config_from_settings(settings)
-    models = []
-    models_error = None
-    if hub_configured:
+    provider_entries = []
+    for endpoint in resolve_dataset_llm_providers(settings):
+        models = []
+        models_error = None
         try:
-            models = list_dataset_models(
-                api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
-            )
-        except RuntimeError as exc:
-            if gold_config is None:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            models_error = str(exc)
+            models = _dataset_provider_models(endpoint)
+        except Exception as exc:
+            models_error = f'Could not load models from {endpoint.display_name}: {exc}'
+        provider_entries.append({
+            'id': endpoint.provider,
+            'label': endpoint.display_name,
+            'model_name': endpoint.model_name,
+            'models': models,
+            'models_error': models_error,
+        })
+
+    first = provider_entries[0] if provider_entries else None
     return {
-        'configured': hub_configured or gold_config is not None,
-        'model_name': settings.dataset_llm_model,
-        'models': models,
-        'models_error': models_error,
-        'pipelines': [{
-            'id': gold_pipeline.GOLD_DIRECT_PIPELINE_ID,
-            'label': 'OpenAI Gold-Pipeline (sofort)',
-            'configured': gold_config is not None,
-            'mode': 'direct',
-            'generator_model': settings.openai_gold_generator_model,
-            'validator_model': settings.openai_gold_validator_model,
-            'reasoning_effort': settings.openai_gold_reasoning_effort,
-        }, {
-            'id': gold_pipeline.GOLD_PIPELINE_ID,
-            'label': 'OpenAI Gold-Pipeline (Batch)',
-            'configured': gold_config is not None,
-            'mode': 'batch',
-            'generator_model': settings.openai_gold_generator_model,
-            'validator_model': settings.openai_gold_validator_model,
-            'reasoning_effort': settings.openai_gold_reasoning_effort,
-        }],
+        'configured': bool(provider_entries),
+        # Legacy fields remain for older frontends during rolling updates.
+        'model_name': first['model_name'] if first else '',
+        'provider': first['id'] if first else None,
+        'provider_label': first['label'] if first else None,
+        'models': first['models'] if first else [],
+        'models_error': first['models_error'] if first else None,
+        'providers': provider_entries,
     }
 
 
@@ -2155,11 +2189,17 @@ def start_dataset_generation(
 ) -> dict:
     enforce_rate_limit(request)
     use_gold = payload.pipeline in gold_pipeline.GOLD_PIPELINES
+    use_ragas = payload.pipeline == 'ragas'
     gold_config = gold_pipeline.config_from_settings(settings, payload.pipeline) if use_gold else None
+    endpoint = resolve_dataset_llm(settings, payload.provider or ('hcds' if use_ragas else None))
     if use_gold and gold_config is None:
         raise HTTPException(status_code=503, detail='OpenAI gold pipeline is not configured. Set OPENAI_API_BASE_URL and OPENAI_API_BEARER_TOKEN.')
-    if not use_gold and (not settings.dataset_llm_api_base_url or not settings.dataset_llm_api_key):
+    if not use_gold and endpoint is None:
         raise HTTPException(status_code=503, detail='Dataset generation is not configured. Check the selected LLM Compose extension and its credentials.')
+    if use_ragas and endpoint.provider != 'hcds':
+        raise HTTPException(status_code=422, detail='Ragas generation is currently configured for the HCDS provider only.')
+    if not use_ragas and (payload.validation_provider or payload.validation_model_name):
+        raise HTTPException(status_code=422, detail='A separate validation model is only supported for Ragas generation.')
     jobs = []
     for path in dict.fromkeys(payload.markdown_paths):
         job = db.get(Job, Path(path).stem, options=[defer(Job.upload_content)])
@@ -2172,15 +2212,33 @@ def start_dataset_generation(
     if use_gold:
         model_name = f'{gold_config.generator_model} + {gold_config.validator_model} (Gold-Pipeline, {"Batch" if gold_config.mode == "batch" else "sofort"})'
     else:
-        model_name = (payload.model_name or settings.dataset_llm_model).strip()
+        model_name = (payload.model_name or endpoint.model_name).strip()
         try:
-            models = list_dataset_models(
-                api_base_url=settings.dataset_llm_api_base_url, api_key=settings.dataset_llm_api_key,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            models = _dataset_provider_models(endpoint)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f'Could not load models from {endpoint.display_name}: {exc}') from exc
         if model_name not in models:
             raise HTTPException(status_code=422, detail='Selected model is not available from the configured dataset-generation endpoint.')
+    validation_endpoint = None
+    validation_model_name = None
+    if use_ragas:
+        validation_endpoint = resolve_dataset_llm(settings, payload.validation_provider or endpoint.provider)
+        if validation_endpoint is None:
+            raise HTTPException(status_code=422, detail='Selected validation provider is not configured.')
+        validation_model_name = (payload.validation_model_name or (
+            model_name if validation_endpoint.provider == endpoint.provider else validation_endpoint.model_name
+        )).strip()
+        try:
+            validation_models = (
+                models if validation_endpoint.provider == endpoint.provider else _dataset_provider_models(validation_endpoint)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f'Could not load validation models from {validation_endpoint.display_name}: {exc}',
+            ) from exc
+        if validation_model_name not in validation_models:
+            raise HTTPException(status_code=422, detail='Selected validation model is not available from its provider.')
     existing_datasets = list_evaluation_datasets()
     jobs_by_path = {path: job for job, path in jobs}
 
@@ -2231,9 +2289,18 @@ def start_dataset_generation(
         'question_style': payload.question_style,
         'focus': payload.focus,
         'model_name': model_name,
+        'pipeline': payload.pipeline,
     }
-    if use_gold:
-        metadata['pipeline'] = payload.pipeline
+    if not use_gold:
+        metadata['provider'] = endpoint.provider
+    if use_ragas:
+        metadata['validation_provider'] = validation_endpoint.provider
+        metadata['validation_model_name'] = validation_model_name
+        metadata['ragas_options'] = {
+            'query_mode': payload.ragas_query_mode,
+            'context_chars': payload.ragas_context_chars,
+            'passage_tries': payload.ragas_passage_tries,
+        }
     records = {'metadata': json.dumps(metadata)}
     for job, path in jobs:
         records[job.id] = json.dumps({
@@ -2275,8 +2342,79 @@ def dataset_generation_status(run_id: str, user: User = Depends(get_current_user
         'finished': all(item['status'] in {'completed', 'failed', 'skipped', 'cancelled'} for item in items),
         'cancelled': records.get('cancelled') == '1',
         'model_name': json.loads(records['metadata'])['model_name'],
+        'question_count': json.loads(records['metadata'])['question_count'],
+        'validation_provider': json.loads(records['metadata']).get('validation_provider'),
+        'validation_model_name': json.loads(records['metadata']).get('validation_model_name'),
+        'pipeline': json.loads(records['metadata']).get('pipeline', 'standard'),
+        'ragas_options': json.loads(records['metadata']).get('ragas_options'),
         'sampling_seed': json.loads(records['metadata']).get('sampling_seed'),
     }
+
+
+@router.get('/evaluation-datasets/generation/{run_id}/audit/{job_id}')
+def dataset_generation_audit(run_id: str, job_id: str, user: User = Depends(get_current_user)) -> dict:
+    store, _, records = _visible_generation(run_id, user)
+    if job_id not in records or job_id in {'metadata', 'cancelled'}:
+        raise HTTPException(status_code=404, detail='Generation audit not found or expired')
+    raw_audit = store.get(generation_audit_key(run_id, job_id))
+    if not raw_audit:
+        raise HTTPException(status_code=404, detail='Generation audit not found or expired')
+    return json.loads(raw_audit)
+
+
+def _add_prepared_document_to_legacy_audit(audit: dict, job_id: str, user_id: str) -> None:
+    if isinstance(audit.get('prepared_document'), dict):
+        return
+    with SessionLocal() as db:
+        source = db.get(Job, job_id, options=[defer(Job.upload_content)])
+        if source is None or source.owner_id != user_id or not source.result_markdown:
+            return
+        markdown = source.result_markdown
+    if hashlib.sha256(markdown.encode('utf-8')).hexdigest() != audit.get('source_markdown_sha256'):
+        return
+    cleaned = prepare_rag_text(markdown)
+    audit['prepared_document'] = {
+        'text': cleaned,
+        'picture_text_blocks_removed': count_picture_text_blocks(markdown),
+        'sha256': hashlib.sha256(cleaned.encode('utf-8')).hexdigest(),
+        'stage': 'after_picture_text_cleanup_before_section_filter',
+        'reconstructed_at_read_time': True,
+    }
+
+
+@router.get('/evaluation-datasets/generation/{run_id}/audit/{job_id}/download')
+def download_dataset_generation_audit(run_id: str, job_id: str, user: User = Depends(get_current_user)) -> Response:
+    store, _, records = _visible_generation(run_id, user)
+    if job_id not in records or job_id in {'metadata', 'cancelled'}:
+        raise HTTPException(status_code=404, detail='Generation audit not found or expired')
+    raw_audit = store.get(generation_audit_key(run_id, job_id))
+    if not raw_audit:
+        raise HTTPException(status_code=404, detail='Generation audit not found or expired')
+    metadata = json.loads(records['metadata'])
+    audit = json.loads(raw_audit)
+    _add_prepared_document_to_legacy_audit(audit, job_id, user.id)
+    log = {
+        'format': f'paddledoc-dataset-generation-log-v{audit.get("audit_schema_version", 1)}',
+        'note': ('LLM-API-Anfragen und -Antworten ohne HTTP-Header und Zugangsdaten protokolliert.'
+                 if 'llm_http_events' in audit else
+                 'Älterer Lauf: Die internen LLM-API-Anfragen von RAGAS wurden nicht protokolliert.'),
+        'limitations': (
+            ['Dieser ältere Lauf hat noch keine Ergebnisse und Ursachen je Dokumentbereich aufgezeichnet.']
+            if 'region_results' not in audit else []
+        ),
+        'run_id': run_id, 'job_id': job_id,
+        'settings': {key: value for key, value in metadata.items() if key != 'owner_id'},
+        'result': json.loads(records[job_id]),
+        'audit': audit,
+    }
+    return Response(
+        content=json.dumps(log, ensure_ascii=False, indent=2),
+        media_type='application/json',
+        headers={
+            'Content-Disposition': 'attachment; filename="dataset-generation-log.json"',
+            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        },
+    )
 
 
 @router.post('/evaluation-datasets/generation/{run_id}/cancel')
@@ -2316,6 +2454,10 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid markdown path')
     if not candidate.exists() or not candidate.is_file() or candidate.suffix.lower() != '.md':
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+    picture_text_blocks_removed = count_picture_text_blocks(
+        candidate.read_text(encoding='utf-8')
+    )
+
 
     try:
         document = ingest_markdown_file(
@@ -2373,6 +2515,7 @@ def ingest_markdown_into_encourage(payload: EncourageIngestRequest) -> Encourage
         source_markdown={
             'path': str(candidate),
             'filename': candidate.name,
+            'picture_text_blocks_removed': picture_text_blocks_removed,
             'document_count': document['document_count'],
             'chunk_preview': document.get('document_dump', {}).get('chunk_preview', []),
         },

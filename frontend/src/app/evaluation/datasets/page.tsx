@@ -14,6 +14,7 @@ type DatasetEntry = {
   source_file_sha256?: string | null;
   source_markdown_sha256?: string | null;
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
 type MarkdownEntry = {

@@ -60,9 +60,13 @@ class Settings(BaseSettings):
     celery_broker_visibility_timeout_seconds: int = 1800
     openai_api_base_url: str = ''
     openai_api_bearer_token: str = ''
+    openai_model: str = 'gpt-6.1-sol'
     dataset_llm_api_base_url: str = ''
     dataset_llm_api_key: str = ''
     dataset_llm_model: str = 'qwen2.5:14b'
+    hcds_api_base_url: str = 'https://llm.api.hcds.uni-hamburg.de/v1'
+    hcds_api_bearer_token: str = ''
+    hcds_model: str = 'vllm/deepseek-ai/DeepSeek-V4.1-Flash'
     # OpenAI gold pipeline (Batch API): generator also adjudicates FAIL/UNCERTAIN verdicts.
     openai_gold_generator_model: str = 'gpt-6.1-sol'
     openai_gold_validator_model: str = 'gpt-6-luna'

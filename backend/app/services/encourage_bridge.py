@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping
+
+from app.services.rag_text_preprocessing import prepare_rag_text
 
 
 _RAG_PIPELINES: dict[str, Any] = {}
@@ -536,6 +538,33 @@ def _configure_encourage_mlflow_tracing() -> None:
         return
 
 
+def _load_rag_source_documents(path: Path) -> list[Any]:
+    """Load the Markdown source as an immutable, retrieval-safe view."""
+
+    loader_cls = _markdown_ingestion_class()
+    raw_documents = loader_cls(chunk_documents=False).load(path)
+    if not raw_documents:
+        return []
+
+    prepare_encourage_runtime()
+    from encourage.prompts.context import Document  # type: ignore[reportMissingImports]
+    from encourage.prompts.meta_data import MetaData  # type: ignore[reportMissingImports]
+
+    documents: list[Any] = []
+    for raw_document in raw_documents:
+        tags = dict(raw_document.meta_data.to_dict(truncated=False))
+        documents.append(
+            Document(
+                id=raw_document.id,
+                content=prepare_rag_text(str(raw_document.content)),
+                score=raw_document.score,
+                distance=raw_document.distance,
+                meta_data=MetaData(tags=tags),
+            )
+        )
+    return documents
+
+
 def ingest_markdown_file(
     path: Path,
     *,
@@ -543,15 +572,13 @@ def ingest_markdown_file(
     include_frontmatter: bool = False,
     embedding_model: str = 'default',
 ) -> dict[str, Any]:
-    loader_cls = _markdown_ingestion_class()
     method_key = _normalize_rag_method_name(rag_method)
     resolved_embedding_model = _normalize_embedding_model_name(embedding_model)
     rag_cls, rag_config_cls, method_label = _rag_pipeline_components(
         method_key,
         resolved_embedding_model,
     )
-    source_loader = loader_cls()
-    source_documents = source_loader.load(path)
+    source_documents = _load_rag_source_documents(path)
     if not source_documents:
         raise RuntimeError(f'No encourage documents created from markdown file: {path}')
 
@@ -696,7 +723,6 @@ def load_markdown_chunks(
     chunk_overlap_chars: int | None = None,
     include_frontmatter: bool = False,
 ) -> list[Any]:
-    loader_cls = _markdown_ingestion_class()
     resolved_chunk_max_chars, resolved_chunk_overlap_chars = _resolve_chunk_settings(
         chunk_max_chars=chunk_max_chars,
         chunk_overlap_chars=chunk_overlap_chars,
@@ -707,7 +733,7 @@ def load_markdown_chunks(
     # Load only the source document here and keep PaddleDoc's retrieval
     # chunking stable across Encourage versions. This is important for both
     # reproducible evaluations and the heading/table context guarantees above.
-    source_documents = loader_cls(chunk_documents=False).load(path)
+    source_documents = _load_rag_source_documents(path)
     if not source_documents:
         raise RuntimeError(f'Encourage chunking produced no content for markdown file: {path}')
 
@@ -726,7 +752,7 @@ def load_markdown_chunks(
             source_path = Path(
                 str(source_document.meta_data['filepath'] or path)
             ).expanduser()
-            frontmatter = _read_frontmatter_text(source_path)
+            frontmatter = prepare_rag_text(_read_frontmatter_text(source_path))
             if frontmatter:
                 chunk_texts.insert(0, f'# Dokumentmetadaten\n\n{frontmatter}')
 
@@ -892,6 +918,7 @@ def create_llm_runner(
     top_p: float = 1.0,
     max_workers: int = 2,
     batch_size: int = 4,
+    request_headers: Mapping[str, str] | None = None,
 ) -> Any:
     api_key_clean = api_key.strip()
     if not api_key_clean:
@@ -914,7 +941,7 @@ def create_llm_runner(
         temperature=temperature,
         top_p=top_p,
     )
-    return runner_cls(
+    runner = runner_cls(
         sampling_parameters=sampling_params,
         model_name=model_name_clean,
         base_url=api_base,
@@ -922,6 +949,18 @@ def create_llm_runner(
         max_workers=max(1, int(max_workers)),
         batch_size=max(1, int(batch_size)),
     )
+    if request_headers:
+        # Encourage currently cannot pass custom headers to its runner. Replace
+        # the not-yet-used client with an equivalent configured SDK client.
+        from openai import OpenAI
+
+        runner.client.close()
+        runner.client = OpenAI(
+            base_url=api_base,
+            api_key=api_key_clean,
+            default_headers=dict(request_headers),
+        )
+    return runner
 
 
 def retrieve_from_pipeline(

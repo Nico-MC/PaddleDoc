@@ -5,13 +5,14 @@ import hashlib
 import json
 import random
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from openai import OpenAI
 
 from app.services.encourage_bridge import create_llm_runner
 from app.services.openwebui import list_models as list_openwebui_models
+from app.services.rag_text_preprocessing import prepare_rag_text
 
 
 _PASSAGE_MAX_CHARS = 2_500
@@ -39,12 +40,16 @@ def _normalize_dataset_api_base_url(api_base_url: str) -> str:
     return f'{cleaned}/api'
 
 
-def list_dataset_models(*, api_base_url: str, api_key: str) -> list[str]:
+def list_dataset_models(
+    *, api_base_url: str, api_key: str,
+    request_headers: Mapping[str, str] | None = None,
+) -> list[str]:
     normalized_url = _normalize_dataset_api_base_url(api_base_url)
     try:
         if normalized_url.endswith('/v1'):
             with OpenAI(
                 base_url=normalized_url, api_key=api_key, timeout=10.0, max_retries=0,
+                default_headers=dict(request_headers or {}),
             ) as client:
                 models = client.models.list()
                 return sorted({
@@ -131,6 +136,9 @@ def _markdown_passages(markdown: str) -> list[_Passage]:
 def _sampling_regions(
     passages: list[_Passage], question_count: int, seed: int,
 ) -> tuple[str, list[list[_Passage]]]:
+    from app.services.generation_source_filter import filter_generation_passages
+
+    passages, _ = filter_generation_passages(passages)
     usable = [passage for passage in passages if (
         not re.search(r'inhaltsverzeichnis|table of contents', passage.anchor, re.IGNORECASE)
         and re.search(r'[^\W\d_]{2,}', passage.text)
@@ -215,18 +223,25 @@ def _completion_json(
             'Falls keine Fragen belegbar sind, gib {"questions":[]} zurueck.'
         ) if attempt else ''
         try:
-            completion = runner.client.chat.completions.create(
-                model=model_name,
-                messages=[
+            request: dict[str, Any] = {
+                'model': model_name,
+                'messages': [
                     {'role': 'system', 'content': system_prompt + retry_instruction},
                     {'role': 'user', 'content': user_prompt},
                 ],
-                max_tokens=token_limit,
-                temperature=0.0,
-                top_p=1.0,
-                seed=getattr(runner.sampling_parameters, 'seed', None),
                 **({'response_format': {'type': 'json_object'}} if json_mode else {}),
-            )
+            }
+            if getattr(runner, 'openai_native', False):
+                request['max_completion_tokens'] = token_limit
+            else:
+                request.update(
+                    max_tokens=token_limit,
+                    temperature=0.0,
+                    top_p=1.0,
+                    seed=getattr(runner.sampling_parameters, 'seed', None),
+                )
+            completion = runner.client.chat.completions.create(**request)
+
             choice = completion.choices[0]
             content = choice.message.content
         except Exception as exc:
@@ -354,18 +369,21 @@ def generate_dataset_rows(
     focus: str = '',
     sampling_seed: int | None = None,
     progress_callback: Callable[[dict[str, int | str]], None] | None = None,
+    request_headers: Mapping[str, str] | None = None,
+    openai_native: bool = False,
 ) -> list[dict[str, Any]]:
     if not api_base_url.strip() or not api_key.strip():
         raise ValueError('Dataset generation endpoint is not configured.')
     if not 1 <= question_count <= 30:
         raise ValueError('Question count must be between 1 and 30.')
     styles = QUESTION_STYLES
+    source_markdown_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    markdown = prepare_rag_text(markdown)
     if question_style not in styles:
         raise ValueError('Unknown question style.')
     passages = _markdown_passages(markdown)
     if not passages:
         raise ValueError('The document contains no usable text passages.')
-    source_markdown_sha256 = hashlib.sha256(markdown.encode('utf-8')).hexdigest()
     runner = create_llm_runner(
         api_base_url=_normalize_dataset_api_base_url(api_base_url),
         api_key=api_key,
@@ -375,7 +393,9 @@ def generate_dataset_rows(
         top_p=1.0,
         max_workers=1,
         batch_size=1,
+        request_headers=request_headers,
     )
+    runner.openai_native = openai_native
     seed = sampling_seed if sampling_seed is not None else random.SystemRandom().randrange(2**31)
     sampling_method, regions = _sampling_regions(passages, question_count, seed)
     rows: list[dict[str, Any]] = []
@@ -523,6 +543,7 @@ def prepare_dataset_answer(
     model_name: str | None = None,
 ) -> dict[str, Any]:
     question_clean = question.strip()
+    markdown = prepare_rag_text(markdown)
     if not question_clean:
         raise ValueError('Question must not be empty.')
     if not markdown.strip():

@@ -289,6 +289,18 @@ def test_sampling_excludes_contents_and_empty_material():
     assert [passage.text for region in regions for passage in region] == ['42 Euro.']
 
 
+def test_sampling_excludes_table_index_but_keeps_actual_table():
+    markdown = (
+        '<!-- page:1/2 -->\n\n## Tabellen- und Abbildungsverzeichnis\n\n'
+        'Tabelle 17: Solvabilitätsübersicht .... 2\n\n'
+        '<!-- page:2/2 -->\n\n## Solvabilitätsübersicht\n\n'
+        'Die Tabelle 17 nennt Eigenmittel in Höhe von 42 und ein SCR von 30.'
+    )
+    passages = dataset_assistant._markdown_passages(markdown)
+    _, regions = dataset_assistant._sampling_regions(passages, 2, 42)
+    assert [passage.page_number for region in regions for passage in region] == [2]
+
+
 def test_generation_distributes_ten_questions_across_seventy_pages(monkeypatch):
     markdown = '\n\n'.join(f'## Page {page}\n\nLeistung auf Seite {page} ist versichert.' for page in range(1, 71))
     monkeypatch.setattr(dataset_assistant, 'create_llm_runner', lambda **_: SimpleNamespace())

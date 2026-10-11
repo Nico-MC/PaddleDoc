@@ -48,6 +48,7 @@ type EncourageIngestResponse = {
     filename: string;
     document_count: number;
     chunk_preview: string[];
+    picture_text_blocks_removed: number;
   };
   document: EncourageDocument;
   pipeline: {
@@ -772,6 +773,18 @@ export default function EncouragePage() {
               </Button>
             </div>
 
+            {isIngesting && (
+              <div role="status" className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950">
+                <p className="font-medium">RAG-Kontext wird vorbereitet und indexiert.</p>
+                <p className="mt-1 text-xs text-blue-800">Das Original-Markdown bleibt unverändert. Die Schritte laufen serverseitig nacheinander.</p>
+                <ol className="mt-3 grid gap-1 text-xs sm:grid-cols-3">
+                  <li>1. Grafiktextblöcke aus dem RAG-Kontext entfernen</li>
+                  <li>2. Bereinigte Chunks erzeugen</li>
+                  <li>3. Embeddings und Index anlegen</li>
+                </ol>
+              </div>
+            )}
+
             {ingested && (
               <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
                 <p className="font-medium text-emerald-900">✓ Markdown indexiert</p>
@@ -786,6 +799,12 @@ export default function EncouragePage() {
                 <p className="mt-1 text-xs text-emerald-700">
                   Method: <strong>{ingested.pipeline.rag_method}</strong>
                 </p>
+                <p className="mt-2 text-xs text-emerald-800">
+                  {ingested.source_markdown.picture_text_blocks_removed > 0
+                    ? `RAG-Aufbereitung: ${ingested.source_markdown.picture_text_blocks_removed} Grafiktextblock${ingested.source_markdown.picture_text_blocks_removed === 1 ? "" : "e"} wurde${ingested.source_markdown.picture_text_blocks_removed === 1 ? "" : "n"} vor dem Chunking ausgeschlossen.`
+                    : "RAG-Aufbereitung: Keine vollständigen Grafiktextblöcke im Markdown gefunden."}
+                </p>
+
 
                 <div className="mt-3 rounded-lg border border-emerald-200 bg-white p-3">
                   <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
