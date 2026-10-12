@@ -560,12 +560,16 @@ def test_ragas_generation_uses_hcds_and_worker_path(monkeypatch):
     run_id, calls = _start(
         monkeypatch, store, [_job()], pipeline='ragas',
         ragas_query_mode='mixed', ragas_context_chars=800, ragas_passage_tries=5,
+        ragas_persona_name='Fachprüfung',
+        ragas_persona_role_description='Prüft dokumentierte Versicherungsleistungen.',
     )
     metadata = json.loads(store.hget(dataset_tasks.generation_key(run_id), 'metadata'))
     assert metadata['pipeline'] == 'ragas'
     assert metadata['provider'] == 'hcds'
     assert metadata['ragas_options'] == {
         'query_mode': 'mixed', 'context_chars': 800, 'passage_tries': 5,
+        'persona_name': 'Fachprüfung',
+        'persona_role_description': 'Prüft dokumentierte Versicherungsleistungen.',
     }
     assert calls == [{'args': [run_id, 'job-1'], 'queue': 'datasets'}]
 
@@ -623,11 +627,13 @@ def test_ragas_generation_uses_hcds_and_worker_path(monkeypatch):
         return [row], {'candidates': 1, 'accepted': 1, 'review': 0, 'rejected': 0, 'details': []}
     monkeypatch.setattr(dataset_tasks, 'validate_ragas_dataset_rows', validate)
     saved_rows = []
-    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: saved_rows.extend(rows) or {'path': f'docs/evaluation/{filename}'})
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows, **kwargs: saved_rows.extend(rows) or {'path': f'docs/evaluation/{filename}'})
     dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
     result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
     assert result['pipeline'] == 'ragas'
     assert result['ragas_options'] == metadata['ragas_options']
+    assert captured[0]['persona_name'] == 'Fachprüfung'
+    assert captured[0]['persona_role_description'] == 'Prüft dokumentierte Versicherungsleistungen.'
     assert result['items'][0]['status'] == 'completed'
     assert result['items'][0]['validation_summary']['accepted'] == 1
     assert result['items'][0]['warning'] == '1 von 10 Fragen gespeichert. Bereich 1: keine neue belegbare Frage erhalten.'
@@ -727,7 +733,7 @@ def test_ragas_validation_uses_separately_selected_provider_and_model(monkeypatc
             {'candidates': 1, 'accepted': 1, 'review': 0, 'rejected': 0, 'details': []},
         )
     ))
-    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: {
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows, **kwargs: {
         'path': f'docs/evaluation/{filename}',
     })
 
@@ -765,19 +771,27 @@ def test_ragas_partial_result_records_rejected_candidate_in_dataset(monkeypatch)
         ]},
     ))
     saved_rows = []
-    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', lambda filename, rows: (
-        saved_rows.extend(rows) or {'path': f'docs/evaluation/{filename}'}
-    ))
+    saved_options = []
+    def save(filename, rows, **kwargs):
+        saved_rows.extend(rows)
+        saved_options.append(kwargs)
+        return {'path': f'docs/evaluation/{filename}'}
+    monkeypatch.setattr(dataset_tasks, 'save_evaluation_dataset', save)
     dataset_tasks.generate_document_dataset.run(run_id, 'job-1')
     outcome = saved_rows[0]['generation_outcome']
     assert outcome['target'] == 10
     assert outcome['generated'] == 2
     assert outcome['saved'] == 1
     assert outcome['rejected_candidates'] == [
-        {'id': 'q002', 'question': 'Frage 2?', 'reason': 'Faithfulness 0.11 unter Ablehnungsgrenze 0.50',
+        {'id': 'q002', 'reason': 'Faithfulness 0.11 unter Ablehnungsgrenze 0.50',
          'faithfulness': 0.11, 'answer_relevancy': 0.91},
     ]
     assert all(row['id'] != 'q002' for row in saved_rows)
+    assert saved_options[0]['generation_run_id'] == run_id
+    assert saved_options[0]['rejected_candidates'][0]['row'] == candidates[1]
+    assert saved_options[0]['rejected_candidates'][0]['reason'] == 'Faithfulness 0.11 unter Ablehnungsgrenze 0.50'
+    result = routes.dataset_generation_status(run_id, SimpleNamespace(id='user-1'))
+    assert result['items'][0]['validation_summary']['details'][0]['question'] == 'Frage 2?'
 
 
 def test_ragas_validation_rejects_unavailable_model(monkeypatch):

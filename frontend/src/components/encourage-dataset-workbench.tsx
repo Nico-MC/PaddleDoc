@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Archive, Download, RotateCcw, Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DatasetGenerator } from '@/components/dataset-generator';
-import { RagasValidationInfo, RagasValidationSummary } from '@/components/ragas-validation-info';
+import { DatasetQuestionReview } from '@/components/dataset-question-review';
 import { apiFetch } from '@/lib/api';
 
 type DatasetEntry = {
@@ -19,7 +19,7 @@ type DatasetEntry = {
   updated_at?: string | null;
 };
 
-type DatasetDetail = DatasetEntry & { rows: Record<string, unknown>[] };
+type DatasetDetail = DatasetEntry & { rows: Record<string, unknown>[]; rejected_candidates?: Record<string, unknown>[] };
 
 type MarkdownEntry = {
   path: string;
@@ -42,6 +42,11 @@ type Props = {
 };
 
 const sourceFilename = (path: string) => path.split('/').at(-1) || path;
+const exportableRows = (rows: Record<string, unknown>[]) => rows.filter(
+  (row) => row.review_decision !== 'excluded'
+    && (row.validation_status !== 'review' || row.review_decision === 'included'),
+);
+
 
 const formatCreatedAt = (value?: string | null) => {
   if (!value) return 'Erstellungszeitpunkt nicht erfasst';
@@ -113,8 +118,10 @@ export function EncourageDatasetWorkbench({
       .filter(Boolean);
   };
 
-  const decideQuestion = async (rowId: string, decision: 'included' | 'excluded') => {
-    if (!details?.updated_at) return;
+  const decideQuestion = async (
+    rowId: string, decision: 'included' | 'excluded', reason?: string, note?: string,
+  ): Promise<boolean> => {
+    if (!details?.updated_at) return false;
     setDecidingRowId(rowId);
     setLocalError(null);
     setMessage(null);
@@ -124,7 +131,7 @@ export function EncourageDatasetWorkbench({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dataset_path: details.path, row_id: rowId, decision,
-          expected_updated_at: details.updated_at,
+          expected_updated_at: details.updated_at, reason, note,
         }),
       });
       if (!response.ok) {
@@ -136,10 +143,12 @@ export function EncourageDatasetWorkbench({
       setDetails(saved);
       await onDatasetSaved(saved.path);
       setMessage(rowId + (decision === 'included'
-        ? ' bleibt für die Evaluation zugelassen.'
-        : ' wird bei der Evaluation ausgeschlossen. Die Entscheidung bleibt im JSONL dokumentiert.'));
+        ? ' wurde für die Evaluation bestätigt.'
+        : ' wurde aus der Evaluation genommen und im Fragenarchiv gesichert.'));
+      return true;
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : 'Backend beim Speichern nicht erreichbar.');
+      return false;
     } finally {
       setDecidingRowId(null);
     }
@@ -152,13 +161,20 @@ export function EncourageDatasetWorkbench({
       const response = await apiFetch('/api/v1/evaluation-datasets/' + encodeURI(dataset.path), { cache: 'no-store' });
       if (!response.ok) throw new Error('Dataset konnte nicht geladen werden.');
       const loaded = (await response.json()) as DatasetDetail;
-      const jsonl = loaded.rows.map((row) => JSON.stringify(row)).join('\n') + '\n';
+      if (loaded.row_count !== loaded.rows.length) {
+        throw new Error('Dataset-Zähler und gespeicherte Fragen stimmen nicht überein. Download abgebrochen.');
+      }
+      const activeRows = exportableRows(loaded.rows);
+      if (activeRows.length === 0) throw new Error('Keine für die Evaluation zugelassenen Fragen vorhanden.');
+      const jsonl = activeRows.map((row) => JSON.stringify(row)).join('\n') + '\n';
       const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
       const link = document.createElement('a');
       link.href = url;
       link.download = loaded.filename;
       link.click();
       URL.revokeObjectURL(url);
+      if (loaded.path === selectedDatasetPath) setDetails(loaded);
+      setMessage(loaded.filename + ': ' + activeRows.length + ' zugelassene Fragen heruntergeladen. Archivierte Fragen bleiben im Fragenarchiv.');
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : 'Dataset konnte nicht heruntergeladen werden.');
     } finally {
@@ -249,7 +265,7 @@ export function EncourageDatasetWorkbench({
               if (next) void loadArchivedDatasets();
               else if (!datasets.some((dataset) => dataset.path === selectedDatasetPath)) onSelectDataset(datasets[0]?.path ?? '');
             }}>
-              {showArchivedDatasets ? 'Aktive Datasets' : 'Archiv' + (archivedDatasets.length ? ' (' + archivedDatasets.length + ')' : '')}
+              {showArchivedDatasets ? 'Aktive Datasets' : 'Dataset-Archiv' + (archivedDatasets.length ? ' (' + archivedDatasets.length + ')' : '')}
             </Button>
           </div>
           <div className="mt-4 grid gap-2">
@@ -281,41 +297,11 @@ export function EncourageDatasetWorkbench({
           {isLoadingDetails ? <p className="text-sm text-slate-500">Dataset wird geladen…</p>
             : details ? <>
               <h3 className="text-lg font-semibold text-slate-950">{details.filename}</h3>
-              <p className="mt-1 text-sm text-slate-500">{details.row_count} Fragen gespeichert · Original: {details.source_files.map(sourceFilename).join(', ') || 'nicht zugeordnet'}</p>
-              <RagasValidationSummary rows={details.rows} />
-              <div className="mt-4 max-h-[36rem] space-y-3 overflow-y-auto pr-1">
-                {details.rows.map((row, index) => {
-                  const rowId = String(row.id ?? 'Frage ' + (index + 1));
-                  const needsDecision = row.generation_pipeline === 'ragas' && row.validation_status === 'review';
-                  const decision = String(row.review_decision ?? 'pending');
-                  return <article key={rowId} className={'rounded-xl border p-4 ' + (decision === 'excluded' ? 'border-slate-200 bg-slate-50' : 'border-purple-100 bg-purple-50/40')}>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-purple-700">{rowId}</p>
-                    <p className="mt-1 font-medium text-slate-900">{String(row.question ?? '')}</p>
-                    <p className="mt-3 text-xs font-semibold text-slate-600">Goldantwort</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{String(row.gold_answer ?? '')}</p>
-                    {Boolean(row.evidence_quote) && <p className="mt-3 whitespace-pre-wrap rounded-lg bg-white p-3 text-xs text-slate-600">{String(row.evidence_quote)}</p>}
-                    <RagasValidationInfo row={row} />
-                    {needsDecision && !showArchivedDatasets && <div className="mt-3 rounded-lg border border-amber-200 bg-white p-3 text-xs">
-                      <p className="mb-2 text-slate-700">Für die Evaluation verwenden? Die Frage und deine Entscheidung bleiben im JSONL erhalten.</p>
-                      <div className="flex flex-wrap gap-2">
-                        <Button type="button" size="sm" variant={decision === 'included' ? 'default' : 'outline'}
-                          disabled={decidingRowId !== null || !details.updated_at}
-                          aria-pressed={decision === 'included'}
-                          onClick={() => void decideQuestion(rowId, 'included')}>Behalten</Button>
-                        <Button type="button" size="sm" variant={decision === 'excluded' ? 'default' : 'outline'}
-                          disabled={decidingRowId !== null || !details.updated_at}
-                          aria-pressed={decision === 'excluded'}
-                          onClick={() => void decideQuestion(rowId, 'excluded')}>Ausschließen</Button>
-                      </div>
-                    </div>}
-                    <div className="mt-3 grid gap-1 text-xs text-slate-500">
-                      <p>Original: {sourceFilename(String(row.source_file ?? '')) || 'nicht zugeordnet'}</p>
-                      {typeof row.source_page === 'number' && <p>Seite: {row.source_page}</p>}
-                      {Boolean(row.evidence_anchor) && <p>Abschnitt: {String(row.evidence_anchor)}</p>}
-                    </div>
-                  </article>;
-                })}
-              </div>
+              <p className="mt-1 text-sm text-slate-500">{details.row_count} insgesamt · {exportableRows(details.rows).length} für die Evaluation zugelassen · {details.rows.filter((row) => row.review_decision === 'excluded').length} archiviert · Original: {details.source_files.map(sourceFilename).join(', ') || 'nicht zugeordnet'}</p>
+              <Button type="button" size="sm" variant="outline" className="mt-3" disabled={isDatasetActionRunning} onClick={() => void downloadDataset(details)}>
+                <Download className="mr-2 h-4 w-4" />Zugelassene Fragen herunterladen ({exportableRows(details.rows).length})
+              </Button>
+              <DatasetQuestionReview key={details.path} dataset={details} onDecide={decideQuestion} decidingRowId={decidingRowId} />
             </> : <p className="text-sm text-slate-500">Wähle ein Dataset aus.</p>}
         </section>
       </>}

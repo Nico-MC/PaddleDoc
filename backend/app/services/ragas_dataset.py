@@ -11,6 +11,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.schemas.jobs import DEFAULT_RAGAS_PERSONA_NAME, DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION
 from app.services.dataset_assistant import (
     QUESTION_STYLES,
     _Passage,
@@ -96,6 +97,8 @@ def generate_ragas_dataset_rows(
     query_mode: str = 'facts',
     context_chars: int = DEFAULT_CONTEXT_CHARS,
     passage_tries: int = DEFAULT_PASSAGE_TRIES,
+    persona_name: str = DEFAULT_RAGAS_PERSONA_NAME,
+    persona_role_description: str = DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION,
     progress_callback: Callable[[dict[str, int | str]], None] | None = None,
     audit_callback: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
@@ -112,6 +115,10 @@ def generate_ragas_dataset_rows(
         raise ValueError('Ragas context length must be 800, 1400 or 2400 characters.')
     if not 1 <= passage_tries <= 5:
         raise ValueError('Ragas passage attempts must be between 1 and 5.')
+    persona_name = persona_name.strip()
+    persona_role_description = persona_role_description.strip()
+    if not persona_name or not persona_role_description:
+        raise ValueError('Ragas generation persona must have a name and role description.')
     if not api_key or not api_base_url or not model_name:
         raise ValueError('HCDS model configuration is incomplete.')
 
@@ -188,8 +195,8 @@ def generate_ragas_dataset_rows(
         ]
         embeddings = _local_embeddings()
         persona = Persona(
-            name='Deutschsprachige Nutzerin',
-            role_description='Stellt natürliche, präzise Fragen zum vorliegenden Dokument auf Deutsch.',
+            name=persona_name,
+            role_description=persona_role_description,
         )
         synthesizers = {
             mode: SingleHopSpecificQuerySynthesizer(
@@ -222,6 +229,8 @@ def generate_ragas_dataset_rows(
                         'region': region_index, 'query_mode': region_query_mode,
                         'question_quota': quota, 'context': context,
                         'context_instruction': context_instruction,
+                        'persona_name': persona.name,
+                        'persona_role_description': persona.role_description,
                     })
                 attempts += 1
                 request_scope.update(region=region_index, passage_id=passage.id,
@@ -305,6 +314,8 @@ def generate_ragas_dataset_rows(
                         'generation_pipeline': 'ragas',
                         'generation_question_target': question_count,
                         'ragas_synthesizer': sample.get('synthesizer_name'),
+                        'ragas_persona_name': sample.get('persona_name') or persona.name,
+                        'ragas_persona_role_description': persona.role_description,
                         'ragas_query_mode': region_query_mode,
                         'ragas_context_chars': context_chars,
                         'ragas_passage_tries': passage_tries,

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.models import JobStatus
 
@@ -221,6 +221,7 @@ class EvaluationDatasetDetailResponse(BaseModel):
     size_bytes: int
     updated_at: datetime
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    rejected_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EvaluationDatasetWriteRequest(BaseModel):
@@ -233,6 +234,11 @@ class EvaluationDatasetReviewDecisionRequest(BaseModel):
     row_id: str = Field(min_length=1)
     decision: Literal['included', 'excluded']
     expected_updated_at: datetime
+    reason: Literal[
+        'not_answerable', 'incorrect_answer', 'incomplete_answer', 'unclear_question',
+        'not_standalone', 'uninformative', 'duplicate', 'other',
+    ] | None = None
+    note: str = Field(default='', max_length=1000)
 
 
 class EvaluationDatasetArchiveRequest(BaseModel):
@@ -245,6 +251,18 @@ class EvaluationDatasetAiAssistRequest(BaseModel):
     model_name: str | None = Field(default=None, max_length=255)
 
 
+DEFAULT_RAGAS_PERSONA_NAME = 'Sachbearbeiter:in der HanseMerkur'
+DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION = (
+    'Arbeitet in der Sachbearbeitung der HanseMerkur und stellt auf Deutsch '
+    'präzise, praxisnahe Fragen zum vorliegenden Dokument. Fragt nur nach '
+    'Informationen, die im bereitgestellten Abschnitt belegbar sind.'
+)
+
+
+class EvaluationDatasetQualityCriteriaUpdate(BaseModel):
+    criteria: dict[str, str] = Field(min_length=6, max_length=6)
+
+
 class EvaluationDatasetGenerateRequest(BaseModel):
     markdown_paths: list[str] = Field(min_length=1, max_length=1000)
     model_name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -252,6 +270,7 @@ class EvaluationDatasetGenerateRequest(BaseModel):
     validation_provider: str | None = Field(default=None, min_length=1, max_length=64)
     validation_model_name: str | None = Field(default=None, min_length=1, max_length=255)
     pipeline: Literal['standard', 'ragas', 'openai-gold', 'openai-gold-direct'] = 'standard'
+    ragas_validate: bool = True
     question_count: int = Field(default=10, ge=1, le=30)
     sampling_seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
     question_style: Literal['user-paraphrases', 'contract-language', 'mixed-questions'] = 'user-paraphrases'
@@ -259,8 +278,20 @@ class EvaluationDatasetGenerateRequest(BaseModel):
     ragas_query_mode: Literal['facts', 'themes', 'mixed'] = 'facts'
     ragas_context_chars: Literal[800, 1400, 2400] = 1400
     ragas_passage_tries: int = Field(default=3, ge=1, le=5)
+    ragas_persona_name: str = Field(default=DEFAULT_RAGAS_PERSONA_NAME, min_length=1, max_length=120)
+    ragas_persona_role_description: str = Field(
+        default=DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION, min_length=1, max_length=500,
+    )
     skip_existing: bool = True
     overwrite_datasets: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator('ragas_persona_name', 'ragas_persona_role_description')
+    @classmethod
+    def non_blank_ragas_persona(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError('The RAGAS generation persona must not be blank.')
+        return value
 
 
 class EvaluationDatasetAiAssistResponse(BaseModel):

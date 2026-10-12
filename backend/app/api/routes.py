@@ -27,6 +27,7 @@ from app.models.models import (
     Team,
     User,
     UserRole,
+    UserValidationCriteria,
     VlConnection,
     WebhookConnection,
 )
@@ -50,6 +51,7 @@ from app.schemas.jobs import (
     EvaluationDatasetAiAssistRequest,
     EvaluationDatasetAiAssistResponse,
     EvaluationDatasetGenerateRequest,
+    EvaluationDatasetQualityCriteriaUpdate,
     EvaluationDatasetBrowserResponse,
     EvaluationDatasetDetailResponse,
     EvaluationDatasetWriteRequest,
@@ -91,6 +93,7 @@ from app.services.encourage_evaluation import (
     DatasetVersionConflict,
     get_evaluation_dataset_details,
     list_evaluation_datasets,
+    list_archived_dataset_questions,
     list_evaluation_source_documents,
     restore_evaluation_dataset,
     run_encourage_evaluation,
@@ -101,6 +104,7 @@ from app.services import gold_pipeline
 from app.services.dataset_assistant import list_dataset_models, prepare_dataset_answer
 from app.services.hcds import DatasetLLMEndpoint, resolve_dataset_llm, resolve_dataset_llm_providers
 from app.services.openai_provider import OpenAIProviderClient
+from app.services.ragas_validation import QUALITY_CRITERIA, normalize_quality_criteria
 from app.services.rag_text_preprocessing import (
     prepare_rag_text,
     prepare_rag_text_with_report,
@@ -1566,6 +1570,28 @@ def dashboard_stats(db: Session = Depends(get_db), user: User = Depends(get_curr
     )
 
 
+@router.get('/jobs/{job_id}/source-pdf')
+def preview_source_pdf(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='PDF not found')
+    _require_visible(db, job, user)
+    if Path(job.original_filename).suffix.lower() != '.pdf' or not job.upload_content:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='PDF not available')
+    return Response(
+        content=job.upload_content, media_type='application/pdf',
+        headers={
+            'Content-Disposition': f'inline; filename="{job.id}.pdf"',
+            'Cache-Control': 'private, no-store',
+            'X-Content-Type-Options': 'nosniff',
+        },
+    )
+
+
 @router.get('/jobs/{job_id}/download')
 def download_markdown(
     job_id: str,
@@ -2030,6 +2056,22 @@ def list_archived_evaluation_dataset_files() -> EvaluationDatasetBrowserResponse
     return EvaluationDatasetBrowserResponse(items=list_evaluation_datasets(archived=True))
 
 
+@router.get('/evaluation-datasets/question-archive')
+def list_document_question_archive(
+    markdown_path: str = Query(min_length=1, max_length=4096),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict[str, list[dict]]:
+    job = db.get(Job, Path(markdown_path).stem, options=[defer(Job.upload_content)])
+    if (
+        job is None or job.status != JobStatus.FINISHED
+        or _synthetic_markdown_path(job) != markdown_path
+        or not _owner_visible(db, job.owner_id, user)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Markdown file not found')
+    return {'items': list_archived_dataset_questions(markdown_path)}
+
+
 @router.post('/evaluation-datasets/archive/restore', response_model=EvaluationDatasetDetailResponse)
 def restore_archived_evaluation_dataset(
     payload: EvaluationDatasetArchiveRequest,
@@ -2053,11 +2095,24 @@ def restore_archived_evaluation_dataset(
 def decide_evaluation_dataset_question(
     payload: EvaluationDatasetReviewDecisionRequest,
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> EvaluationDatasetDetailResponse:
     try:
+        source_documents = get_evaluation_dataset_details(payload.dataset_path)['source_documents']
+        if len(source_documents) != 1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Source document not found')
+        source_document = source_documents[0]
+        source_job = db.get(Job, Path(source_document).stem, options=[defer(Job.upload_content)])
+        if (
+            source_job is None or source_job.status != JobStatus.FINISHED
+            or _synthetic_markdown_path(source_job) != source_document
+            or not _owner_visible(db, source_job.owner_id, user)
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Source document not found')
         result = set_evaluation_dataset_review_decision(
             payload.dataset_path, payload.row_id, payload.decision,
             expected_updated_at=payload.expected_updated_at, decided_by=user.id,
+            reason=payload.reason, note=payload.note,
         )
         return EvaluationDatasetDetailResponse(**result)
     except FileNotFoundError as exc:
@@ -2152,6 +2207,49 @@ def _dataset_provider_models(endpoint: DatasetLLMEndpoint) -> list[str]:
     )
 
 
+def _user_quality_criteria(db: Session, user: User) -> dict[str, str]:
+    stored = db.get(UserValidationCriteria, user.id)
+    return normalize_quality_criteria(stored.criteria) if stored else dict(QUALITY_CRITERIA)
+
+
+def _quality_criteria_settings(db: Session, user: User) -> dict:
+    criteria = _user_quality_criteria(db, user)
+    return {
+        'criteria': criteria,
+        'defaults': dict(QUALITY_CRITERIA),
+        'customized': criteria != QUALITY_CRITERIA,
+    }
+
+
+@router.get('/evaluation-datasets/generation/quality-criteria')
+def get_dataset_quality_criteria(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+) -> dict:
+    return _quality_criteria_settings(db, user)
+
+
+@router.put('/evaluation-datasets/generation/quality-criteria')
+def update_dataset_quality_criteria(
+    payload: EvaluationDatasetQualityCriteriaUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    try:
+        criteria = normalize_quality_criteria(payload.criteria)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    stored = db.get(UserValidationCriteria, user.id)
+    if criteria == QUALITY_CRITERIA:
+        if stored:
+            db.delete(stored)
+    elif stored:
+        stored.criteria = criteria
+    else:
+        db.add(UserValidationCriteria(user_id=user.id, criteria=criteria))
+    db.commit()
+    return _quality_criteria_settings(db, user)
+
+
 @router.get('/evaluation-datasets/generation/config')
 def dataset_generation_config() -> dict:
     provider_entries = []
@@ -2224,7 +2322,7 @@ def start_dataset_generation(
             raise HTTPException(status_code=422, detail='Selected model is not available from the configured dataset-generation endpoint.')
     validation_endpoint = None
     validation_model_name = None
-    if use_ragas:
+    if use_ragas and payload.ragas_validate:
         validation_endpoint = resolve_dataset_llm(settings, payload.validation_provider or endpoint.provider)
         if validation_endpoint is None:
             raise HTTPException(status_code=422, detail='Selected validation provider is not configured.')
@@ -2297,12 +2395,17 @@ def start_dataset_generation(
     if not use_gold:
         metadata['provider'] = endpoint.provider
     if use_ragas:
-        metadata['validation_provider'] = validation_endpoint.provider
-        metadata['validation_model_name'] = validation_model_name
+        metadata['ragas_validate'] = payload.ragas_validate
+        if payload.ragas_validate:
+            metadata['validation_provider'] = validation_endpoint.provider
+            metadata['validation_model_name'] = validation_model_name
+            metadata['quality_criteria'] = _user_quality_criteria(db, user)
         metadata['ragas_options'] = {
             'query_mode': payload.ragas_query_mode,
             'context_chars': payload.ragas_context_chars,
             'passage_tries': payload.ragas_passage_tries,
+            'persona_name': payload.ragas_persona_name,
+            'persona_role_description': payload.ragas_persona_role_description,
         }
     records = {'metadata': json.dumps(metadata)}
     for job, path in jobs:
@@ -2348,6 +2451,7 @@ def dataset_generation_status(run_id: str, user: User = Depends(get_current_user
         'question_count': json.loads(records['metadata'])['question_count'],
         'validation_provider': json.loads(records['metadata']).get('validation_provider'),
         'validation_model_name': json.loads(records['metadata']).get('validation_model_name'),
+        'ragas_validate': json.loads(records['metadata']).get('ragas_validate', True),
         'pipeline': json.loads(records['metadata']).get('pipeline', 'standard'),
         'ragas_options': json.loads(records['metadata']).get('ragas_options'),
         'sampling_seed': json.loads(records['metadata']).get('sampling_seed'),

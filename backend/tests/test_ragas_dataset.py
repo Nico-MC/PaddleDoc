@@ -100,6 +100,8 @@ def test_ragas_context_length_is_applied_without_rewriting_source():
     ('ragas_context_chars', 900),
     ('ragas_passage_tries', 0),
     ('ragas_passage_tries', 6),
+    ('ragas_persona_name', '   '),
+    ('ragas_persona_role_description', '   '),
 ])
 def test_ragas_options_are_restricted_to_supported_values(field, value):
     with pytest.raises(ValidationError):
@@ -115,7 +117,11 @@ def test_ragas_model_parameters_are_provider_specific():
     }
     assert _model_request_options('vllm/google/gemma-4-26B-A4B-it') == {}
 
-def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch):
+@pytest.mark.parametrize(('custom_name', 'custom_description'), [
+    (None, None),
+    ('Fachprüfung', 'Prüft dokumentierte Versicherungsleistungen für die Sachbearbeitung.'),
+])
+def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch, custom_name, custom_description):
     from ragas import llms, testset
     from ragas.testset.synthesizers.single_hop import specific
     from ragas.testset.transforms.extractors import llm_based
@@ -143,10 +149,11 @@ def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch):
             await self.http_client.aclose()
 
     seen_contexts = []
+    seen_personas = []
 
     class FakeGenerator:
         def __init__(self, **kwargs):
-            pass
+            seen_personas.extend(kwargs['persona_list'])
 
         def generate_with_chunks(self, *, chunks, **kwargs):
             context = chunks[0].page_content
@@ -165,6 +172,10 @@ def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch):
     monkeypatch.setattr(ragas_dataset, 'AsyncOpenAI', FakeClient)
     monkeypatch.setattr(testset, 'TestsetGenerator', FakeGenerator)
     events = []
+    persona_options = (
+        {'persona_name': custom_name, 'persona_role_description': custom_description}
+        if custom_name is not None else {}
+    )
     rows = ragas_dataset.generate_ragas_dataset_rows(
         markdown=(
             '<!-- page:14/90 -->\nBelegbarer Inhalt.\n'
@@ -174,6 +185,7 @@ def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch):
         model_name='fake-model', question_count=1, question_style='user-paraphrases',
         focus='', sampling_seed=17, request_headers={}, passage_tries=3,
         audit_callback=events.append,
+        **persona_options,
     )
 
     assert len(rows) == 1
@@ -182,6 +194,15 @@ def test_ragas_reaches_long_passage_after_three_short_ones(monkeypatch):
     assert 'Irreführender Grafiktext' not in prepared['text']
     assert prepared['picture_text_blocks_removed'] == 1
     assert seen_contexts == [long_text]
+    assert len(seen_personas) == 1
+    assert seen_personas[0].name == (custom_name or 'Sachbearbeiter:in der HanseMerkur')
+    if custom_description is not None:
+        assert seen_personas[0].role_description == custom_description
+    assert rows[0]['ragas_persona_name'] == seen_personas[0].name
+    assert rows[0]['ragas_persona_role_description'] == seen_personas[0].role_description
+    generation_input = next(event for event in events if event['type'] == 'generation_input')
+    assert generation_input['persona_name'] == rows[0]['ragas_persona_name']
+    assert generation_input['persona_role_description'] == rows[0]['ragas_persona_role_description']
     assert [event['passage_id'] for event in events if event['type'] == 'generation_input'] == ['p0004']
     region_result = next(event for event in events if event['type'] == 'region_result')
     assert region_result['attempts'] == 1

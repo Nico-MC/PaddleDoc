@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -71,6 +72,49 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
             continue
         rows.append(json.loads(cleaned))
     return rows
+
+
+def _without_rejected_candidate_questions(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep RAGAS counts without embedding discarded questions in dataset rows."""
+    outcome = row.get('generation_outcome')
+    if row.get('generation_pipeline') != 'ragas' or not isinstance(outcome, dict):
+        return row
+    candidates = outcome.get('rejected_candidates')
+    if not isinstance(candidates, list):
+        return row
+    cleaned = dict(row)
+    cleaned['generation_outcome'] = {
+        **outcome,
+        'rejected_candidates': [
+            {key: value for key, value in candidate.items() if key not in {'question', 'row'}}
+            if isinstance(candidate, dict) else candidate
+            for candidate in candidates
+        ],
+    }
+    return cleaned
+
+
+def _rejected_candidates_path(dataset_file: Path) -> Path:
+    return dataset_file.with_name(dataset_file.name + '.rejected-candidates.json')
+
+
+def _dataset_rejected_candidates(dataset_file: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    outcome = rows[0].get('generation_outcome') if rows else None
+    if not isinstance(outcome, dict):
+        return []
+    sidecar = _rejected_candidates_path(dataset_file)
+    if sidecar.is_file():
+        try:
+            payload = json.loads(sidecar.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get('run_id') == outcome.get('run_id'):
+            items = payload.get('items')
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+    # Older runs retained only the validation reason, not the complete question.
+    legacy = outcome.get('rejected_candidates')
+    return [item for item in legacy if isinstance(item, dict)] if isinstance(legacy, list) else []
 
 
 def _single_row_value(rows: list[dict[str, Any]], field: str) -> str | None:
@@ -166,7 +210,13 @@ def archive_evaluation_dataset(dataset_path: str) -> dict[str, Any]:
     destination = archive_root / source.name
     if destination.exists():
         raise FileExistsError(f'An archived dataset named {source.name} already exists.')
+    source_candidates = _rejected_candidates_path(source)
+    destination_candidates = _rejected_candidates_path(destination)
+    if source_candidates.exists() and destination_candidates.exists():
+        raise FileExistsError(f'A candidate file named {destination_candidates.name} already exists.')
     source.replace(destination)
+    if source_candidates.is_file():
+        source_candidates.replace(destination_candidates)
     return get_evaluation_dataset_details(_dataset_public_path(destination))
 
 
@@ -179,7 +229,13 @@ def restore_evaluation_dataset(dataset_path: str) -> dict[str, Any]:
     destination = root / source.name
     if destination.exists():
         raise FileExistsError(f'An active dataset named {source.name} already exists.')
+    source_candidates = _rejected_candidates_path(source)
+    destination_candidates = _rejected_candidates_path(destination)
+    if source_candidates.exists() and destination_candidates.exists():
+        raise FileExistsError(f'A candidate file named {destination_candidates.name} already exists.')
     source.replace(destination)
+    if source_candidates.is_file():
+        source_candidates.replace(destination_candidates)
     return get_evaluation_dataset_details(_dataset_public_path(destination))
 
 
@@ -188,7 +244,7 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
     if not dataset_file.exists() or not dataset_file.is_file() or dataset_file.suffix.lower() != '.jsonl':
         raise FileNotFoundError(f'Dataset file not found: {dataset_file}')
 
-    rows = _load_jsonl(dataset_file)
+    rows = [_without_rejected_candidate_questions(row) for row in _load_jsonl(dataset_file)]
     source_documents = sorted(
         {
             str(row.get('source_document', '')).strip()
@@ -216,6 +272,7 @@ def get_evaluation_dataset_details(dataset_path: str) -> dict[str, Any]:
         'size_bytes': dataset_file.stat().st_size,
         'updated_at': datetime.fromtimestamp(dataset_file.stat().st_mtime, tz=timezone.utc),
         'rows': rows,
+        'rejected_candidates': _dataset_rejected_candidates(dataset_file, rows),
     }
 
 
@@ -246,7 +303,11 @@ def list_evaluation_source_documents() -> list[dict[str, Any]]:
     return items
 
 
-def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def save_evaluation_dataset(
+    filename: str, rows: list[dict[str, Any]], *,
+    rejected_candidates: list[dict[str, Any]] | None = None,
+    generation_run_id: str | None = None,
+) -> dict[str, Any]:
     dataset_file = _resolve_dataset_path(filename)
     if not rows:
         raise ValueError('An evaluation dataset must contain at least one row.')
@@ -263,7 +324,7 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
     seen_ids: set[str] = set()
     required_fields = ('id', 'question', 'gold_answer', 'evidence_quote', 'source_document')
     for index, row in enumerate(rows, start=1):
-        normalized = dict(row)
+        normalized = _without_rejected_candidate_questions(dict(row))
         for field in required_fields:
             value = str(normalized.get(field, '')).strip()
             if not value:
@@ -304,6 +365,15 @@ def save_evaluation_dataset(filename: str, rows: list[dict[str, Any]]) -> dict[s
     temporary_file = dataset_file.with_suffix('.jsonl.tmp')
     payload = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in normalized_rows)
     temporary_file.write_text(payload, encoding='utf-8')
+    if rejected_candidates is not None:
+        sidecar = _rejected_candidates_path(dataset_file)
+        temporary_sidecar = sidecar.with_name(sidecar.name + '.tmp')
+        temporary_sidecar.write_text(
+            json.dumps({'run_id': generation_run_id, 'items': rejected_candidates}, ensure_ascii=False),
+            encoding='utf-8',
+        )
+        # The run ID keeps a new sidecar invisible until its dataset is committed.
+        temporary_sidecar.replace(sidecar)
     temporary_file.replace(dataset_file)
     return get_evaluation_dataset_details(_dataset_public_path(dataset_file))
 
@@ -312,13 +382,69 @@ class DatasetVersionConflict(Exception):
     """Dataset changed since the review screen loaded."""
 
 
+def _question_archive_path(source_document: str) -> Path:
+    """Keep rejected questions across dataset overwrites, grouped by Markdown source."""
+    if not source_document.strip() or not source_document.lower().endswith('.md'):
+        raise ValueError('A Markdown source is required for the question archive.')
+    source_key = hashlib.sha256(source_document.encode('utf-8')).hexdigest()
+    return _evaluation_root().resolve() / 'question_archive' / f'{source_key}.jsonl'
+
+
+def _question_archive_id(dataset_path: str, row: dict[str, Any]) -> str:
+    identity = [dataset_path, str(row.get('id', '')), str(row.get('question', '')),
+                str(row.get('gold_answer', '')), str(row.get('evidence_quote', '')),
+                str(row.get('source_markdown_sha256', ''))]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode('utf-8')).hexdigest()
+
+
+def list_archived_dataset_questions(source_document: str) -> list[dict[str, Any]]:
+    """Return current archived questions; the JSONL keeps all decision events."""
+    path = _question_archive_path(source_document)
+    latest: dict[str, dict[str, Any]] = {}
+    for event in _load_jsonl(path) if path.is_file() else []:
+        if event.get('source_document') != source_document or not isinstance(event.get('archive_id'), str):
+            continue
+        latest[event['archive_id']] = event
+    # Questions excluded before the dedicated archive existed remain visible.
+    root = _evaluation_root().resolve()
+    for directory in (root, root / 'archive'):
+        if not directory.is_dir():
+            continue
+        for dataset_file in directory.glob('*.jsonl'):
+            logical_path = f'docs/evaluation/{dataset_file.name}'
+            try:
+                dataset_rows = _load_jsonl(dataset_file)
+            except (OSError, ValueError):
+                continue
+            for row in dataset_rows:
+                if row.get('source_document') != source_document or row.get('review_decision') != 'excluded':
+                    continue
+                archive_id = _question_archive_id(logical_path, row)
+                latest.setdefault(archive_id, {
+                    'archive_id': archive_id, 'source_document': source_document,
+                    'dataset_path': logical_path, 'row_id': str(row.get('id', '')),
+                    'decision': 'excluded', 'reason': row.get('review_archive_reason') or 'other',
+                    'note': row.get('review_archive_note', ''),
+                    'decided_at': row.get('review_decided_at', ''), 'row': row,
+                })
+    return sorted(
+        (event for event in latest.values() if event.get('decision') == 'excluded'),
+        key=lambda event: str(event.get('decided_at', '')), reverse=True,
+    )
+
+
 def set_evaluation_dataset_review_decision(
     dataset_path: str, row_id: str, decision: str, *,
     expected_updated_at: datetime, decided_by: str,
+    reason: str | None = None, note: str = '',
 ) -> dict[str, Any]:
-    """Persist a human inclusion decision without rewriting question content."""
+    """Persist a human decision and a durable, source-specific archive event."""
     if decision not in {'included', 'excluded'}:
         raise ValueError('Review decision must be included or excluded.')
+    allowed_reasons = {'not_answerable', 'incorrect_answer', 'incomplete_answer',
+                       'unclear_question', 'not_standalone', 'uninformative', 'duplicate', 'other'}
+    if decision == 'excluded' and reason is not None and reason not in allowed_reasons:
+        raise ValueError('Unknown question archive reason.')
     current = get_evaluation_dataset_details(dataset_path)
     if current['updated_at'] != expected_updated_at:
         raise DatasetVersionConflict('Das Dataset wurde inzwischen geändert. Bitte neu laden und erneut entscheiden.')
@@ -327,12 +453,43 @@ def set_evaluation_dataset_review_decision(
     if len(matching) != 1:
         raise ValueError('Question not found in this dataset.')
     row = matching[0]
-    if row.get('generation_pipeline') != 'ragas' or row.get('validation_status') != 'review':
-        raise ValueError('Only RAGAS questions requiring review can be decided.')
+    was_excluded = row.get('review_decision') == 'excluded'
+    if was_excluded and decision == 'excluded':
+        raise ValueError('Question is already archived.')
+    previous_rows = [dict(item) for item in rows]
     row['review_decision'] = decision
     row['review_decided_at'] = datetime.now(timezone.utc).isoformat()
     row['review_decided_by'] = decided_by
-    return save_evaluation_dataset(dataset_path, rows)
+    if decision == 'excluded':
+        row['review_archive_reason'] = reason or 'other'
+        row['review_archive_note'] = note.strip()
+    else:
+        row.pop('review_archive_reason', None)
+        row.pop('review_archive_note', None)
+    saved = save_evaluation_dataset(dataset_path, rows)
+    if decision == 'included' and not was_excluded:
+        return saved
+    archive_path = _question_archive_path(str(row['source_document']))
+    event = {
+        'archive_id': _question_archive_id(dataset_path, row),
+        'source_document': row['source_document'],
+        'dataset_path': dataset_path,
+        'row_id': row_id,
+        'decision': decision,
+        'reason': row.get('review_archive_reason'),
+        'note': row.get('review_archive_note', ''),
+        'decided_at': row['review_decided_at'],
+        'decided_by': decided_by,
+        'row': row if decision == 'excluded' else None,
+    }
+    try:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive_path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + '\n')
+    except OSError:
+        save_evaluation_dataset(dataset_path, previous_rows)
+        raise
+    return saved
 
 
 def _normalize_text(text: str) -> str:

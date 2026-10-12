@@ -71,6 +71,8 @@ type GenerationItem = {
       id: string; question: string; status: string;
       faithfulness: number | null; answer_relevancy: number | null;
       reason?: string | null; errors?: string[];
+      criteria?: Record<string, 'pass' | 'review' | 'fail'>;
+      issues?: Array<{ metric: string; status: 'review' | 'fail'; reason: string }>;
     }>;
   } | null;
   error?: string;
@@ -87,6 +89,8 @@ type GenerationLog = {
 };
 
 type RagasQueryMode = 'facts' | 'themes' | 'mixed';
+const DEFAULT_RAGAS_PERSONA_NAME = 'Sachbearbeiter:in der HanseMerkur';
+const DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION = 'Arbeitet in der Sachbearbeitung der HanseMerkur und stellt auf Deutsch präzise, praxisnahe Fragen zum vorliegenden Dokument. Fragt nur nach Informationen, die im bereitgestellten Abschnitt belegbar sind.';
 
 type GenerationRun = {
   run_id: string;
@@ -96,9 +100,10 @@ type GenerationRun = {
   model_name: string;
   validation_provider?: string | null;
   validation_model_name?: string | null;
+  ragas_validate?: boolean;
   question_count: number;
   pipeline?: string;
-  ragas_options?: { query_mode: RagasQueryMode; context_chars: number; passage_tries: number } | null;
+  ragas_options?: { query_mode: RagasQueryMode; context_chars: number; passage_tries: number; persona_name?: string; persona_role_description?: string } | null;
   sampling_seed?: number | null;
 };
 
@@ -115,7 +120,18 @@ type GenerationConfig = {
   providers: GenerationProvider[];
 };
 
+type QualityCriteriaSettings = {
+  criteria: Record<string, string>;
+  defaults: Record<string, string>;
+  customized: boolean;
+};
+
 const MODEL_CHOICE_SEPARATOR = ':::';
+const DEFAULT_VALIDATION_MODEL = 'vllm/openai/gpt-oss-120b';
+const QUALITY_CRITERION_LABELS: Record<string, string> = {
+  clarity: 'Klarheit', standalone: 'Eigenständigkeit', answerability: 'Beantwortbarkeit',
+  correctness: 'Korrektheit', completeness: 'Vollständigkeit', informativeness: 'Informationsgehalt',
+};
 const PHASE_LABELS: Record<string, string> = {
   classifying: 'Quellenabschnitte prüfen',
   generating: 'Generierung',
@@ -130,6 +146,13 @@ function defaultModelChoice(config: GenerationConfig): { providerId: string; mod
   if (!provider) return { providerId: '', modelName: '' };
   const modelName = provider.models.includes(provider.model_name) ? provider.model_name : provider.models[0];
   return { providerId: provider.id, modelName };
+}
+
+function defaultValidationModelChoice(config: GenerationConfig): { providerId: string; modelName: string } {
+  const provider = config.providers.find((candidate) => candidate.id === 'hcds' && candidate.models.includes(DEFAULT_VALIDATION_MODEL));
+  return provider
+    ? { providerId: provider.id, modelName: DEFAULT_VALIDATION_MODEL }
+    : defaultModelChoice(config);
 }
 
 const URL = '/api/v1/evaluation-datasets/generation';
@@ -152,7 +175,7 @@ function formatDuration(seconds: number): string {
   return `${safeSeconds.toFixed(1)} s`;
 }
 
-function itemProgressPercent(item: GenerationItem, pipeline?: string): number {
+function itemProgressPercent(item: GenerationItem, pipeline?: string, ragasValidate = true): number {
   if (['completed', 'skipped', 'failed', 'cancelled'].includes(item.status)) return 100;
   const progress = item.progress;
   if (!progress) return 0;
@@ -162,7 +185,7 @@ function itemProgressPercent(item: GenerationItem, pipeline?: string): number {
       return 70 + Math.round(25 * (progress.validation_done ?? 0) / Math.max(1, progress.validation_total ?? 0));
     }
     if (progress.phase === 'finalizing') return 95;
-    return Math.max(5, Math.round(70 * progress.region / Math.max(1, progress.region_count)));
+    return Math.max(5, Math.round((ragasValidate ? 70 : 95) * progress.region / Math.max(1, progress.region_count)));
   }
   return progress.question_target > 0
     ? Math.min(95, Math.round(progress.questions_generated / progress.question_target * 95))
@@ -218,6 +241,17 @@ function LogSection({ title, value, initialOpen = false }: { title: string; valu
     </details>
   );
 }
+
+function validationResultsWithoutTraces(results: unknown): unknown {
+  if (!Array.isArray(results)) return results;
+  return results.map((result) => {
+    if (result === null || typeof result !== 'object') return result;
+    return Object.fromEntries(
+      Object.entries(result).filter(([key]) => key !== 'traces'),
+    );
+  });
+}
+
 type LlmHttpEvent = {
   type: 'llm_http_request' | 'llm_http_response';
   request_id: string;
@@ -320,76 +354,68 @@ function ClassificationOverview({ results, sections, requestCount }: {
   const errors = results.filter((result) => result.status === 'model_error');
 
   return (
-    <section className="rounded-lg border-2 border-sky-400 bg-sky-50">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-        <h4 className="text-sm font-semibold text-sky-950">Abschnittsklassifizierung · {answeredCount} LLM-Entscheidungen</h4>
-        {decisions.length > 0 && <CopyLogButton label="Einordnungen kopieren" value={decisions.map(({ id, kind, section }) => ({ id, heading: section?.heading, page: section?.page, kind, excluded: section?.excluded }))} />}
-      </div>
-      <div className="space-y-3 border-t border-sky-200 px-4 py-3 text-xs text-sky-950">
-        <p>{requestCount} protokollierte LLM-Anfrage{requestCount === 1 ? '' : 'n'} für die Klassifizierung. Der vollständige Prompt und die rohe Modellantwort stehen im Tab „Bisheriges Log“.</p>
-        {sections.length > 0 && <p>{ruleExcluded.length} Abschnitte wurden zuvor anhand ihrer Überschrift ausgeschlossen; {notReviewed} weitere Abschnitte wurden nicht einzeln vom LLM klassifiziert.</p>}
-        {errors.map((result, index) => <p key={index} className="text-amber-800">Klassifizierungsfehler: {result.error_type ?? 'unbekannt'}{result.error_message ? ' · ' + result.error_message : ''}</p>)}
-        {decisions.length === 0 ? (
-          <p className="text-slate-600">Noch keine Klassifizierungsentscheidungen protokolliert.</p>
-        ) : (
-          <div className="max-h-[65dvh] overflow-auto rounded-md border border-sky-200 bg-white">
-            <table className="w-full min-w-[600px] text-left text-xs">
-              <thead className="sticky top-0 bg-sky-100 text-sky-950">
-                <tr><th className="px-3 py-2">Abschnitt</th><th className="px-3 py-2">Seite</th><th className="px-3 py-2">Vom LLM eingeordnet als</th><th className="px-3 py-2">Quellenauswahl</th></tr>
-              </thead>
-              <tbody className="divide-y divide-sky-100">
-                {decisions.map(({ id, kind, section }) => (
-                  <tr key={id}>
-                    <td className="px-3 py-2 align-top">
-                      <span className="font-medium">{section?.heading || 'Ohne Überschrift'}</span> <span className="text-slate-500">({id})</span>
-                      {section?.preview && <p className="mt-1 max-w-xl text-slate-600">{section.preview}</p>}
-                    </td>
-                    <td className="px-3 py-2 align-top">{section?.page ?? '–'}</td>
-                    <td className="px-3 py-2 align-top font-medium">{kind ? CLASSIFICATION_LABELS[kind] ?? kind : 'Keine Entscheidung'}</td>
-                    <td className="px-3 py-2 align-top">{section?.excluded ? 'Ausgeschlossen' : kind ? 'Für Auswahl zugelassen' : 'Mangels Entscheidung belassen'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {ruleExcluded.length > 0 && (
-          <details className="rounded-md border border-sky-200 bg-white">
-            <summary className="cursor-pointer px-3 py-2 font-medium">Vorab per Überschrift ausgeschlossen · {ruleExcluded.length}</summary>
-            <ul className="space-y-1 border-t border-sky-100 px-3 py-2">
+    <section className="space-y-3">
+      {ruleExcluded.length > 0 && (
+        <details open className="rounded-lg border border-sky-200 bg-sky-50 text-xs text-sky-950">
+          <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Vorab per Überschrift ausgeschlossen · {ruleExcluded.length}</summary>
+          <div className="border-t border-sky-200 px-4 py-3">
+            <ul className="space-y-1">
               {ruleExcluded.map((section) => <li key={section.id}>Seite {section.page ?? '–'} · {section.heading || 'Ohne Überschrift'} ({section.id})</li>)}
             </ul>
-          </details>
-        )}
-      </div>
+          </div>
+        </details>
+      )}
+      <details className="rounded-lg border-2 border-sky-400 bg-sky-50">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">Abschnittsklassifizierung · {answeredCount} LLM-Entscheidungen</summary>
+        <div className="space-y-3 border-t border-sky-200 px-4 py-3 text-xs text-sky-950">
+          {decisions.length > 0 && <div className="flex justify-end"><CopyLogButton label="Einordnungen kopieren" value={decisions.map(({ id, kind, section }) => ({ id, heading: section?.heading, page: section?.page, kind, excluded: section?.excluded }))} /></div>}
+          <p>{requestCount} protokollierte LLM-Anfrage{requestCount === 1 ? '' : 'n'} für die Klassifizierung. Prompt und Modellantwort stehen unten bei den API-Anfragen.</p>
+          {sections.length > 0 && <p>{notReviewed} weitere Abschnitte wurden nicht einzeln vom LLM klassifiziert.</p>}
+          {errors.map((result, index) => <p key={index} className="text-amber-800">Klassifizierungsfehler: {result.error_type ?? 'unbekannt'}{result.error_message ? ' · ' + result.error_message : ''}</p>)}
+          {decisions.length === 0 ? (
+            <p className="text-slate-600">Noch keine Klassifizierungsentscheidungen protokolliert.</p>
+          ) : (
+            <div className="max-h-[65dvh] overflow-auto rounded-md border border-sky-200 bg-white">
+              <table className="w-full min-w-[600px] text-left text-xs">
+                <thead className="sticky top-0 bg-sky-100 text-sky-950">
+                  <tr><th className="px-3 py-2">Abschnitt</th><th className="px-3 py-2">Seite</th><th className="px-3 py-2">Vom LLM eingeordnet als</th><th className="px-3 py-2">Quellenauswahl</th></tr>
+                </thead>
+                <tbody className="divide-y divide-sky-100">
+                  {decisions.map(({ id, kind, section }) => (
+                    <tr key={id}>
+                      <td className="px-3 py-2 align-top">
+                        <span className="font-medium">{section?.heading || 'Ohne Überschrift'}</span> <span className="text-slate-500">({id})</span>
+                        {section?.preview && <p className="mt-1 max-w-xl text-slate-600">{section.preview}</p>}
+                      </td>
+                      <td className="px-3 py-2 align-top">{section?.page ?? '–'}</td>
+                      <td className="px-3 py-2 align-top font-medium">{kind ? CLASSIFICATION_LABELS[kind] ?? kind : 'Keine Entscheidung'}</td>
+                      <td className="px-3 py-2 align-top">{section?.excluded ? 'Ausgeschlossen' : kind ? 'Für Auswahl zugelassen' : 'Mangels Entscheidung belassen'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </details>
     </section>
   );
 }
 
-function LlmRequestTimeline({ events, classificationResults = [], sectionInventory = [], summarizeClassification = false }: {
+function LlmRequestTimeline({ events }: {
   events: LlmHttpEvent[] | undefined;
-  classificationResults?: ClassificationResult[];
-  sectionInventory?: ClassifiedSection[];
-  summarizeClassification?: boolean;
 }) {
   const responses = new Map(events?.filter((event) => event.type === 'llm_http_response').map((event) => [event.request_id, event]) ?? []);
   const requests = events?.filter((event) => event.type === 'llm_http_request') ?? [];
-  const classificationRequestCount = requests.filter((request) => request.scope?.phase === 'classification').length;
   const phaseLabel = (phase?: string) => phase === 'classification' ? 'Abschnittsauswahl' : phase === 'generation' ? 'Fragengenerierung' : phase === 'validation' ? 'Validierung' : phase ?? 'Unbekannte Phase';
   return (
     <details open className="rounded-lg border-2 border-sky-400 bg-sky-50">
       <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">Tatsächliche LLM-API-Anfragen · {requests.length}</summary>
       <div className="space-y-2 border-t border-sky-200 px-4 py-3">
-        <p className="text-xs text-sky-900">{summarizeClassification
-          ? 'Die Abschnittsklassifizierung erscheint hier als Ergebnisübersicht. Alle anderen Modellaufrufe zeigen Anfrage und Antwort vollständig; die Rohdaten der Klassifizierung stehen im zweiten Tab.'
-          : 'Chronologisch protokollierte Anfragen inklusive RAGAS-interner Prompts und API-Antworten. Wiederholungen durch die API-Bibliothek erscheinen als eigene Anfragen. HTTP-Header und Zugangsdaten werden nicht gespeichert.'}</p>
-        {!events && <p className="text-xs text-amber-800">Für diesen älteren Lauf wurden die tatsächlichen API-Anfragen nicht erfasst. Die an RAGAS übergebenen Ausschnitte stehen im Tab „Bisheriges Log“.</p>}
+        <p className="text-xs text-sky-900">Chronologisch protokollierte Anfragen einschließlich Klassifizierung, RAGAS-interner Prompts und Validierung samt API-Antworten. Wiederholungen erscheinen als eigene Anfragen. HTTP-Header und Zugangsdaten werden nicht gespeichert.</p>
+        {!events && <p className="text-xs text-amber-800">Für diesen älteren Lauf wurden die tatsächlichen API-Anfragen nicht erfasst. Die an RAGAS übergebenen Ausschnitte stehen im Tab „Prozessdetails“.</p>}
         {events && requests.length === 0 && <p className="text-xs text-slate-600">Bisher wurde keine LLM-API-Anfrage protokolliert.</p>}
-        {summarizeClassification && (classificationRequestCount > 0 || classificationResults.length > 0) && (
-          <ClassificationOverview results={classificationResults} sections={sectionInventory} requestCount={classificationRequestCount} />
-        )}
         {requests.map((request, index) => {
-          if (summarizeClassification && request.scope?.phase === 'classification') return null;
           const response = responses.get(request.request_id);
           const payload = request.body && typeof request.body === 'object' ? request.body as Record<string, unknown> : {};
           const scope = request.scope ?? {};
@@ -493,6 +519,13 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
     ? audit.generation_inputs as Array<{ region?: number; page?: number | null; passage_id?: string; context?: string }>
     : [];
   const llmEvents = Array.isArray(audit?.llm_http_events) ? audit.llm_http_events as LlmHttpEvent[] : undefined;
+  const classificationResults = Array.isArray(audit?.classification_results)
+    ? audit.classification_results as ClassificationResult[] : [];
+  const sectionInventory = Array.isArray(audit?.section_inventory)
+    ? audit.section_inventory as ClassifiedSection[] : [];
+  const classificationRequestCount = llmEvents?.filter((event) =>
+    event.type === 'llm_http_request' && event.scope?.phase === 'classification').length ?? 0;
+  const hasClassificationOverview = classificationRequestCount > 0 || classificationResults.length > 0 || sectionInventory.length > 0;
   const rejectedDetails = item.validation_summary?.details?.filter((detail) => detail.status === 'rejected') ?? [];
   const reviewErrors = item.validation_summary?.details?.filter((detail) => detail.status === 'review' && detail.errors?.length) ?? [];
   return (
@@ -535,7 +568,7 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
                     document.getElementById('dataset-log-tab-' + next + '-' + item.job_id)?.focus();
                   }}
                 >
-                  {tab === 'llm' ? 'LLM-Kommunikation' : 'Bisheriges Log'}
+                  {tab === 'llm' ? 'LLM-Kommunikation' : 'Prozessdetails'}
                 </button>
               ))}
             </div>
@@ -550,14 +583,16 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
               {error && <p className="text-red-700">Log konnte nicht geladen werden: {error}</p>}
               {!log && !error && <p>Log wird geladen …</p>}
               {log && audit && activeTab === 'llm' && (
-                <LlmRequestTimeline
-                  events={llmEvents}
-                  classificationResults={Array.isArray(audit.classification_results)
-                    ? audit.classification_results as ClassificationResult[] : []}
-                  sectionInventory={Array.isArray(audit.section_inventory)
-                    ? audit.section_inventory as ClassifiedSection[] : []}
-                  summarizeClassification
-                />
+                <>
+                  {hasClassificationOverview && (
+                    <ClassificationOverview
+                      results={classificationResults}
+                      sections={sectionInventory}
+                      requestCount={classificationRequestCount}
+                    />
+                  )}
+                  <LlmRequestTimeline events={llmEvents} />
+                </>
               )}
               {log && audit && activeTab === 'details' && (
                 <>
@@ -573,13 +608,12 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
                       ))}
                     </section>
                   )}
-                  <p className="text-xs text-slate-600">Ablauf: Markdown bereinigen → Abschnitte klassifizieren → einzelne Ausschnitte mit RAGAS zur Fragegenerierung nutzen → Fragen validieren.</p>
-                  <LlmRequestTimeline events={llmEvents} />
+                  <p className="text-xs text-slate-600">Ablauf: Markdown bereinigen → Abschnitte klassifizieren → einzelne Ausschnitte mit RAGAS zur Fragegenerierung nutzen{log.settings.ragas_validate === false ? ' → Fragen ungeprüft speichern.' : ' → Fragen validieren.'}</p>
                   <details className="rounded-lg border border-sky-200 bg-sky-50">
                     <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-sky-950">An RAGAS übergebene Textausschnitte · {sentContexts.length}</summary>
                     <div className="space-y-2 border-t border-sky-200 px-4 py-3">
-                      <p className="text-xs text-sky-900">Diese Ausschnitte erhielt RAGAS nach Bereinigung und Abschnittsfilterung. Welche Prompts RAGAS daraus tatsächlich an das LLM geschickt hat, steht oben.</p>
-                      {sentContexts.length === 0 && <p className="text-xs text-slate-600">Für diesen Lauf sind keine Modelltexte protokolliert.</p>}
+                      <p className="text-xs text-sky-900">Diese Ausschnitte erhielt RAGAS nach Bereinigung und Abschnittsfilterung. Die tatsächlichen Modell-Prompts und Antworten stehen im Tab „LLM-Kommunikation“.</p>
+                      {sentContexts.length === 0 && <p className="text-xs text-slate-600">Für diesen Lauf sind keine Textausschnitte protokolliert.</p>}
                       <div className="max-h-[72dvh] space-y-2 overflow-y-auto">
                         {sentContexts.map((input, index) => (
                           <article key={index} className="rounded-md border border-sky-200 bg-white p-3">
@@ -603,38 +637,33 @@ function GenerationLogDetails({ runId, item, datasetChangedSinceRun }: { runId: 
                           <pre className="max-h-[72dvh] overflow-auto rounded-md border border-emerald-200 bg-white p-3 text-xs whitespace-pre-wrap break-words">{prepared.text}</pre>
                         </>
                       ) : (
-                        <p className="text-xs text-amber-800">Dieser ältere Lauf enthält noch keine vollständige bereinigte Textfassung im Log. Die tatsächlich verwendeten Ausschnitte stehen unter „Generierung: Inputs“.</p>
+                        <p className="text-xs text-amber-800">Dieser ältere Lauf enthält noch keine vollständige bereinigte Textfassung im Log. Die tatsächlich verwendeten Ausschnitte stehen unter „An RAGAS übergebene Textausschnitte“.</p>
                       )}
                     </div>
                   </details>
                   <LogSection title="Lauf und Einstellungen" value={{ settings: log.settings, result: log.result }} />
-                  <LogSection title="Dokumentauswahl und Klassifikation" value={{
+                  <LogSection title="Dokumentauswahl und Abschnittsinventar" value={{
                     source_document: audit.source_document,
                     source_file: audit.source_file,
                     source_markdown_sha256: audit.source_markdown_sha256,
-                    classification_inputs: audit.classification_inputs,
-                    classification_results: audit.classification_results,
                     section_inventory: audit.section_inventory,
                     excluded_sections: audit.excluded_sections,
                     passages_total: audit.passages_total,
                     passages_eligible: audit.passages_eligible,
                   }} />
-                  <LogSection title="Generierung: Inputs, Rohproben und Entscheidungen" value={{
-                    generation_inputs: audit.generation_inputs,
+                  <LogSection title="Generierung: Ergebnisse und Entscheidungen" value={{
                     generation_results: audit.generation_results,
                     region_results: audit.region_results,
                   }} />
-                  <LogSection title="Validierung: Kandidaten, Metrik-Inputs und Ergebnisse" value={{
+                  <LogSection title="Validierung: Kandidaten und Metrikergebnisse" value={{
                     validation_candidates: audit.validation_candidates,
-                    validation_inputs: audit.validation_inputs,
-                    validation_results: audit.validation_results,
+                    validation_results: validationResultsWithoutTraces(audit.validation_results),
                     validation_summary: audit.validation_summary ?? log.result.validation_summary,
                   }} />
                   <LogSection title="Gespeichertes Dataset" value={{
                     dataset_path: audit.dataset_path ?? log.result.dataset_path,
                     dataset_rows: audit.dataset_rows,
                   }} />
-                  <LogSection title="Vollständiges JSON-Protokoll" value={log} />
                 </>
               )}
             </div>
@@ -665,9 +694,16 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
   const [validationProviderId, setValidationProviderId] = useState('');
   const [validationModelName, setValidationModelName] = useState('');
   const [pipeline, setPipeline] = useState<'ragas' | 'standard'>('ragas');
+  const [ragasValidate, setRagasValidate] = useState(true);
   const [ragasQueryMode, setRagasQueryMode] = useState<RagasQueryMode>('facts');
   const [ragasContextChars, setRagasContextChars] = useState<800 | 1400 | 2400>(1400);
   const [ragasPassageTries, setRagasPassageTries] = useState(3);
+  const [ragasPersonaName, setRagasPersonaName] = useState(DEFAULT_RAGAS_PERSONA_NAME);
+  const [ragasPersonaRoleDescription, setRagasPersonaRoleDescription] = useState(DEFAULT_RAGAS_PERSONA_ROLE_DESCRIPTION);
+  const [qualityCriteria, setQualityCriteria] = useState<Record<string, string> | null>(null);
+  const [savedQualityCriteria, setSavedQualityCriteria] = useState<Record<string, string> | null>(null);
+  const [defaultQualityCriteria, setDefaultQualityCriteria] = useState<Record<string, string> | null>(null);
+  const [criteriaSaving, setCriteriaSaving] = useState(false);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<GenerationRun | null>(null);
@@ -679,12 +715,20 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
   const validationModelChoice = validationProviderId && validationModelName
     ? validationProviderId + MODEL_CHOICE_SEPARATOR + validationModelName : '';
   const hasModelChoices = config?.providers.some((provider) => provider.models.length > 0) ?? false;
+  const criteriaDirty = qualityCriteria !== null && savedQualityCriteria !== null
+    && Object.keys(QUALITY_CRITERION_LABELS).some((key) => qualityCriteria[key] !== savedQualityCriteria[key]);
+  const criteriaValid = qualityCriteria !== null && Object.keys(QUALITY_CRITERION_LABELS).every((key) => {
+    const value = qualityCriteria[key]?.trim();
+    return Boolean(value && value.length <= 2000);
+  });
+  const hasCustomCriteria = savedQualityCriteria !== null && defaultQualityCriteria !== null
+    && Object.keys(QUALITY_CRITERION_LABELS).some((key) => savedQualityCriteria[key] !== defaultQualityCriteria[key]);
   const running = Boolean(runId && !run?.finished);
   const hasProcessingItems = run?.items.some((item) => item.status === 'processing') ?? false;
   const settledCount = run?.items.filter((item) => !['queued', 'processing'].includes(item.status)).length ?? 0;
   const runTotal = run?.items.length ?? 0;
   const progressPercent = runTotal > 0
-    ? Math.round(run!.items.reduce((total, item) => total + itemProgressPercent(item, run!.pipeline), 0) / runTotal)
+    ? Math.round(run!.items.reduce((total, item) => total + itemProgressPercent(item, run!.pipeline, run!.ragas_validate !== false), 0) / runTotal)
     : 0;
 
   useEffect(() => {
@@ -782,12 +826,26 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
         if (!active) return;
         setConfig(result);
         const choice = defaultModelChoice(result);
+        const validationChoice = defaultValidationModelChoice(result);
         setProviderId(choice.providerId);
         setModelName(choice.modelName);
-        setValidationProviderId(choice.providerId);
-        setValidationModelName(choice.modelName);
+        setValidationProviderId(validationChoice.providerId);
+        setValidationModelName(validationChoice.modelName);
         setPipeline(choice.providerId === 'hcds' ? 'ragas' : 'standard');
         setRunId(sessionStorage.getItem(RUN_KEY) ?? sessionStorage.getItem(LAST_RUN_KEY));
+      })
+      .catch((cause: unknown) => { if (active) setError(String(cause)); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void apiJson<QualityCriteriaSettings>(`${URL}/quality-criteria`)
+      .then((result) => {
+        if (!active) return;
+        setQualityCriteria(result.criteria);
+        setSavedQualityCriteria(result.criteria);
+        setDefaultQualityCriteria(result.defaults);
       })
       .catch((cause: unknown) => { if (active) setError(String(cause)); });
     return () => { active = false; };
@@ -846,7 +904,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
       }
       const currentValidationProvider = result.providers.find((provider) => provider.id === validationProviderId);
       if (!currentValidationProvider?.models.includes(validationModelName)) {
-        const choice = defaultModelChoice(result);
+        const choice = defaultValidationModelChoice(result);
         setValidationProviderId(choice.providerId);
         setValidationModelName(choice.modelName);
       }
@@ -854,6 +912,43 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
       setError(String(cause));
     } finally {
       setRefreshingModels(false);
+    }
+  }
+
+  async function persistQualityCriteria(criteria: Record<string, string>) {
+    const result = await apiJson<QualityCriteriaSettings>(`${URL}/quality-criteria`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ criteria }),
+    });
+    setQualityCriteria(result.criteria);
+    setSavedQualityCriteria(result.criteria);
+    setDefaultQualityCriteria(result.defaults);
+  }
+
+  async function saveQualityCriteria() {
+    if (!qualityCriteria || !criteriaValid) return;
+    setCriteriaSaving(true);
+    setError(null);
+    try {
+      await persistQualityCriteria(qualityCriteria);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setCriteriaSaving(false);
+    }
+  }
+
+  async function resetQualityCriteria() {
+    if (!defaultQualityCriteria) return;
+    setCriteriaSaving(true);
+    setError(null);
+    try {
+      await persistQualityCriteria(defaultQualityCriteria);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setCriteriaSaving(false);
     }
   }
 
@@ -880,6 +975,9 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
     setBusy(true);
     setError(null);
     try {
+      if (pipeline === 'ragas' && ragasValidate && criteriaDirty && qualityCriteria) {
+        await persistQualityCriteria(qualityCriteria);
+      }
       const result = await apiJson<{ run_id: string }>(URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -893,14 +991,19 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
             : {},
           provider: providerId,
           model_name: modelName,
-          ...(pipeline === 'ragas' ? {
+          ...(pipeline === 'ragas' && ragasValidate ? {
             validation_provider: validationProviderId,
             validation_model_name: validationModelName,
           } : {}),
+          ragas_validate: ragasValidate,
           pipeline,
           ragas_query_mode: ragasQueryMode,
           ragas_context_chars: ragasContextChars,
           ragas_passage_tries: ragasPassageTries,
+          ...(pipeline === 'ragas' ? {
+            ragas_persona_name: ragasPersonaName.trim(),
+            ragas_persona_role_description: ragasPersonaRoleDescription.trim(),
+          } : {}),
           sampling_seed: samplingSeed === '' ? null : Number(samplingSeed),
         }),
       });
@@ -968,7 +1071,13 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
             </Button>
           </div>
         </Field>
-        {pipeline === 'ragas' && (
+        {pipeline === 'ragas' && <label className="flex items-center gap-2 text-sm md:col-span-2">
+          <input type="checkbox" checked={ragasValidate} disabled={running || busy}
+            onChange={(event) => setRagasValidate(event.target.checked)} />
+          Automatische Validierung aktivieren
+          {!ragasValidate && <span className="text-slate-500">Fragen werden ungeprüft gespeichert.</span>}
+        </label>}
+        {pipeline === 'ragas' && ragasValidate && (
           <Field label="Validierungsmodell (separat)">
             <select
               className={inputClass}
@@ -1021,6 +1130,52 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
                   <option value={5}>Bis zu 5 Versuche · gründlich</option>
                 </select>
               </Field>
+              <div className="rounded-lg border border-slate-200 p-3 md:col-span-2">
+                <p className="mb-2 text-sm font-medium text-slate-700">Generierungs-Persona</p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field label="Name">
+                    <input className={inputClass} value={ragasPersonaName} maxLength={120} disabled={running || busy} onChange={(event) => setRagasPersonaName(event.target.value)} />
+                  </Field>
+                  <Field label="Rollenbeschreibung">
+                    <textarea className={inputClass} rows={3} value={ragasPersonaRoleDescription} maxLength={500} disabled={running || busy} onChange={(event) => setRagasPersonaRoleDescription(event.target.value)} />
+                  </Field>
+                </div>
+              </div>
+              {ragasValidate && <details className="rounded-lg border border-slate-200 p-3 md:col-span-2">
+                <summary className="cursor-pointer text-sm font-medium text-slate-700">
+                  Qualitätskriterien der Validierung{criteriaDirty ? ' · geändert' : ''}
+                </summary>
+                <div className="mt-3 space-y-3">
+                  {qualityCriteria ? Object.entries(QUALITY_CRITERION_LABELS).map(([key, label]) => (
+                    <Field key={key} label={label}>
+                      <textarea className={inputClass} rows={3} maxLength={2000}
+                        value={qualityCriteria[key] ?? ''}
+                        disabled={running || busy || criteriaSaving}
+                        onChange={(event) => setQualityCriteria((previous) => previous
+                          ? { ...previous, [key]: event.target.value } : previous)}
+                      />
+                    </Field>
+                  )) : <p className="text-sm text-slate-500">Kriterien werden geladen.</p>}
+                  {qualityCriteria && !criteriaValid && (
+                    <p className="text-xs text-rose-700">Alle sechs Kriterien brauchen einen Text.</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button type="button" size="sm" variant="outline"
+                      disabled={running || busy || criteriaSaving || !criteriaDirty || !criteriaValid}
+                      onClick={() => void saveQualityCriteria()}>
+                      {criteriaSaving ? 'Speichert …' : 'Kriterien speichern'}
+                    </Button>
+                    <Button type="button" size="sm" variant="outline"
+                      disabled={running || busy || criteriaSaving || !qualityCriteria || (!criteriaDirty && !hasCustomCriteria)}
+                      onClick={() => void resetQualityCriteria()}>
+                      Standard wiederherstellen
+                    </Button>
+                    {qualityCriteria && <span className="text-xs text-slate-500">
+                      {criteriaDirty ? 'Änderungen werden beim Start ebenfalls gespeichert.' : hasCustomCriteria ? 'Für dein Konto gespeichert.' : 'Standard aktiv.'}
+                    </span>}
+                  </div>
+                </div>
+              </details>}
             </>
           )}
           {pipeline === 'standard' && (
@@ -1110,7 +1265,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
         })}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">
-        <Button onClick={() => void start()} disabled={busy || running || refreshingModels || !validSamplingSeed || missingOverwriteTarget || !config?.configured || !modelName || (pipeline === 'ragas' && !validationModelName) || selected.size === 0 || selected.size > 1000}>
+        <Button onClick={() => void start()} disabled={busy || running || refreshingModels || criteriaSaving || !validSamplingSeed || missingOverwriteTarget || !config?.configured || !modelName || (pipeline === 'ragas' && ((ragasValidate && (!validationModelName || !criteriaValid)) || !ragasPersonaName.trim() || !ragasPersonaRoleDescription.trim())) || selected.size === 0 || selected.size > 1000}>
           {busy || running ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}Generierung starten
         </Button>
         {running && <Button variant="outline" disabled={busy || run?.cancelled} onClick={() => void cancel()}><StopCircle className="mr-2 h-4 w-4" />Abbrechen</Button>}
@@ -1121,6 +1276,9 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
           <p className="mb-1 break-words text-sm text-slate-500">
             {run.pipeline === 'ragas' ? 'Generierungsmodell' : 'Modell'}: {run.model_name}
           </p>
+          {run.pipeline === 'ragas' && run.ragas_validate === false && (
+            <p className="mb-1 text-sm text-amber-700">Automatische Validierung deaktiviert · Fragen sind noch nicht für die Evaluation freigegeben.</p>
+          )}
           {run.pipeline === 'ragas' && run.validation_model_name && (
             <p className="mb-1 break-words text-sm text-slate-500">
               Validierungsmodell: {run.validation_model_name}
@@ -1143,7 +1301,7 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
               const currentUpdatedAt = currentDataset?.updated_at ? Date.parse(currentDataset.updated_at) / 1000 : NaN;
               const datasetChangedSinceRun = item.finished_at != null && Number.isFinite(currentUpdatedAt)
                 && currentUpdatedAt > item.finished_at + 5;
-              const itemProgress = itemProgressPercent(item, run.pipeline);
+              const itemProgress = itemProgressPercent(item, run.pipeline, run.ragas_validate !== false);
               const outcomeMessage = run.pipeline === 'ragas'
                 ? ragasOutcomeMessage(item, run.question_count)
                 : item.warning;
@@ -1184,6 +1342,8 @@ export function DatasetGenerator({ files, datasets, preferredPath, onSaved, onOp
                             {detail.id}: {detail.status === 'accepted' ? 'akzeptiert' : detail.status === 'review' ? 'prüfen' : 'verworfen'} · {detail.question}
                             {' · '}Faithfulness {detail.faithfulness == null ? '–' : detail.faithfulness.toFixed(2)}
                             {' · '}Relevanz {detail.answer_relevancy == null ? '–' : detail.answer_relevancy.toFixed(2)}
+                            {detail.criteria && <span> · Qualitätskriterien: {Object.entries(detail.criteria).map(([name, verdict]) => `${QUALITY_CRITERION_LABELS[name] ?? name} ${verdict}`).join(', ')}</span>}
+                            {detail.status === 'review' && detail.issues?.length ? <span className="text-amber-700"> · Prüfen: {detail.issues.map((issue) => `${QUALITY_CRITERION_LABELS[issue.metric] ?? issue.metric}: ${issue.reason}`).join('; ')}</span> : null}
                             {detail.status === 'rejected' && <span className="text-amber-700"> · Grund: {rejectionReason(detail, item.validation_summary!)}</span>}
                           </li>
                         ))}

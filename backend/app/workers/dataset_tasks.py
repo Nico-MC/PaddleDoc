@@ -209,7 +209,15 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
             )
         if is_ragas and store.hget(key, 'cancelled') != '1':
             audit['validation_candidates'] = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
+            audit['validation_enabled'] = metadata.get('ragas_validate', True)
             store.set(audit_key, json.dumps(audit, ensure_ascii=False), ex=GENERATION_TTL)
+            if not metadata.get('ragas_validate', True):
+                for row in rows:
+                    row['validation_method'] = 'skipped'
+                    row['validation_status'] = 'review'
+                    row['review_decision'] = 'pending'
+                    row['review_status'] = 'synthetic-unvalidated'
+        if is_ragas and metadata.get('ragas_validate', True) and store.hget(key, 'cancelled') != '1':
             validation_endpoint = resolve_dataset_llm(
                 settings, metadata.get('validation_provider') or metadata.get('provider'),
             )
@@ -224,6 +232,7 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
                 rows=rows, api_base_url=validation_endpoint.base_url, api_key=validation_endpoint.api_key,
                 model_name=metadata.get('validation_model_name') or metadata['model_name'],
                 request_headers=validation_endpoint.request_headers,
+                quality_criteria=metadata.get('quality_criteria'),
                 progress_callback=lambda progress: update(progress=progress),
                 audit_callback=record_audit,
                 should_cancel=lambda: store.hget(key, 'cancelled') == '1',
@@ -241,17 +250,20 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
         if is_ragas:
             generation_outcome = {
                 'run_id': run_id,
+                'validation_enabled': metadata.get('ragas_validate', True),
                 'target': metadata['question_count'],
-                'generated': validation_summary['candidates'],
+                'generated': validation_summary['candidates'] if validation_summary else len(rows),
                 'saved': len(rows),
                 'rejected_candidates': [
                     {
-                        'id': detail.get('id'), 'question': detail.get('question'),
+                        'id': detail.get('id'),
                         'reason': detail.get('reason'),
                         'faithfulness': detail.get('faithfulness'),
                         'answer_relevancy': detail.get('answer_relevancy'),
+                        **({'criteria': detail['criteria']} if 'criteria' in detail else {}),
+                        **({'issues': detail['issues']} if 'issues' in detail else {}),
                     }
-                    for detail in validation_summary.get('details', [])
+                    for detail in (validation_summary or {}).get('details', [])
                     if detail.get('status') == 'rejected'
                 ],
                 'incomplete_regions': [
@@ -261,7 +273,23 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
             }
             for row in rows:
                 row['generation_outcome'] = generation_outcome
-        dataset = save_evaluation_dataset(filename, rows)
+            generated_by_id = {
+                str(candidate.get('id')): candidate
+                for candidate in audit['validation_candidates']
+                if isinstance(candidate, dict)
+            }
+            rejected_for_review = [
+                {
+                    **detail,
+                    'row': generated_by_id.get(str(detail.get('id'))),
+                }
+                for detail in (validation_summary or {}).get('details', [])
+                if detail.get('status') == 'rejected'
+            ]
+        dataset = save_evaluation_dataset(
+            filename, rows,
+            **({'rejected_candidates': rejected_for_review, 'generation_run_id': run_id} if is_ragas else {}),
+        )
         if is_ragas:
             audit['dataset_rows'] = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
             audit['dataset_path'] = dataset['path']
@@ -271,8 +299,8 @@ def generate_document_dataset(run_id: str, job_id: str) -> None:
         warning = None
         if len(rows) < metadata['question_count']:
             if is_ragas:
-                generated = validation_summary['candidates']
-                rejected = validation_summary['rejected']
+                generated = validation_summary['candidates'] if validation_summary else len(rows)
+                rejected = validation_summary['rejected'] if validation_summary else 0
                 missing = max(0, metadata['question_count'] - generated)
                 warning = f'{len(rows)} von {metadata["question_count"]} Fragen gespeichert.'
                 if missing:

@@ -340,6 +340,20 @@ class User(Base):
 Index('ix_users_email_lower', func.lower(User.email), unique=True)
 
 
+class UserValidationCriteria(Base):
+    """Durable RAGAS quality-criterion instructions for one account."""
+
+    __tablename__ = 'user_validation_criteria'
+
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey('users.id', ondelete='CASCADE'), primary_key=True
+    )
+    criteria: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
 class Session(Base):
     """Opaque, DB-backed session token. Never store the raw token — only
     its sha256 hex digest, so a DB read alone can't be replayed as a cookie.
